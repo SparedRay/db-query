@@ -10,6 +10,8 @@ import { createEditorState, STARTER_DOC } from "./editor";
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
   id: string;
+  /** The connection this tab belongs to, for life. Tabs never migrate. */
+  connectionId: string;
   title: string;
   filePath: string | null;
   dialect: string;
@@ -43,8 +45,8 @@ export interface ScriptTab {
 
   busy: boolean;
   activeDb: string | null;
-  /** Server connection id, 0 until this tab first runs. */
-  connectionId: number;
+  /** MySQL's own connection id for this tab, 0 until it first runs. */
+  serverConnId: number;
   /** Set while the tab has never been saved, so the number can be reused. */
   untitledNumber: number | null;
 }
@@ -58,6 +60,14 @@ export interface TabHooks {
   onClosed: (tab: ScriptTab) => void;
   /** A tab was created; register it with the backend. */
   onCreated: (tab: ScriptTab) => void;
+  /**
+   * The connection's colour, so the tab strip carries it too.
+   *
+   * Only one connection's tabs are visible at a time, so without this the tab
+   * bar looks identical whichever server you are on — which is exactly the
+   * moment you want to be sure.
+   */
+  colourFor?: (connectionId: string) => string;
 }
 
 let idSeq = 0;
@@ -65,6 +75,10 @@ let idSeq = 0;
 export class TabManager {
   private tabs: ScriptTab[] = [];
   private activeId: string | null = null;
+  /** Only this connection's tabs are shown; the rest stay live in memory. */
+  private activeConnectionId: string | null = null;
+  /** Where each connection was left, so switching back returns you there. */
+  private lastActive = new Map<string, string>();
 
   constructor(
     private bar: HTMLElement,
@@ -81,8 +95,51 @@ export class TabManager {
     });
   }
 
+  /** Every tab across every connection. */
   all(): ScriptTab[] {
     return this.tabs;
+  }
+
+  /** Tabs belonging to the connection currently on screen. */
+  visible(): ScriptTab[] {
+    return this.tabs.filter((t) => t.connectionId === this.activeConnectionId);
+  }
+
+  forConnection(connectionId: string): ScriptTab[] {
+    return this.tabs.filter((t) => t.connectionId === connectionId);
+  }
+
+  activeConnection(): string | null {
+    return this.activeConnectionId;
+  }
+
+  /**
+   * Show a different connection's workspace.
+   *
+   * Returns to wherever that connection was last left, or opens an empty tab if
+   * it has never been used. The outgoing connection's tabs keep their editor
+   * state, their results and their running queries — switching is a change of
+   * view, not of session.
+   */
+  setActiveConnection(connectionId: string) {
+    if (connectionId === this.activeConnectionId) return;
+    this.stash();
+    if (this.activeId) {
+      const current = this.tabs.find((t) => t.id === this.activeId);
+      if (current) this.lastActive.set(current.connectionId, current.id);
+    }
+    this.activeConnectionId = connectionId;
+
+    const mine = this.visible();
+    if (mine.length === 0) {
+      this.activeId = null;
+      this.create({ connectionId });
+      return;
+    }
+    const remembered = this.lastActive.get(connectionId);
+    const target = mine.find((t) => t.id === remembered) ?? mine[0];
+    this.activeId = null; // force activate() past its early return
+    this.activate(target.id);
   }
 
   active(): ScriptTab | null {
@@ -95,9 +152,12 @@ export class TabManager {
     return !doc.eq(tab.baseline);
   }
 
+  /** Numbering is per connection: each workspace counts from Untitled-1. */
   private nextUntitledNumber(): number {
     const taken = new Set(
-      this.tabs.map((t) => t.untitledNumber).filter((n): n is number => n !== null),
+      this.visible()
+        .map((t) => t.untitledNumber)
+        .filter((n): n is number => n !== null),
     );
     let n = 1;
     while (taken.has(n)) n++;
@@ -105,6 +165,7 @@ export class TabManager {
   }
 
   create(opts?: {
+    connectionId?: string;
     contents?: string;
     title?: string;
     filePath?: string | null;
@@ -113,13 +174,19 @@ export class TabManager {
     lineEnding?: string;
     mtimeMs?: number | null;
   }): ScriptTab {
+    const connectionId = opts?.connectionId ?? this.activeConnectionId;
+    if (!connectionId) {
+      throw new Error("a tab must belong to a connection");
+    }
     const isUntitled = !opts?.filePath;
     const untitledNumber = isUntitled ? this.nextUntitledNumber() : null;
-    const contents = opts?.contents ?? (this.tabs.length === 0 ? STARTER_DOC : "");
+    const contents =
+      opts?.contents ?? (this.forConnection(connectionId).length === 0 ? STARTER_DOC : "");
     const state = createEditorState(contents);
 
     const tab: ScriptTab = {
       id: `t${++idSeq}`,
+      connectionId,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
       dialect: opts?.dialect ?? "mysql",
@@ -135,7 +202,7 @@ export class TabManager {
       scrollTop: 0,
       busy: false,
       activeDb: null,
-      connectionId: 0,
+      serverConnId: 0,
       untitledNumber,
     };
 
@@ -158,6 +225,7 @@ export class TabManager {
 
     this.stash();
     this.activeId = id;
+    this.lastActive.set(next.connectionId, next.id);
     this.view.setState(next.state);
     this.render();
     this.hooks.onActivate(next);
@@ -176,14 +244,16 @@ export class TabManager {
     this.tabs.splice(idx, 1);
     this.hooks.onClosed(tab);
 
-    if (this.tabs.length === 0) {
-      // Never zero tabs — an empty window has nowhere to type.
+    const siblings = this.forConnection(tab.connectionId);
+    if (siblings.length === 0) {
+      // Never zero tabs on a connection — its workspace would have nowhere to
+      // type, and switching to it would show an empty pane.
       this.activeId = null;
-      this.create();
+      this.create({ connectionId: tab.connectionId });
       return;
     }
     if (this.activeId === id) {
-      const neighbour = this.tabs[Math.min(idx, this.tabs.length - 1)];
+      const neighbour = siblings[Math.min(idx, siblings.length - 1)];
       this.activeId = null; // force activate() past its early return
       this.activate(neighbour.id);
     } else {
@@ -191,15 +261,32 @@ export class TabManager {
     }
   }
 
+  /**
+   * Remove a tab without prompting.
+   *
+   * Used when its connection has gone away: the unsaved-changes prompt already
+   * ran once at the connection level, and asking again per tab after the user
+   * confirmed would be nagging.
+   */
+  discard(id: string) {
+    const idx = this.tabs.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+    this.stash();
+    this.tabs.splice(idx, 1);
+    if (this.activeId === id) this.activeId = null;
+    this.render();
+  }
+
   cycle(delta: number) {
-    if (this.tabs.length < 2) return;
-    const i = this.tabs.findIndex((t) => t.id === this.activeId);
-    const next = (i + delta + this.tabs.length) % this.tabs.length;
-    this.activate(this.tabs[next].id);
+    const mine = this.visible();
+    if (mine.length < 2) return;
+    const i = mine.findIndex((t) => t.id === this.activeId);
+    const next = (i + delta + mine.length) % mine.length;
+    this.activate(mine[next].id);
   }
 
   activateIndex(n: number) {
-    const tab = this.tabs[n];
+    const tab = this.visible()[n];
     if (tab) this.activate(tab.id);
   }
 
@@ -246,7 +333,14 @@ export class TabManager {
   }
 
   render() {
-    const nodes = this.tabs.map((tab) => {
+    // Carry the active connection's colour into the strip, so the accent on the
+    // selected tab matches the rail icon you clicked to get here.
+    const colour = this.activeConnectionId
+      ? this.hooks.colourFor?.(this.activeConnectionId)
+      : undefined;
+    this.bar.style.setProperty("--conn-colour", colour ?? "var(--accent)");
+
+    const nodes = this.visible().map((tab) => {
       const el = document.createElement("div");
       el.className =
         "stab" +
@@ -288,12 +382,18 @@ export class TabManager {
       return el;
     });
 
-    const add = document.createElement("button");
-    add.className = "stab-add";
-    add.textContent = "+";
-    add.title = "New tab (Ctrl+T)";
-    add.onclick = () => this.create();
+    // No active connection means no workspace to add a tab to, so the button
+    // is absent rather than present-and-throwing.
+    const extras: HTMLElement[] = [];
+    if (this.activeConnectionId) {
+      const add = document.createElement("button");
+      add.className = "stab-add";
+      add.textContent = "+";
+      add.title = "New tab (Ctrl+T)";
+      add.onclick = () => this.create();
+      extras.push(add);
+    }
 
-    this.bar.replaceChildren(...nodes, add);
+    this.bar.replaceChildren(...nodes, ...extras);
   }
 }

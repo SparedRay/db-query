@@ -4,7 +4,9 @@ pub mod decode;
 pub mod exec;
 pub mod files;
 pub mod lint;
+pub mod profiles;
 pub mod schema;
+pub mod secrets;
 pub mod session;
 pub mod split;
 
@@ -14,25 +16,191 @@ use exec::ScriptResult;
 use files::{FileTypeSpec, OpenedFile, SaveOutcome, SavedFile};
 use lint::Diagnostic;
 use schema::{ColumnInfo, TableRef};
-use session::{AppState, ConnConfig, ConnInfo, TabStatus};
+use secrets::Secret;
+use session::{AppState, ConnInfo, ConnProfile, ConnectionStatus, ProfileView, TabStatus};
 use split::SplitOutput;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-#[tauri::command]
-async fn connect(state: State<'_, AppState>, config: ConnConfig) -> Result<ConnInfo, String> {
-    session::connect(&state, config).await
+// -------------------------------------------------------------- saved profiles
+
+/// The saved-connection list as the UI receives it. Separate from
+/// [`profiles::LoadOutcome`] on purpose: that one is what came off disk, this
+/// one adds the keychain-derived `rememberPassword` the frontend needs.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileListOutcome {
+    profiles: Vec<ProfileView>,
+    warning: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProfileOutcome {
+    profile: ProfileView,
+    /// Set when the profile saved but the password did not. The UI says so and
+    /// falls back to prompting, rather than pretending it worked.
+    password_warning: Option<String>,
+    password_stored: bool,
+}
+
+fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map_err(|e| format!("Cannot locate the config directory: {e}"))
 }
 
 #[tauri::command]
-async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    session::disconnect(&state).await
+fn list_profiles(app: tauri::AppHandle) -> Result<ProfileListOutcome, String> {
+    let dir = config_dir(&app)?;
+    let out = profiles::load(&dir);
+    // `remember_password` is derived from the keychain, never read from the
+    // file — so it reports the truth on whatever machine the file is opened on.
+    // It has to be attached *here*, on the wire type: without it the UI cannot
+    // tell a remembered connection from one that has never been given a
+    // password, and prompts for both on every launch.
+    Ok(ProfileListOutcome {
+        profiles: out
+            .profiles
+            .into_iter()
+            .map(|p| {
+                let stored = secrets::has_stored(&p.id);
+                ProfileView::new(p, stored)
+            })
+            .collect(),
+        warning: out.warning,
+    })
+}
+
+/// Save a profile, and optionally its password.
+///
+/// `password` is a three-way instruction, not a value to store blindly:
+///   * `Some(p)` with `p` non-empty — remember this password
+///   * `Some("")` — forget any stored password
+///   * `None` — leave whatever is stored alone (editing a profile without
+///     retyping the password)
+#[tauri::command]
+fn save_profile(
+    app: tauri::AppHandle,
+    profile: ConnProfile,
+    password: Option<String>,
+) -> Result<SaveProfileOutcome, String> {
+    let dir = config_dir(&app)?;
+    let mut existing = profiles::load(&dir).profiles;
+
+    profiles::upsert(&mut existing, profile.clone());
+    profiles::save_all(&dir, &existing)?;
+
+    let mut password_warning = None;
+    let mut password_stored = secrets::has_stored(&profile.id);
+
+    match password {
+        Some(p) if p.is_empty() => {
+            if let Err(e) = secrets::delete(&profile.id) {
+                password_warning = Some(e.to_string());
+            }
+            password_stored = false;
+        }
+        Some(p) => {
+            let secret = Secret::new(p);
+            match secrets::store(&profile.id, &secret) {
+                Ok(()) => password_stored = true,
+                Err(e) => {
+                    password_warning = Some(e.to_string());
+                    password_stored = false;
+                }
+            }
+        }
+        None => {}
+    }
+
+    Ok(SaveProfileOutcome {
+        profile: ProfileView::new(profile, password_stored),
+        password_warning,
+        password_stored,
+    })
+}
+
+/// Delete a profile **and its stored password**. An orphaned secret outlives
+/// the thing that explained what it was for, so a failure to remove it is
+/// reported rather than swallowed.
+#[tauri::command]
+fn delete_profile(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+    let dir = config_dir(&app)?;
+    let mut existing = profiles::load(&dir).profiles;
+    existing.retain(|p| p.id != id);
+    profiles::save_all(&dir, &existing)?;
+    Ok(secrets::delete(&id).err().map(|e| e.to_string()))
+}
+
+#[tauri::command]
+fn has_stored_password(id: String) -> Result<bool, String> {
+    Ok(secrets::has_stored(&id))
+}
+
+// ------------------------------------------------------------------ connections
+
+/// Open a connection. Ad hoc or from a saved profile — identical either way;
+/// persistence is Phase 2's concern, not this command's.
+#[tauri::command]
+async fn connect(
+    state: State<'_, AppState>,
+    profile: ConnProfile,
+    password: String,
+) -> Result<ConnInfo, String> {
+    session::connect(&state, profile, password).await
+}
+
+/// Connect using a profile's remembered password.
+///
+/// Errors when nothing is stored: the caller then prompts, which is also the
+/// path taken on a machine with no credential store at all.
+#[tauri::command]
+async fn connect_saved(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<ConnInfo, String> {
+    let dir = config_dir(&app)?;
+    let profile = profiles::load(&dir)
+        .profiles
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "No saved connection with that id.".to_string())?;
+
+    let secret = secrets::load(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No password is stored for this connection.".to_string())?;
+
+    session::connect(&state, profile, secret.expose().to_string()).await
+}
+
+#[tauri::command]
+async fn disconnect(state: State<'_, AppState>, connection_id: String) -> Result<(), String> {
+    session::disconnect(&state, &connection_id).await
+}
+
+#[tauri::command]
+async fn disconnect_all(state: State<'_, AppState>) -> Result<(), String> {
+    session::disconnect_all(&state).await
+}
+
+#[tauri::command]
+async fn list_connections(state: State<'_, AppState>) -> Result<Vec<ConnectionStatus>, String> {
+    Ok(session::list_connections(&state).await)
 }
 
 // ---------------------------------------------------------------- tab lifecycle
 
+/// Attach a tab to a connection. A tab is bound for life, so nothing it runs
+/// can reach a different server.
 #[tauri::command]
-async fn open_tab(state: State<'_, AppState>, tab_id: String) -> Result<(), String> {
-    session::open_tab(&state, &tab_id).await
+async fn open_tab(
+    state: State<'_, AppState>,
+    connection_id: String,
+    tab_id: String,
+) -> Result<(), String> {
+    session::open_tab(&state, &connection_id, &tab_id).await
 }
 
 #[tauri::command]
@@ -75,42 +243,53 @@ async fn cancel_query(state: State<'_, AppState>, tab_id: String) -> Result<(), 
 /// Advisory diagnostics. Never gates execution — the frontend renders these as
 /// squiggles and nothing more.
 ///
-/// Schema-aware checks resolve against THIS tab's active database, since each
-/// tab has its own `USE`. An empty schema means the cache is not warm yet,
-/// which suppresses those checks rather than reporting every table as unknown.
+/// The schema comes from the tab's own connection and its own active database.
+/// Resolving it through the tab rather than a caller-supplied connection id is
+/// deliberate: it is the one source that cannot name the wrong server.
 #[tauri::command]
 async fn lint_sql(
     state: State<'_, AppState>,
     tab_id: String,
     sql: String,
 ) -> Result<Vec<Diagnostic>, String> {
-    let db = match session::tab_if_open(&state, &tab_id).await {
-        Some(tab) => tab.current_db.lock().await.clone(),
-        None => None,
+    let Some(tab) = session::tab_if_open(&state, &tab_id).await else {
+        // An unattached tab still gets Tier 1 checks; only the schema-aware
+        // ones need a connection.
+        return Ok(lint::lint(&sql, &lint::LintSchema::new()));
     };
-    let schema = schema::lint_schema(&state, db.as_deref()).await;
+    let db = tab.current_db.lock().await.clone();
+    let schema = schema::lint_schema(&tab.server, db.as_deref()).await;
     Ok(lint::lint(&sql, &schema))
 }
 
-// ------------------------------------------------------- shared (meta connection)
+// ------------------------------------------------------- schema (meta connection)
 
 #[tauri::command]
-async fn list_tables(state: State<'_, AppState>, db: String) -> Result<Vec<TableRef>, String> {
-    schema::list_tables(&state, &db).await
+async fn list_tables(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+) -> Result<Vec<TableRef>, String> {
+    schema::list_tables(&state, &connection_id, &db).await
 }
 
 #[tauri::command]
 async fn list_columns(
     state: State<'_, AppState>,
+    connection_id: String,
     db: String,
     table: String,
 ) -> Result<Vec<ColumnInfo>, String> {
-    schema::list_columns(&state, &db, &table).await
+    schema::list_columns(&state, &connection_id, &db, &table).await
 }
 
 #[tauri::command]
-async fn refresh_schema(state: State<'_, AppState>, db: String) -> Result<(), String> {
-    schema::refresh(&state, &db).await
+async fn refresh_schema(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+) -> Result<(), String> {
+    schema::refresh(&state, &connection_id, &db).await
 }
 
 // ------------------------------------------------------------------- stateless
@@ -255,7 +434,14 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             connect,
+            connect_saved,
             disconnect,
+            disconnect_all,
+            list_connections,
+            list_profiles,
+            save_profile,
+            delete_profile,
+            has_stored_password,
             open_tab,
             close_tab,
             use_database,

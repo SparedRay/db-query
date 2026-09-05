@@ -244,14 +244,14 @@ pub async fn run_script(
     // per-statement tabs, because the terminator is no longer `;`.
     let auto_limit_enabled = auto_limit_enabled && !split_out.delimiter_detected;
 
-    // Clone the Arcs out and release both map locks before doing any I/O.
-    // Holding them across the query would serialize every tab through one
-    // mutex and undo the whole point of per-tab connections.
-    let server = session::server(state).await?;
-    let tab: Arc<TabSession> = session::tab(state, tab_id).await;
+    // Clone the Arc out and release the map lock before doing any I/O. Holding
+    // it across the query would serialize every tab through one mutex and undo
+    // the whole point of per-tab connections. The tab carries its own server,
+    // so there is no way to run this against the wrong one.
+    let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
 
     let mut guard = tab.exec.lock().await;
-    session::ensure_exec(&mut guard, &tab, &server).await?;
+    session::ensure_exec(&mut guard, &tab).await?;
     let conn = guard
         .as_mut()
         .expect("ensure_exec guarantees a live connection");

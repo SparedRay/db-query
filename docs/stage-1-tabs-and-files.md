@@ -11,7 +11,7 @@
 > `docs/`. If something here turns out to be wrong or is superseded, say so in
 > the *new* tracker and link back — do not rewrite history here.
 >
-> Superseded by: nothing yet. Stage 2 has not been opened.
+> Superseded by: [`stage-2-connections.md`](stage-2-connections.md)
 
 **Goal:** work on several SQL scripts at once, each backed by a real file if you
 want one, each with its own results, each able to run without waiting on the others.

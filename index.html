@@ -8,9 +8,12 @@
   </head>
   <body>
     <div id="app">
+      <nav id="rail" class="rail" title="Connections"></nav>
+
       <aside id="sidebar">
         <div class="pane-head">
-          <span id="conn-label">Not connected</span>
+          <span id="conn-dot" class="conn-dot" hidden></span>
+          <span id="conn-label">No connection</span>
           <button id="btn-connect" class="mini">Connect</button>
         </div>
         <div id="tree" class="tree"></div>
@@ -52,16 +55,32 @@
 
     <dialog id="conn-dialog">
       <form method="dialog" id="conn-form">
-        <h2>Connect to MySQL</h2>
-        <label>Host <input name="host" value="127.0.0.1" required /></label>
-        <label>Port <input name="port" type="number" value="3306" required /></label>
+        <h2 id="conn-title">New connection</h2>
+
+        <label>Name <input name="name" placeholder="local" /></label>
+        <div class="swatches" id="conn-colours"></div>
+
+        <div class="row">
+          <label class="grow">Host <input name="host" value="127.0.0.1" required /></label>
+          <label class="narrow">Port <input name="port" type="number" value="3306" required /></label>
+        </div>
         <label>User <input name="user" value="root" required /></label>
         <label>Password <input name="password" type="password" /></label>
         <label>Database <input name="database" placeholder="(optional)" /></label>
+
         <label class="toggle">
           <input type="checkbox" name="allowInvalidCerts" />
           Allow invalid certificates (self-signed / internal CA)
         </label>
+        <label class="toggle">
+          <input type="checkbox" name="save" id="conn-save" checked />
+          Save this connection
+        </label>
+        <label class="toggle" id="conn-remember-row">
+          <input type="checkbox" name="remember" id="conn-remember" />
+          Remember password in the system keychain
+        </label>
+
         <p id="conn-error" class="error" hidden></p>
         <menu>
           <button value="cancel" type="button" id="conn-cancel">Cancel</button>

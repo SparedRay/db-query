@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 use serde::Serialize;
 use sqlx::Row;
 
-use crate::session::{friendly, server, AppState};
+use crate::session::{friendly, server, AppState, ServerConn};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,14 +45,18 @@ pub struct DbSchema {
 }
 
 /// Drop any cached introspection for `db`, so the next expand refetches.
-pub async fn refresh(state: &AppState, db: &str) -> Result<(), String> {
-    let server = server(state).await?;
+pub async fn refresh(state: &AppState, connection_id: &str, db: &str) -> Result<(), String> {
+    let server = server(state, connection_id).await?;
     server.schema_cache.lock().await.remove(db);
     Ok(())
 }
 
-pub async fn list_tables(state: &AppState, db: &str) -> Result<Vec<TableRef>, String> {
-    let server = server(state).await?;
+pub async fn list_tables(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<TableRef>, String> {
+    let server = server(state, connection_id).await?;
 
     if let Some(cached) = server
         .schema_cache
@@ -103,10 +107,11 @@ pub async fn list_tables(state: &AppState, db: &str) -> Result<Vec<TableRef>, St
 
 pub async fn list_columns(
     state: &AppState,
+    connection_id: &str,
     db: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let server = server(state).await?;
+    let server = server(state, connection_id).await?;
 
     if let Some(cached) = server
         .schema_cache
@@ -166,11 +171,11 @@ pub async fn list_columns(
 /// The lint schema for a tab's active database: lowercased table -> columns.
 /// Empty means "cache not warm yet", which suppresses all schema-aware lint
 /// checks rather than reporting every table as unknown.
-pub async fn lint_schema(state: &AppState, db: Option<&str>) -> crate::lint::LintSchema {
+///
+/// Takes the server directly rather than a connection id, because `lint_sql`
+/// resolves it from the tab — which is the only source that cannot be wrong.
+pub async fn lint_schema(server: &ServerConn, db: Option<&str>) -> crate::lint::LintSchema {
     let Some(db) = db else {
-        return Default::default();
-    };
-    let Ok(server) = server(state).await else {
         return Default::default();
     };
     let cache = server.schema_cache.lock().await;

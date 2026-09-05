@@ -11,19 +11,25 @@
 use db_query_lib::decode::CellValue;
 use db_query_lib::exec::{self, Outcome, StatementKind};
 use db_query_lib::schema;
-use db_query_lib::session::{self, AppState, ConnConfig};
+use db_query_lib::session::{self, AppState, ConnProfile};
 use sqlx::Row;
 use std::sync::atomic::Ordering;
 
 /// Every test that does not care about tab identity uses this one.
 const T: &str = "t1";
+/// Likewise for connection identity.
+const C: &str = "c1";
 
-fn config() -> ConnConfig {
-    ConnConfig {
+const PASSWORD: &str = "devpassword";
+
+fn profile(id: &str) -> ConnProfile {
+    ConnProfile {
+        id: id.into(),
+        name: id.into(),
+        colour: "#3b82f6".into(),
         host: "127.0.0.1".into(),
         port: 3306,
         user: "root".into(),
-        password: "devpassword".into(),
         database: Some("poc".into()),
         // The container ships a self-signed cert, so strict verification would
         // (correctly) refuse it. See `refuses_a_self_signed_cert_by_default`.
@@ -31,18 +37,33 @@ fn config() -> ConnConfig {
     }
 }
 
+fn config() -> ConnProfile {
+    profile(C)
+}
+
+/// Attach a tab to the shared test connection.
+///
+/// Tabs no longer auto-create: a tab needs a connection, and guessing which one
+/// is exactly the ambient-state mistake Stage 2 exists to avoid. Every tab is
+/// bound explicitly, here as in the app.
+async fn attach(state: &AppState, tab: &str) {
+    session::open_tab(state, C, tab).await.unwrap();
+}
+
 async fn connected() -> AppState {
     let state = AppState::default();
-    session::connect(&state, config())
+    session::connect(&state, config(), PASSWORD.into())
         .await
         .expect("connect failed — is the fixture container up?");
+    // Tabs are bound to a connection now, so attach the shared test tab.
+    session::open_tab(&state, C, T).await.unwrap();
     state
 }
 
 /// Number of connections this client currently holds on the server. Used to
 /// prove tab connections are lazy and are actually released on close.
 async fn server_conn_count(state: &AppState) -> i64 {
-    let server = session::server(state).await.unwrap();
+    let server = session::server(state, C).await.unwrap();
     let mut meta = server.meta.lock().await;
     sqlx::query(
         "SELECT COUNT(*) AS n FROM information_schema.processlist \
@@ -73,7 +94,9 @@ fn as_json(v: &CellValue) -> serde_json::Value {
 #[ignore]
 async fn m1_connects_and_lists_databases() {
     let state = AppState::default();
-    let info = session::connect(&state, config()).await.unwrap();
+    let info = session::connect(&state, config(), PASSWORD.into())
+        .await
+        .unwrap();
     assert!(
         info.server_version.starts_with('8'),
         "got {}",
@@ -81,22 +104,28 @@ async fn m1_connects_and_lists_databases() {
     );
     assert!(info.databases.iter().any(|d| d == "poc"));
 
-    // Connecting must NOT open a tab connection: they are lazy, so a window
-    // full of idle tabs costs nothing on the server.
+    // An unattached tab has no session at all.
+    let st = session::tab_status(&state, T).await.unwrap();
+    assert!(!st.connected, "an unattached tab reported a live session");
+
+    // And attaching one must NOT open a server connection: they are lazy, so a
+    // window full of idle tabs costs nothing until something actually runs.
+    session::open_tab(&state, C, T).await.unwrap();
     let st = session::tab_status(&state, T).await.unwrap();
     assert!(st.connected);
     assert_eq!(st.connection_id, 0, "a tab connection was opened eagerly");
 
-    session::disconnect(&state).await.unwrap();
+    session::disconnect(&state, C).await.unwrap();
 }
 
 #[tokio::test]
 #[ignore]
 async fn m1_wrong_password_is_readable_and_does_not_panic() {
     let state = AppState::default();
-    let mut bad = config();
-    bad.password = "definitely-wrong".into();
-    let err = session::connect(&state, bad).await.unwrap_err();
+    let bad = config();
+    let err = session::connect(&state, bad, "definitely-wrong".into())
+        .await
+        .unwrap_err();
     assert!(err.contains("Access denied"), "unfriendly error: {err}");
 }
 
@@ -108,7 +137,9 @@ async fn refuses_a_self_signed_cert_by_default() {
     let state = AppState::default();
     let mut strict = config();
     strict.allow_invalid_certs = false;
-    let err = session::connect(&state, strict).await.unwrap_err();
+    let err = session::connect(&state, strict, PASSWORD.into())
+        .await
+        .unwrap_err();
     assert!(
         err.to_lowercase().contains("tls") || err.to_lowercase().contains("certificate"),
         "expected a TLS refusal, got: {err}"
@@ -271,7 +302,7 @@ async fn m2b_show_and_describe_return_rows_not_affected_counts() {
 #[ignore]
 async fn m3_lists_tables_views_and_columns_and_caches_them() {
     let state = connected().await;
-    let tables = schema::list_tables(&state, "poc").await.unwrap();
+    let tables = schema::list_tables(&state, C, "poc").await.unwrap();
     assert!(tables
         .iter()
         .any(|t| t.name == "users" && t.kind == "BASE TABLE"));
@@ -279,7 +310,9 @@ async fn m3_lists_tables_views_and_columns_and_caches_them() {
         .iter()
         .any(|t| t.name == "user_totals" && t.kind == "VIEW"));
 
-    let cols = schema::list_columns(&state, "poc", "users").await.unwrap();
+    let cols = schema::list_columns(&state, C, "poc", "users")
+        .await
+        .unwrap();
     assert_eq!(cols.len(), 5);
     let email = cols.iter().find(|c| c.name == "email").unwrap();
     assert!(!email.nullable);
@@ -287,14 +320,14 @@ async fn m3_lists_tables_views_and_columns_and_caches_them() {
 
     // The cache's job is to keep information_schema round trips flat on repeat
     // reads. Assert on the counter rather than inferring from timing.
-    let server = session::server(&state).await.unwrap();
+    let server = session::server(&state, C).await.unwrap();
     let before = server.introspection_count.load(Ordering::SeqCst);
     assert_eq!(
-        schema::list_tables(&state, "poc").await.unwrap().len(),
+        schema::list_tables(&state, C, "poc").await.unwrap().len(),
         tables.len()
     );
     assert_eq!(
-        schema::list_columns(&state, "poc", "users")
+        schema::list_columns(&state, C, "poc", "users")
             .await
             .unwrap()
             .len(),
@@ -473,9 +506,11 @@ async fn lint_uses_the_live_schema_cache() {
     let state = connected().await;
     session::use_database(&state, T, "poc").await.unwrap();
     // Warm the cache the way the sidebar would.
-    schema::list_columns(&state, "poc", "users").await.unwrap();
+    schema::list_columns(&state, C, "poc", "users")
+        .await
+        .unwrap();
 
-    let cached = schema::lint_schema(&state, Some("poc")).await;
+    let cached = schema::lint_schema(&session::server(&state, C).await.unwrap(), Some("poc")).await;
 
     let good = db_query_lib::lint::lint("SELECT email FROM users", &cached);
     assert!(good.is_empty(), "real column flagged: {good:?}");
@@ -495,6 +530,8 @@ async fn lint_uses_the_live_schema_cache() {
 async fn n5_a_slow_query_in_one_tab_does_not_block_another() {
     use std::time::{Duration, Instant};
     let state = std::sync::Arc::new(connected().await);
+    attach(&state, "slow-tab").await;
+    attach(&state, "quick-tab").await;
 
     let slow = state.clone();
     let handle = tokio::spawn(async move {
@@ -528,6 +565,8 @@ async fn n5_a_slow_query_in_one_tab_does_not_block_another() {
 async fn cancel_targets_only_the_requesting_tab() {
     use std::time::Duration;
     let state = std::sync::Arc::new(connected().await);
+    attach(&state, "tab-a").await;
+    attach(&state, "tab-b").await;
 
     let victim = state.clone();
     let survivor = state.clone();
@@ -559,7 +598,7 @@ async fn tab_connections_are_lazy_and_released_on_close() {
     let baseline = server_conn_count(&state).await; // killer only
 
     // Registering a tab must not open anything.
-    session::open_tab(&state, "lazy").await.unwrap();
+    attach(&state, "lazy").await;
     assert_eq!(
         server_conn_count(&state).await,
         baseline,
@@ -573,6 +612,7 @@ async fn tab_connections_are_lazy_and_released_on_close() {
     assert_eq!(server_conn_count(&state).await, baseline + 1);
 
     // A second tab opens exactly one more.
+    attach(&state, "lazy2").await;
     exec::run_script(&state, "lazy2", "SELECT 1", true, None)
         .await
         .unwrap();
@@ -593,6 +633,8 @@ async fn tab_connections_are_lazy_and_released_on_close() {
 #[ignore]
 async fn each_tab_has_its_own_active_database() {
     let state = connected().await;
+    attach(&state, "tab-a").await;
+    attach(&state, "tab-b").await;
     session::use_database(&state, "tab-a", "mysql")
         .await
         .unwrap();
@@ -625,6 +667,8 @@ async fn each_tab_has_its_own_active_database() {
 #[ignore]
 async fn a_use_in_one_tabs_script_does_not_move_another_tab() {
     let state = connected().await;
+    attach(&state, "tab-a").await;
+    attach(&state, "tab-b").await;
     session::use_database(&state, "tab-a", "poc").await.unwrap();
     session::use_database(&state, "tab-b", "poc").await.unwrap();
 
@@ -646,6 +690,7 @@ async fn a_use_in_one_tabs_script_does_not_move_another_tab() {
 #[ignore]
 async fn a_reaped_tab_connection_is_reopened_transparently() {
     let state = connected().await;
+    attach(&state, "reaped").await;
     session::use_database(&state, "reaped", "poc")
         .await
         .unwrap();
@@ -661,7 +706,7 @@ async fn a_reaped_tab_connection_is_reopened_transparently() {
 
     // KILL (not KILL QUERY) drops the whole connection, exactly as wait_timeout would.
     {
-        let server = session::server(&state).await.unwrap();
+        let server = session::server(&state, C).await.unwrap();
         let mut meta = server.meta.lock().await;
         sqlx::query(sqlx::AssertSqlSafe(format!("KILL {old_id}")))
             .execute(&mut *meta)
@@ -692,6 +737,8 @@ async fn a_reaped_tab_connection_is_reopened_transparently() {
 #[ignore]
 async fn disconnect_releases_every_tab_connection() {
     let state = connected().await;
+    attach(&state, "d1").await;
+    attach(&state, "d2").await;
     let baseline = server_conn_count(&state).await;
     exec::run_script(&state, "d1", "SELECT 1", true, None)
         .await
@@ -701,7 +748,7 @@ async fn disconnect_releases_every_tab_connection() {
         .unwrap();
     assert_eq!(server_conn_count(&state).await, baseline + 2);
 
-    session::disconnect(&state).await.unwrap();
+    session::disconnect(&state, C).await.unwrap();
 
     // Reconnect on a fresh state to count what the old one left behind.
     let probe = connected().await;
@@ -710,7 +757,7 @@ async fn disconnect_releases_every_tab_connection() {
         baseline,
         "tab connections outlived disconnect"
     );
-    session::disconnect(&probe).await.ok();
+    session::disconnect(&probe, C).await.ok();
 }
 
 // ================================================================ Stage 1 / Phase 7
@@ -775,4 +822,283 @@ async fn a_short_script_is_untouched_by_the_ceiling() {
         }
         other => panic!("expected rows, got {other:?}"),
     }
+}
+
+// ================================================================ Stage 2 / Phase 1
+// Several live connections at once. These justify the connection registry.
+
+const C2: &str = "c2";
+
+/// Open a second connection to the same server, with its own tab.
+async fn connect_second(state: &AppState, tab: &str) {
+    session::connect(state, profile(C2), PASSWORD.into())
+        .await
+        .unwrap();
+    session::open_tab(state, C2, tab).await.unwrap();
+}
+
+/// **C4.** Two connections, two tabs, two independent sessions. `SELECT
+/// DATABASE()` asks the server, so this is not just our own bookkeeping.
+#[tokio::test]
+#[ignore]
+async fn two_connections_keep_separate_sessions() {
+    let state = connected().await;
+    connect_second(&state, "c2-tab").await;
+
+    session::use_database(&state, T, "poc").await.unwrap();
+    session::use_database(&state, "c2-tab", "mysql")
+        .await
+        .unwrap();
+
+    let a = exec::run_script(&state, T, "SELECT DATABASE() AS d", true, None)
+        .await
+        .unwrap();
+    let b = exec::run_script(&state, "c2-tab", "SELECT DATABASE() AS d", true, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        as_json(&rows_of(&a.statements[0].outcome)[0][0]),
+        serde_json::json!("poc")
+    );
+    assert_eq!(
+        as_json(&rows_of(&b.statements[0].outcome)[0][0]),
+        serde_json::json!("mysql")
+    );
+}
+
+/// **C5.** A slow query on one connection must not delay another. Stage 1
+/// proved this across tabs; this proves it across servers.
+#[tokio::test]
+#[ignore]
+async fn a_slow_query_on_one_connection_does_not_block_another() {
+    use std::time::{Duration, Instant};
+    let state = std::sync::Arc::new(connected().await);
+    connect_second(&state, "c2-tab").await;
+
+    let slow = state.clone();
+    let handle =
+        tokio::spawn(
+            async move { exec::run_script(&slow, T, "SELECT SLEEP(5)", true, None).await },
+        );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let started = Instant::now();
+    exec::run_script(&state, "c2-tab", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "second connection waited {elapsed:?} — connections are serialized"
+    );
+    handle.await.unwrap().unwrap();
+}
+
+/// Disconnecting one connection must leave the other completely untouched —
+/// its tabs, its sessions, its schema cache.
+#[tokio::test]
+#[ignore]
+async fn disconnecting_one_connection_leaves_the_other_working() {
+    let state = connected().await;
+    connect_second(&state, "c2-tab").await;
+
+    // Warm both so there is real state to lose.
+    exec::run_script(&state, T, "SELECT 1", true, None)
+        .await
+        .unwrap();
+    exec::run_script(&state, "c2-tab", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    schema::list_tables(&state, C2, "poc").await.unwrap();
+
+    session::disconnect(&state, C).await.unwrap();
+
+    // The closed connection is gone, and so are its tabs.
+    assert!(session::server(&state, C).await.is_err());
+    assert!(
+        exec::run_script(&state, T, "SELECT 1", true, None)
+            .await
+            .is_err(),
+        "a tab of a disconnected connection still ran"
+    );
+
+    // The survivor is entirely unaffected.
+    let r = exec::run_script(&state, "c2-tab", "SELECT 2 AS two", true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        as_json(&rows_of(&r.statements[0].outcome)[0][0]),
+        serde_json::json!(2)
+    );
+    assert!(!schema::list_tables(&state, C2, "poc")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// Each connection has its own schema cache, so warming one must not make the
+/// other look warm — that would silently disable the other's lint checks.
+#[tokio::test]
+#[ignore]
+async fn schema_caches_are_per_connection() {
+    let state = connected().await;
+    connect_second(&state, "c2-tab").await;
+
+    schema::list_columns(&state, C, "poc", "users")
+        .await
+        .unwrap();
+
+    let a = session::server(&state, C).await.unwrap();
+    let b = session::server(&state, C2).await.unwrap();
+    assert!(!schema::lint_schema(&a, Some("poc")).await.is_empty());
+    assert!(
+        schema::lint_schema(&b, Some("poc")).await.is_empty(),
+        "warming one connection's cache warmed another's"
+    );
+}
+
+/// `list_connections` is what the rail will render, so its counts must be real.
+#[tokio::test]
+#[ignore]
+async fn list_connections_reports_live_state_and_tab_counts() {
+    let state = connected().await;
+    connect_second(&state, "c2-tab").await;
+    session::open_tab(&state, C, "extra").await.unwrap();
+
+    let mut list = session::list_connections(&state).await;
+    list.sort_by(|x, y| x.id.cmp(&y.id));
+    assert_eq!(list.len(), 2);
+
+    assert_eq!(list[0].id, C);
+    assert!(list[0].connected);
+    assert!(list[0]
+        .server_version
+        .as_deref()
+        .unwrap_or("")
+        .starts_with('8'));
+    assert_eq!(list[0].open_tabs, 2, "T and extra");
+    assert_eq!(list[0].running_tabs, 0);
+    assert_eq!(list[1].id, C2);
+    assert_eq!(list[1].open_tabs, 1);
+
+    session::disconnect(&state, C).await.unwrap();
+    let list = session::list_connections(&state).await;
+    assert_eq!(
+        list.len(),
+        1,
+        "a disconnected connection is still listed as live"
+    );
+    assert_eq!(list[0].id, C2);
+}
+
+/// Cancelling a tab must not reach across connections.
+#[tokio::test]
+#[ignore]
+async fn cancel_does_not_reach_across_connections() {
+    use std::time::Duration;
+    let state = std::sync::Arc::new(connected().await);
+    connect_second(&state, "c2-tab").await;
+
+    let a = state.clone();
+    let b = state.clone();
+    let ha =
+        tokio::spawn(async move { exec::run_script(&a, T, "SELECT SLEEP(30)", true, None).await });
+    let hb =
+        tokio::spawn(
+            async move { exec::run_script(&b, "c2-tab", "SELECT SLEEP(3)", true, None).await },
+        );
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    session::cancel_query(&state, T).await.unwrap();
+
+    let ra = ha.await.unwrap().unwrap();
+    let rb = hb.await.unwrap().unwrap();
+    assert!(ra.cancelled, "the targeted tab was not cancelled");
+    assert!(
+        !rb.cancelled,
+        "a tab on another connection was cancelled too"
+    );
+}
+
+// ================================================================ Stage 2 / Phase 2
+// Secret-leakage audit. The risk that matters most is a password ending up
+// somewhere ordinary — an error string, a log line, a Debug print — because it
+// is silent and permanent once it reaches a backup.
+
+/// A password distinctive enough that finding it in any output is unambiguous.
+const CANARY: &str = "zzCANARYzz-9f3a-do-not-leak";
+
+#[tokio::test]
+#[ignore]
+async fn a_failed_connection_never_echoes_the_password() {
+    let state = AppState::default();
+    let err = session::connect(&state, profile("leak-test"), CANARY.into())
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains(CANARY),
+        "the password appeared in a connection error: {err}"
+    );
+    // And it is still a useful message, not just a redacted one.
+    assert!(err.contains("Access denied"), "unhelpful error: {err}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_failed_connection_to_a_dead_host_never_echoes_the_password() {
+    let state = AppState::default();
+    let mut p = profile("leak-host");
+    p.host = "127.0.0.1".into();
+    p.port = 1; // nothing listens here
+    let err = session::connect(&state, p, CANARY.into())
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains(CANARY),
+        "the password appeared in a connect/IO error: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_tls_refusal_never_echoes_the_password() {
+    // Strict verification against the container's self-signed cert fails; the
+    // resulting TLS error must not carry the credential either.
+    let state = AppState::default();
+    let mut p = profile("leak-tls");
+    p.allow_invalid_certs = false;
+    let err = session::connect(&state, p, CANARY.into())
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains(CANARY),
+        "the password appeared in a TLS error: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_query_error_never_echoes_the_password() {
+    let state = connected().await;
+    let r = exec::run_script(&state, T, "SELECT * FROM no_such_table", true, None)
+        .await
+        .unwrap();
+    let msg = format!("{:?}", r.statements[0].outcome);
+    assert!(
+        !msg.contains(PASSWORD),
+        "the password leaked into a query error: {msg}"
+    );
+}
+
+/// The profile is the shape that gets written to disk, so its serialised form
+/// is the last line of defence for the config file.
+#[tokio::test]
+#[ignore]
+async fn a_serialised_profile_carries_no_secret() {
+    let json = serde_json::to_string(&profile("ser")).unwrap();
+    assert!(!json.to_lowercase().contains("password"), "{json}");
+    assert!(!json.contains(PASSWORD), "{json}");
+    assert!(!json.contains(CANARY), "{json}");
 }

@@ -1,19 +1,70 @@
 // Typed mirror of the Rust command surface. Keep in sync with src-tauri/src.
 import { invoke } from "@tauri-apps/api/core";
 
-export interface ConnConfig {
+/**
+ * Everything about a connection except its secret. **This is exactly what is
+ * written to the config file.**
+ *
+ * Deliberately holds no password, so keeping it secret-free by construction
+ * means the config file cannot leak one even by accident. It also holds nothing
+ * derived — see `ProfileView` for why that separation matters.
+ */
+export interface ConnProfile {
+  id: string;
+  name: string;
+  /** Identification, not decoration — answers "which server am I on". */
+  colour: string;
   host: string;
   port: number;
   user: string;
-  password: string;
   database: string | null;
   allowInvalidCerts: boolean;
 }
 
+/**
+ * A profile as it comes *back* from the backend: the stored fields plus facts
+ * derived at runtime.
+ *
+ * Mirrors Rust's `ProfileView`. The two shapes are kept apart because they had
+ * opposite needs and once shared a type: `rememberPassword` had to stay out of
+ * the config file and had to reach the UI, and the attribute that achieved the
+ * first silently defeated the second. Every remembered password then looked
+ * forgotten on the next launch.
+ */
+export type ProfileView = ConnProfile & {
+  /** Derived from the keychain, never persisted — true when a password is stored. */
+  rememberPassword: boolean;
+};
+
 export interface ConnInfo {
+  id: string;
   serverVersion: string;
   databases: string[];
   currentDatabase: string | null;
+}
+
+export interface ProfileList {
+  profiles: ProfileView[];
+  /** Set when the config file could not be read and was moved aside. */
+  warning: string | null;
+}
+
+export interface SaveProfileOutcome {
+  profile: ProfileView;
+  /** Profile saved but the password did not — show it and fall back to prompting. */
+  passwordWarning: string | null;
+  passwordStored: boolean;
+}
+
+export interface ConnectionStatus {
+  id: string;
+  name: string;
+  colour: string;
+  hostLabel: string;
+  connected: boolean;
+  serverVersion: string | null;
+  openTabs: number;
+  runningTabs: number;
 }
 
 /** Per-tab status. Each tab has its own connection and active database. */
@@ -107,12 +158,32 @@ export interface StatementSpan { start: number; end: number; }
 export interface SplitOutput { statements: StatementSpan[]; delimiterDetected: boolean; }
 
 export const api = {
-  // --- server-wide
-  connect: (config: ConnConfig) => invoke<ConnInfo>("connect", { config }),
-  disconnect: () => invoke<void>("disconnect"),
+  // --- saved profiles. No password ever comes back out of these.
+  listProfiles: () => invoke<ProfileList>("list_profiles"),
+  /**
+   * `password` is a three-way instruction, not just a value:
+   *   a string     — remember this password
+   *   ""           — forget any stored password
+   *   null         — leave whatever is stored alone
+   */
+  saveProfile: (profile: ConnProfile, password: string | null) =>
+    invoke<SaveProfileOutcome>("save_profile", { profile, password }),
+  /** Returns a warning if the keychain entry could not be removed. */
+  deleteProfile: (id: string) => invoke<string | null>("delete_profile", { id }),
+  hasStoredPassword: (id: string) => invoke<boolean>("has_stored_password", { id }),
 
-  // --- tab lifecycle
-  openTab: (tabId: string) => invoke<void>("open_tab", { tabId }),
+  // --- connections. Several can be live at once; every call names one.
+  connect: (profile: ConnProfile, password: string) =>
+    invoke<ConnInfo>("connect", { profile, password }),
+  /** Connect using a profile's remembered password; errors if none is stored. */
+  connectSaved: (id: string) => invoke<ConnInfo>("connect_saved", { id }),
+  disconnect: (connectionId: string) => invoke<void>("disconnect", { connectionId }),
+  disconnectAll: () => invoke<void>("disconnect_all"),
+  listConnections: () => invoke<ConnectionStatus[]>("list_connections"),
+
+  // --- tab lifecycle. A tab is bound to one connection for life.
+  openTab: (connectionId: string, tabId: string) =>
+    invoke<void>("open_tab", { connectionId, tabId }),
   closeTab: (tabId: string) => invoke<void>("close_tab", { tabId }),
 
   // --- per tab: each has its own connection, active database and cancel
@@ -123,10 +194,13 @@ export const api = {
   cancelQuery: (tabId: string) => invoke<void>("cancel_query", { tabId }),
   lintSql: (tabId: string, sql: string) => invoke<Diagnostic[]>("lint_sql", { tabId, sql }),
 
-  // --- shared schema cache, served over the meta connection
-  listTables: (db: string) => invoke<TableRef[]>("list_tables", { db }),
-  listColumns: (db: string, table: string) => invoke<ColumnInfo[]>("list_columns", { db, table }),
-  refreshSchema: (db: string) => invoke<void>("refresh_schema", { db }),
+  // --- schema cache, per connection, served over that connection's meta link
+  listTables: (connectionId: string, db: string) =>
+    invoke<TableRef[]>("list_tables", { connectionId, db }),
+  listColumns: (connectionId: string, db: string, table: string) =>
+    invoke<ColumnInfo[]>("list_columns", { connectionId, db, table }),
+  refreshSchema: (connectionId: string, db: string) =>
+    invoke<void>("refresh_schema", { connectionId, db }),
 
   // --- files
   supportedFileTypes: () => invoke<FileTypeSpec[]>("supported_file_types"),

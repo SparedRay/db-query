@@ -226,7 +226,7 @@ pub fn save_file(
 /// a half-written script where the original was. The temp file must live in the
 /// same directory or the rename could cross a filesystem boundary and stop
 /// being atomic.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp: PathBuf = dir.join(format!(
         ".{}.dbq-tmp",

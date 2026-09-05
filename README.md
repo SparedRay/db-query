@@ -40,30 +40,45 @@ cargo --version && pkg-config --modversion webkit2gtk-4.1
 ## Develop
 
 ```bash
-npm install
-npm run tauri dev
+mise run dev
 ```
 
-## Test
+`mise run` applies mise's environment itself, so it works whether or not mise is
+activated in your shell. Plain `npm run tauri dev` needs `cargo` on `PATH` —
+see below.
 
-The statement splitter is the one component with real unit tests — it gates
-auto-LIMIT, result tabs and statement-under-cursor, so a mis-split silently
-runs the wrong SQL.
+### Getting `cargo` on your PATH
+
+mise manages the Rust toolchain, but installing it does not put it on `PATH`;
+that needs activation. Without it you get:
+
+```
+failed to run 'cargo metadata' ... No such file or directory (os error 2)
+```
+
+For an interactive shell (bash):
 
 ```bash
-cd src-tauri && cargo test    # 40 offline unit tests
-npx tsc --noEmit              # frontend type-check
+echo 'eval "$(mise activate bash)"' >> ~/.bashrc && exec bash
 ```
 
-Against a live server (see `dev/README.md` to bring one up) — these are
-`#[ignore]`d so the offline suite stays runnable anywhere:
+IDEs and GUI-launched processes usually do not read `~/.bashrc`, so also put
+mise's shims on `PATH` for those:
 
 ```bash
-cd src-tauri && cargo test --test live_mysql -- --ignored --test-threads=1
+echo 'export PATH="$HOME/.local/share/mise/shims:$PATH"' >> ~/.profile
 ```
 
-Single-threaded on purpose: the tests share one exec connection, and MySQL
-session state (`USE`, temp tables) is per-connection.
+## Tasks
+
+```bash
+mise run dev        # run the app with hot reload
+mise run check      # build, clippy, rustfmt --check, tsc
+mise run test       # offline tests: no database or keychain needed
+mise run db-up      # start and seed the MySQL 8 fixture container
+mise run test-live  # tests needing the fixture and a keychain
+mise run db-down    # tear the fixture down
+```
 
 ## Targets
 

@@ -7,3 +7,45 @@
 node = "24"
 # mise drives rustup under the hood, so components work as normal.
 rust = { version = "stable", components = "rustfmt,clippy" }
+
+# Tasks run with mise's environment applied, so they work whether or not mise is
+# activated in the calling shell. `mise run dev` is the reliable entry point.
+[tasks.dev]
+description = "Run the app (Tauri dev, hot reload)"
+run = "npm run tauri dev"
+
+[tasks.check]
+description = "Build, lint, format and typecheck everything"
+run = [
+  "cargo build --manifest-path src-tauri/Cargo.toml",
+  "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets",
+  "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
+  "npx tsc --noEmit",
+]
+
+[tasks.test]
+description = "Offline tests (no database or keychain needed)"
+run = [
+  "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+  "cargo test --manifest-path src-tauri/Cargo.toml --test sample_files",
+]
+
+[tasks.test-live]
+description = "Tests needing the MySQL fixture (see dev/README.md) and a keychain"
+run = [
+  "cargo test --manifest-path src-tauri/Cargo.toml --test live_mysql -- --ignored --test-threads=1",
+  "cargo test --manifest-path src-tauri/Cargo.toml --test keychain -- --ignored",
+]
+
+[tasks.db-up]
+description = "Start the MySQL 8 fixture container and seed it"
+run = """
+podman run -d --name db-query-mysql -e MYSQL_ROOT_PASSWORD=devpassword -p 3306:3306 docker.io/library/mysql:8 || podman start db-query-mysql
+until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do sleep 2; done
+podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/seed.sql
+echo "fixture ready on 127.0.0.1:3306 (root / devpassword, database poc)"
+"""
+
+[tasks.db-down]
+description = "Stop and remove the MySQL fixture container"
+run = "podman stop db-query-mysql && podman rm db-query-mysql"

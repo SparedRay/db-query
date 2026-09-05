@@ -1,9 +1,12 @@
 import type { EditorView } from "@codemirror/view";
 import type { SQLNamespace } from "@codemirror/lang-sql";
 
-import { api, type ConnConfig, type TableRef } from "./api";
+import { api, type ConnProfile, type TableRef } from "./api";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
+import {
+  ConnectionManager, COLOURS, newConnectionId, type ConnectionEntry,
+} from "./connections";
 import { createFileUx, type FileUx } from "./files";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -17,6 +20,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const els = {
   sidebar: $("sidebar"), main: $("main"), tree: $("tree"),
   connLabel: $<HTMLSpanElement>("conn-label"),
+  connDot: $<HTMLSpanElement>("conn-dot"),
   btnConnect: $<HTMLButtonElement>("btn-connect"),
   btnRun: $<HTMLButtonElement>("btn-run"),
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
@@ -25,6 +29,12 @@ const els = {
   lintOn: $<HTMLInputElement>("chk-lint"),
   timeout: $<HTMLInputElement>("num-timeout"),
   fileNote: $<HTMLSpanElement>("file-note"),
+  rail: $("rail"),
+  connTitle: $<HTMLHeadingElement>("conn-title"),
+  connColours: $("conn-colours"),
+  connSave: $<HTMLInputElement>("conn-save"),
+  connRemember: $<HTMLInputElement>("conn-remember"),
+  connRememberRow: $<HTMLLabelElement>("conn-remember-row"),
   dialog: $<HTMLDialogElement>("conn-dialog"),
   form: $<HTMLFormElement>("conn-form"),
   connError: $<HTMLParagraphElement>("conn-error"),
@@ -38,6 +48,11 @@ let view!: EditorView;
 let tabs!: TabManager;
 let files!: FileUx;
 
+let conns!: ConnectionManager;
+
+/** Each connection keeps its own schema tree element, so expansion survives. */
+const trees = new Map<string, HTMLElement>();
+
 /** The tab every command in this module acts on. */
 const activeTab = (): ScriptTab => {
   const t = tabs.active();
@@ -47,7 +62,6 @@ const activeTab = (): ScriptTab => {
 
 let connected = false;
 let activeDb: string | null = null;
-let hostLabel: string | null = null;
 /** Accumulated schema for CodeMirror autocomplete, grown as the tree loads. */
 const schemaMap: SQLNamespace = {};
 
@@ -189,23 +203,47 @@ function syncBusy() {
  * one connection per tab that has run, plus a shared killer and meta.
  */
 function syncConnLabel() {
-  if (!connected) {
-    els.connLabel.textContent = "Not connected";
+  const active = conns?.active();
+  if (!active) {
+    els.connLabel.textContent = "No connection";
     els.connLabel.title = "";
+    els.connDot.hidden = true;
     return;
   }
-  const all = tabs?.all() ?? [];
-  const running = all.filter((t) => t.busy).length;
-  const withConn = all.filter((t) => t.connectionId > 0).length;
 
-  const db = tabs?.active()?.activeDb ?? activeDb;
-  const parts = [hostLabel ?? ""];
+  // The colour dot is the cheap half of environment safety: it answers "which
+  // server am I on" without reading anything.
+  els.connDot.hidden = false;
+  els.connDot.style.background = active.profile.colour;
+
+  if (!active.connected) {
+    els.connLabel.textContent = `${active.profile.name} — not connected`;
+    els.connLabel.title = `${active.profile.user}@${active.profile.host}:${active.profile.port}`;
+    return;
+  }
+
+  const mine = tabs?.forConnection(active.profile.id) ?? [];
+  const running = mine.filter((t) => t.busy).length;
+  const db = tabs?.active()?.activeDb ?? null;
+
+  const parts = [active.profile.name];
   if (db) parts.push(db);
   if (running > 0) parts.push(`${running} running`);
   els.connLabel.textContent = parts.join(" · ");
+
+  // The arithmetic across every live connection, because tabs are not free on
+  // the server and the total is what a DBA would ask about.
+  const live = conns.all().filter((c) => c.connected);
+  const perConn = live.map((c) => {
+    const t = tabs?.forConnection(c.profile.id) ?? [];
+    return { name: c.profile.name, tabs: t.filter((x) => x.serverConnId > 0).length };
+  });
+  const total = perConn.reduce((n, c) => n + c.tabs + 2, 0);
   els.connLabel.title =
-    `${withConn} tab connection${withConn === 1 ? "" : "s"} + 2 shared ` +
-    `(killer, meta) = ${withConn + 2} total.\n` +
+    `${active.profile.user}@${active.profile.host}:${active.profile.port}\n` +
+    `MySQL ${active.serverVersion ?? "?"}\n\n` +
+    perConn.map((c) => `${c.name}: ${c.tabs} tab + 2 shared`).join("\n") +
+    `\n= ${total} server connection${total === 1 ? "" : "s"} in total.\n` +
     "Tab connections open on a tab's first query and close with the tab.";
 }
 
@@ -220,28 +258,76 @@ function isFocused(tab: ScriptTab): boolean {
   return tabs.active()?.id === tab.id;
 }
 
-function setConnected(label: string | null, db: string | null) {
-  connected = label !== null;
-  activeDb = db;
-  hostLabel = label;
-  if (!connected) for (const t of tabs?.all() ?? []) t.connectionId = 0;
-  els.btnConnect.textContent = connected ? "Disconnect" : "Connect";
-  syncBusy();
+
+// --------------------------------------------------------------- connections
+
+/** The connection the editor dialog is currently editing, if any. */
+let editing: ConnectionEntry | null = null;
+let chosenColour = COLOURS[0];
+
+function renderColourSwatches() {
+  els.connColours.replaceChildren(
+    ...COLOURS.map((c) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "swatch" + (c === chosenColour ? " selected" : "");
+      b.style.background = c;
+      b.title = c;
+      b.onclick = () => {
+        chosenColour = c;
+        renderColourSwatches();
+      };
+      return b;
+    }),
+  );
 }
 
-// --------------------------------------------------------------- connection
-
-els.btnConnect.onclick = async () => {
-  if (connected) {
-    await api.disconnect();
-    hostLabel = null;
-    els.tree.replaceChildren();
-    results.setMessage("Disconnected.");
-    setConnected(null, null);
-    return;
-  }
+/**
+ * Open the connection editor.
+ *
+ * With an entry: editing it, or supplying a password it has not remembered.
+ * Without: a new connection, saved or one-off depending on the checkbox.
+ */
+function openConnectionEditor(existing?: ConnectionEntry) {
+  editing = existing ?? null;
+  const p = existing?.profile;
   els.connError.hidden = true;
+  els.connTitle.textContent = existing ? `Edit ${p!.name}` : "New connection";
+  chosenColour = p?.colour ?? COLOURS[0];
+  renderColourSwatches();
+
+  const f = els.form;
+  const set = (name: string, value: string) => {
+    (f.elements.namedItem(name) as HTMLInputElement).value = value;
+  };
+  set("name", p?.name ?? "");
+  set("host", p?.host ?? "127.0.0.1");
+  set("port", String(p?.port ?? 3306));
+  set("user", p?.user ?? "root");
+  set("password", "");
+  set("database", p?.database ?? "");
+  (f.elements.namedItem("allowInvalidCerts") as HTMLInputElement).checked =
+    p?.allowInvalidCerts ?? false;
+  els.connSave.checked = existing ? existing.saved : true;
+  els.connRemember.checked = p?.rememberPassword ?? false;
+  // A password can only be remembered against something that is saved.
+  els.connRememberRow.hidden = !els.connSave.checked;
+
+  const pw = f.elements.namedItem("password") as HTMLInputElement;
+  pw.placeholder = p?.rememberPassword ? "(unchanged — stored in the keychain)" : "";
+
   els.dialog.showModal();
+}
+
+els.connSave.onchange = () => {
+  els.connRememberRow.hidden = !els.connSave.checked;
+  if (!els.connSave.checked) els.connRemember.checked = false;
+};
+
+els.btnConnect.onclick = () => {
+  const active = conns.active();
+  if (active?.connected) void conns.disconnect(active);
+  else openConnectionEditor(active ?? undefined);
 };
 
 els.connCancel.onclick = () => els.dialog.close();
@@ -249,29 +335,78 @@ els.connCancel.onclick = () => els.dialog.close();
 els.form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(els.form);
-  const config: ConnConfig = {
-    host: String(fd.get("host") ?? "").trim(),
+  const host = String(fd.get("host") ?? "").trim();
+  const wantSave = els.connSave.checked;
+
+  const profile: ConnProfile = {
+    id: editing?.profile.id ?? newConnectionId(),
+    name: String(fd.get("name") ?? "").trim() || host,
+    colour: chosenColour,
+    host,
     port: Number(fd.get("port") ?? 3306),
     user: String(fd.get("user") ?? "").trim(),
-    password: String(fd.get("password") ?? ""),
-    database: (String(fd.get("database") ?? "").trim() || null),
+    database: String(fd.get("database") ?? "").trim() || null,
     allowInvalidCerts: fd.get("allowInvalidCerts") === "on",
   };
+  // Kept out of the profile on purpose — see ConnProfile's doc comment.
+  const typed = String(fd.get("password") ?? "");
 
   const ok = $<HTMLButtonElement>("conn-ok");
   ok.disabled = true;
   ok.textContent = "Connecting…";
   try {
-    const info = await api.connect(config);
+    const entry: ConnectionEntry = {
+      // The best answer available before saving: what the keychain said when
+      // this profile was loaded. Replaced below with what the save actually
+      // achieved, which is the only claim worth keeping.
+      profile: { ...profile, rememberPassword: editing?.profile.rememberPassword ?? false },
+      saved: wantSave,
+      connected: false,
+      serverVersion: null,
+      databases: [],
+    };
+
+    // Connect FIRST, and add nothing anywhere until it succeeds. A failed
+    // attempt used to leave a dead icon in the rail for every typo, and put its
+    // error in the results pane rather than next to the fields being corrected.
+    //
+    // An empty password box on a profile that already remembers one means "use
+    // the stored one", not "connect with a blank password".
+    const useStored = !typed && (editing?.profile.rememberPassword ?? false);
+    const res = useStored
+      ? await conns.connectStored(entry)
+      : await conns.connectWith(entry, typed);
+
+    if (!res.ok) {
+      els.connError.textContent = res.error ?? "Could not connect.";
+      els.connError.hidden = false;
+      return;
+    }
+
+    // Only a connection that actually works is worth writing down — and this
+    // way the password is validated before it reaches the keychain.
+    if (wantSave) {
+      // Three-way: a string remembers it, "" forgets it, null leaves it alone.
+      // Leaving it alone is what lets someone edit a port without retyping.
+      const password = els.connRemember.checked
+        ? typed || null
+        : editing?.profile.rememberPassword
+          ? ""
+          : null;
+      const outcome = await api.saveProfile(profile, password);
+      entry.profile.rememberPassword = outcome.passwordStored;
+      entry.saved = true;
+      conns.upsert(entry);
+      // Editing the active connection's colour must repaint the tab strip;
+      // setActiveConnection early-returns when the id has not changed.
+      tabs.render();
+      if (outcome.passwordWarning) results.setMessage(outcome.passwordWarning);
+    }
+
     els.dialog.close();
-    hostLabel = `${config.user}@${config.host}:${config.port}`;
-    for (const t of tabs.all()) await api.openTab(t.id);
-    setConnected(hostLabel, info.currentDatabase);
-    renderDatabases(info.databases);
-    results.setMessage(`Connected to MySQL ${info.serverVersion}.`);
   } catch (err) {
-    // Connection failures are expected, not exceptional. Show the message and
-    // leave the dialog open with the values still filled in.
+    // Saving failures are shown here too; the dialog keeps its values so the
+    // user can correct something rather than retyping everything.
     els.connError.textContent = String(err);
     els.connError.hidden = false;
   } finally {
@@ -298,11 +433,25 @@ function node(cls: string, label: string, twisty: string, icon: string) {
   return { n, twisty: t, label: lb };
 }
 
-function renderDatabases(dbs: string[]) {
-  els.tree.replaceChildren(...dbs.map(buildDbNode));
+/**
+ * Build (or reveal) the schema tree for one connection.
+ *
+ * Each connection keeps its own tree element, so switching away and back does
+ * not collapse everything the user had expanded.
+ */
+function renderDatabases(connId: string, dbs: string[]) {
+  const host = document.createElement("div");
+  host.replaceChildren(...dbs.map((db) => buildDbNode(connId, db)));
+  trees.set(connId, host);
+  showTree(connId);
 }
 
-function buildDbNode(db: string): HTMLElement {
+function showTree(connId: string) {
+  const host = trees.get(connId);
+  els.tree.replaceChildren(...(host ? [host] : []));
+}
+
+function buildDbNode(connId: string, db: string): HTMLElement {
   const wrap = document.createElement("div");
   const { n, twisty } = node("db", db, "▸", "🗄");
   const children = document.createElement("div");
@@ -315,10 +464,10 @@ function buildDbNode(db: string): HTMLElement {
   refresh.title = "Refresh this database";
   refresh.onclick = async (e) => {
     e.stopPropagation();
-    await api.refreshSchema(db);
+    await api.refreshSchema(connId, db);
     children.replaceChildren();
     children.dataset.loaded = "";
-    if (!children.hidden) await loadTables(db, children, n);
+    if (!children.hidden) await loadTables(connId, db, children, n);
   };
   n.append(refresh);
 
@@ -342,7 +491,7 @@ function buildDbNode(db: string): HTMLElement {
     children.hidden = !children.hidden;
     twisty.textContent = children.hidden ? "▸" : "▾";
     if (!children.hidden && !children.dataset.loaded) {
-      await loadTables(db, children, n);
+      await loadTables(connId, db, children, n);
     }
   };
 
@@ -350,11 +499,11 @@ function buildDbNode(db: string): HTMLElement {
   return wrap;
 }
 
-async function loadTables(db: string, host: HTMLElement, dbNode: HTMLElement) {
+async function loadTables(connId: string, db: string, host: HTMLElement, dbNode: HTMLElement) {
   dbNode.classList.add("loading");
   try {
-    const tables = await api.listTables(db);
-    host.replaceChildren(...tables.map((t) => buildTableNode(db, t)));
+    const tables = await api.listTables(connId, db);
+    host.replaceChildren(...tables.map((t) => buildTableNode(connId, db, t)));
     host.dataset.loaded = "1";
     // Seed autocomplete with table names immediately; columns fill in lazily.
     for (const t of tables) {
@@ -371,7 +520,7 @@ async function loadTables(db: string, host: HTMLElement, dbNode: HTMLElement) {
   }
 }
 
-function buildTableNode(db: string, t: TableRef): HTMLElement {
+function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const wrap = document.createElement("div");
   const isView = t.kind.toUpperCase().includes("VIEW");
   const { n, twisty, label } = node("table", t.name, "▸", isView ? "👁" : "▦");
@@ -391,7 +540,7 @@ function buildTableNode(db: string, t: TableRef): HTMLElement {
     if (!children.hidden && !children.dataset.loaded) {
       n.classList.add("loading");
       try {
-        const cols = await api.listColumns(db, t.name);
+        const cols = await api.listColumns(connId, db, t.name);
         children.replaceChildren(...cols.map((c) => {
           const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "🔑" : "·");
           const meta = document.createElement("span");
@@ -478,7 +627,7 @@ async function run(sql: string) {
     tab.scrollTop = 0;
     tab.colWidths.clear();
     tab.activeDb = st.currentDatabase;
-    tab.connectionId = st.connectionId;
+    tab.serverConnId = st.connectionId;
 
     if (st.currentDatabase && st.currentDatabase !== activeDb && isFocused(tab)) {
       activeDb = st.currentDatabase;
@@ -500,10 +649,10 @@ async function run(sql: string) {
   }
 }
 
-function markActiveDb(db: string) {
+function markActiveDb(db: string | null) {
   activeDb = db;
   els.tree.querySelectorAll(".node.db").forEach((n) => {
-    n.classList.toggle("db-active", n.querySelector(".label")?.textContent === db);
+    n.classList.toggle("db-active", db !== null && n.querySelector(".label")?.textContent === db);
   });
 }
 
@@ -570,11 +719,57 @@ view = createEditor($("editor"), {
   },
 });
 
+conns = new ConnectionManager($("rail"), {
+  onActivate: (entry) => {
+    // Switching connection swaps the whole workspace: tabs, schema tree and
+    // status. The connection being left keeps its sessions and running queries.
+    showTree(entry.profile.id);
+    tabs.setActiveConnection(entry.profile.id);
+    connected = entry.connected;
+    markActiveDb(tabs.active()?.activeDb ?? null);
+    syncBusy();
+  },
+  onConnected: (entry, info) => {
+    renderDatabases(entry.profile.id, info.databases);
+    connected = true;
+    // Register this connection's tabs with the backend; each is bound for life.
+    for (const t of tabs.forConnection(entry.profile.id)) {
+      void api.openTab(entry.profile.id, t.id);
+    }
+    results.setMessage(`Connected to ${entry.profile.name} — MySQL ${info.serverVersion}.`);
+    syncBusy();
+  },
+  canDrop: async (entry) => {
+    // Closing a connection closes its tabs, so the Stage 1 unsaved-changes
+    // prompt has to apply to each of them.
+    for (const t of tabs.forConnection(entry.profile.id)) {
+      if (!(await files.confirmClose(t))) return false;
+    }
+    return true;
+  },
+  onDisconnected: (entry) => {
+    trees.delete(entry.profile.id);
+    if (conns.active()?.profile.id === entry.profile.id) {
+      showTree(entry.profile.id);
+      connected = false;
+      results.setMessage(`Disconnected from ${entry.profile.name}.`);
+      syncBusy();
+    }
+    for (const t of tabs.forConnection(entry.profile.id)) t.serverConnId = 0;
+  },
+  onRemoved: (entry) => {
+    trees.delete(entry.profile.id);
+    for (const t of tabs.forConnection(entry.profile.id)) tabs.discard(t.id);
+  },
+  notify: (m) => results.setMessage(m),
+}, openConnectionEditor);
+
 tabs = new TabManager($("script-tabs"), view, {
+  colourFor: (connectionId) => conns.get(connectionId)?.profile.colour ?? "var(--accent)",
   onCreated: (tab) => {
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
-    if (connected) void api.openTab(tab.id);
+    void api.openTab(tab.connectionId, tab.id);
   },
   onActivate: (tab) => {
     // Compartment contents live in the EditorState, so a swapped-in state has
@@ -591,7 +786,7 @@ tabs = new TabManager($("script-tabs"), view, {
   onClosed: (tab) => {
     // Releases that tab's MySQL connection; leaving it would leak until
     // disconnect.
-    if (connected) void api.closeTab(tab.id);
+    void api.closeTab(tab.id);
   },
 });
 
@@ -602,7 +797,12 @@ files = createFileUx({
   refreshNote: refreshFileNote,
 });
 
-tabs.create();
+// No tab is created here: a tab must belong to a connection, and at boot there
+// is none. The first tab appears when a connection becomes active.
+
+// Saved connections appear in the rail immediately, disconnected. Nothing is
+// contacted until the user clicks one.
+void conns.loadSaved();
 
 // Dropping a file onto the window opens it. Tauri intercepts drag-and-drop at
 // the webview level, so the HTML5 drop events never fire — this is the only
@@ -653,5 +853,5 @@ window.addEventListener("keydown", (e) => {
 els.lintOn.onchange = () => applyLintSetting(true);
 applyLintSetting(true);
 
-results.setMessage("Not connected. Press Connect to get started.");
-setConnected(null, null);
+results.setMessage("No connection. Use + in the left rail to add one.");
+syncBusy();

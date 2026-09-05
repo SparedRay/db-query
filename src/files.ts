@@ -13,66 +13,7 @@ import type { EditorView } from "@codemirror/view";
 
 import { api, type OpenedFile } from "./api";
 import type { ScriptTab, TabManager } from "./tabs";
-
-// --------------------------------------------------------------- modal helper
-
-interface Choice<T extends string> {
-  value: T;
-  label: string;
-  primary?: boolean;
-  danger?: boolean;
-}
-
-/**
- * A modal question. Resolves to the chosen value, or `null` if dismissed —
- * Escape and backdrop dismissal both mean "cancel", never "go ahead".
- */
-function choose<T extends string>(
-  title: string,
-  message: string,
-  choices: Choice<T>[],
-): Promise<T | null> {
-  return new Promise((resolve) => {
-    const dlg = document.createElement("dialog");
-    dlg.className = "ask";
-
-    const h = document.createElement("h2");
-    h.textContent = title;
-    const p = document.createElement("p");
-    p.textContent = message;
-    const menu = document.createElement("menu");
-
-    let settled = false;
-    const done = (value: T | null) => {
-      if (settled) return;
-      settled = true;
-      dlg.close();
-      dlg.remove();
-      resolve(value);
-    };
-
-    for (const c of choices) {
-      const b = document.createElement("button");
-      b.textContent = c.label;
-      if (c.primary) b.classList.add("primary");
-      if (c.danger) b.classList.add("danger");
-      b.onclick = () => done(c.value);
-      menu.append(b);
-    }
-
-    dlg.append(h, p, menu);
-    // Escape closes the dialog without picking anything.
-    dlg.addEventListener("cancel", (e) => {
-      e.preventDefault();
-      done(null);
-    });
-    document.body.append(dlg);
-    dlg.showModal();
-    (menu.querySelector("button.primary") ?? menu.querySelector("button"))
-      ?.dispatchEvent(new Event("focus"));
-    (menu.querySelector("button.primary") as HTMLButtonElement | null)?.focus();
-  });
-}
+import { choose } from "./dialog";
 
 // ------------------------------------------------------------------- file ux
 
@@ -98,6 +39,13 @@ export function createFileUx(deps: FileUxDeps): FileUx {
   const { tabs, notify, refreshNote } = deps;
 
   function adopt(f: OpenedFile) {
+    // A tab must belong to a connection, so there is nowhere to put a file
+    // until one is active. Say so rather than throwing.
+    if (!tabs.activeConnection()) {
+      notify("Open a connection first — a script tab belongs to one.");
+      return;
+    }
+
     // Never open one file into two tabs: they would race each other's saves and
     // whichever wrote last would silently win.
     const existing = tabs.all().find((t) => t.filePath === f.path);

@@ -8,10 +8,7 @@ decisions that were corrected along the way.
 |---|---|---|
 | 0 | [POC — lightweight MySQL client](stage-0-poc.md) | 🔒 **Frozen** — complete and verified |
 | 1 | [Script tabs & file open/save](stage-1-tabs-and-files.md) | 🔒 **Frozen** — complete and verified |
-
-No stage is currently open. The next one starts by creating
-`stage-2-<name>.md`, adding a row above, and marking Stage 1 as superseded by it
-in its banner — the one edit a frozen tracker ever gets.
+| 2 | [Connections](stage-2-connections.md) | 🔒 **Frozen** — complete; C3w (Windows) carried forward |
 
 ## Rules
 
