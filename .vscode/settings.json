@@ -1,0 +1,5 @@
+{
+    "debug.javascript.defaultRuntimeExecutable": {
+        "pwa-node": "/home/lenovo/.local/share/mise/shims/node"
+    }
+}

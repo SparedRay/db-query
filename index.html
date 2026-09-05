@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>db-query</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="pane-head">
+          <span id="conn-label">Not connected</span>
+          <button id="btn-connect" class="mini">Connect</button>
+        </div>
+        <div id="tree" class="tree"></div>
+      </aside>
+
+      <div id="vsplit" class="splitter splitter-v" title="Drag to resize"></div>
+
+      <main id="main">
+        <section id="editor-pane">
+          <div class="pane-head">
+            <button id="btn-run" class="mini" disabled>Run <kbd>Ctrl+Enter</kbd></button>
+            <button id="btn-run-all" class="mini" disabled>Run all <kbd>Ctrl+Shift+Enter</kbd></button>
+            <button id="btn-cancel" class="mini danger" hidden>Cancel</button>
+            <label class="toggle" title="Append LIMIT 5000 to unbounded SELECTs">
+              <input type="checkbox" id="chk-autolimit" checked /> Auto-LIMIT
+            </label>
+            <label class="toggle" title="Advisory squiggles only — never blocks Run">
+              <input type="checkbox" id="chk-lint" checked /> Lint
+            </label>
+            <label class="toggle" title="Safety net: KILL the query after N seconds. 0 = off">
+              Timeout
+              <input type="number" id="num-timeout" class="num" value="0" min="0" max="3600" />s
+            </label>
+          </div>
+          <div id="editor"></div>
+        </section>
+
+        <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>
+
+        <section id="results-pane">
+          <div id="tabs" class="tabs"></div>
+          <div id="grid" class="grid-host"></div>
+          <div id="status" class="status"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="conn-dialog">
+      <form method="dialog" id="conn-form">
+        <h2>Connect to MySQL</h2>
+        <label>Host <input name="host" value="127.0.0.1" required /></label>
+        <label>Port <input name="port" type="number" value="3306" required /></label>
+        <label>User <input name="user" value="root" required /></label>
+        <label>Password <input name="password" type="password" /></label>
+        <label>Database <input name="database" placeholder="(optional)" /></label>
+        <label class="toggle">
+          <input type="checkbox" name="allowInvalidCerts" />
+          Allow invalid certificates (self-signed / internal CA)
+        </label>
+        <p id="conn-error" class="error" hidden></p>
+        <menu>
+          <button value="cancel" type="button" id="conn-cancel">Cancel</button>
+          <button value="ok" id="conn-ok">Connect</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+# Toolchain for this project. `mise install` provisions everything below.
+#
+# System libraries (webkit2gtk, libsoup, etc.) are NOT here — mise does not
+# manage C dev packages. See README.md for the apt step.
+
+[tools]
+node = "24"
+# mise drives rustup under the hood, so components work as normal.
+rust = { version = "stable", components = "rustfmt,clippy" }

@@ -1,0 +1,43 @@
+[package]
+name = "db-query"
+version = "0.1.0"
+description = "Lightweight MySQL client"
+authors = ["db-query"]
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+name = "db_query_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# sqlx 0.9 split the old `runtime-tokio-rustls` feature into separate runtime
+# and TLS flags. `mysql-rsa` is required for MySQL 8.0's default
+# caching_sha2_password auth over a non-TLS connection.
+# native-roots (not webpki) so an internal company CA in the OS trust store works.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "mysql",
+    "mysql-rsa",
+    "chrono",
+    "bigdecimal",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
