@@ -2,8 +2,9 @@
 
 A lightweight MySQL client that never freezes. Tauri v2 + vanilla TS + CodeMirror 6.
 
-Plan, milestones and task tracker: [sql-client-tracker.md](sql-client-tracker.md).
-Licensing constraints for this POC: [§9 of the tracker](sql-client-tracker.md#9-licensing-poc-constraint).
+Plans, milestones and task trackers live in [docs/](docs/) — one per stage,
+indexed in [docs/README.md](docs/README.md).
+Licensing constraints: [§9 of the Stage 0 tracker](docs/stage-0-poc.md#9-licensing-poc-constraint).
 
 ## Prerequisites
 

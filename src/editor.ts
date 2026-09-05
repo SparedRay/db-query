@@ -33,6 +33,31 @@ const theme = EditorView.theme(
 export interface EditorHooks {
   onRunStatement: () => void;
   onRunAll: () => void;
+  /** Fired on every document change, so the tab bar can refresh its dirty dot. */
+  onDocChanged?: () => void;
+}
+
+/**
+ * Extensions are built once and shared by every tab's `EditorState`.
+ *
+ * Each tab owns a full `EditorState`, which is what carries its undo history —
+ * that is why undo in one tab cannot reach into another. They must all be built
+ * from the *same* extension array so the compartments below refer to the same
+ * identities across tabs.
+ */
+let sharedExtensions: Extension[] | null = null;
+
+/**
+ * A fresh state for a new tab, wired with the same extensions as every other.
+ *
+ * Compartment contents (schema, linting) are per-state, so whoever swaps states
+ * must re-apply them afterwards — see `setSchema` / `setLinting`.
+ */
+export function createEditorState(doc: string): EditorState {
+  if (!sharedExtensions) {
+    throw new Error("createEditor() must run before createEditorState()");
+  }
+  return EditorState.create({ doc, extensions: sharedExtensions });
 }
 
 export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorView {
@@ -56,16 +81,20 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     lintCompartment.of([]),
     theme,
     EditorView.lineWrapping,
+    EditorView.updateListener.of((u) => {
+      if (u.docChanged) hooks.onDocChanged?.();
+    }),
   ];
 
-  return new EditorView({
-    parent,
-    state: EditorState.create({
-      doc: "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n-- Ctrl+Shift+Enter runs the whole buffer.\n\nSELECT 1;\n",
-      extensions,
-    }),
-  });
+  sharedExtensions = extensions;
+  return new EditorView({ parent, state: createEditorState(STARTER_DOC) });
 }
+
+export const STARTER_DOC =
+  "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n" +
+  "-- Ctrl+Shift+Enter runs the whole buffer.\n" +
+  "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n\n" +
+  "SELECT 1;\n";
 
 export type LintSource = (view: EditorView) => Promise<CmDiagnostic[]>;
 
@@ -75,10 +104,10 @@ export type LintSource = (view: EditorView) => Promise<CmDiagnostic[]>;
  * The linter has no veto: it contributes squiggles and gutter marks and
  * nothing else. Run is never disabled by a diagnostic.
  */
-export function setLinting(view: EditorView, source: LintSource | null) {
+export function setLinting(view: EditorView, source: LintSource | null, delay = 300) {
   view.dispatch({
     effects: lintCompartment.reconfigure(
-      source ? [linter(source, { delay: 300 }), lintGutter()] : [],
+      source ? [linter(source, { delay }), lintGutter()] : [],
     ),
   });
 }

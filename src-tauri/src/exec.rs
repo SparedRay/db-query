@@ -2,16 +2,24 @@
 
 use std::future::Future;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sqlx::Executor;
 
 use crate::decode::{columns_of, decode_cell, CellValue, ColumnMeta};
-use crate::session::{friendly, AppState};
+use crate::session::{self, friendly, AppState, TabSession};
 use crate::split;
 
 pub const MAX_ROWS: usize = 5000;
+
+/// Ceiling on rows held for one script, across all of its statements.
+///
+/// `MAX_ROWS` is per statement, so a ten-SELECT script could hold 50,000 rows —
+/// and with several tabs open that multiplies again. This bounds one tab's
+/// worst case regardless of how many statements it runs.
+pub const MAX_SCRIPT_ROWS: usize = 20_000;
 
 /// Wrap user SQL for sqlx 0.9's `SqlSafeStr` bound.
 ///
@@ -88,6 +96,7 @@ async fn await_with_timeout<F, T>(
     fut: F,
     timeout_secs: Option<u64>,
     state: &AppState,
+    tab_id: &str,
     timed_out: &mut bool,
 ) -> Result<T, sqlx::Error>
 where
@@ -112,8 +121,9 @@ where
     }
     if expired {
         *timed_out = true;
-        // Also sets cancel_requested, so the rest of the script is abandoned.
-        crate::session::cancel_query(state).await.ok();
+        // Also sets this tab's cancel_requested, so the rest of its script is
+        // abandoned. Other tabs are untouched.
+        session::cancel_query(state, tab_id).await.ok();
     }
     fut.await
 }
@@ -224,6 +234,7 @@ fn used_database(sql: &str) -> Option<String> {
 
 pub async fn run_script(
     state: &AppState,
+    tab_id: &str,
     sql: &str,
     auto_limit_enabled: bool,
     timeout_secs: Option<u64>,
@@ -233,11 +244,20 @@ pub async fn run_script(
     // per-statement tabs, because the terminator is no longer `;`.
     let auto_limit_enabled = auto_limit_enabled && !split_out.delimiter_detected;
 
-    let mut guard = state.exec.lock().await;
-    let conn = guard.as_mut().ok_or("Not connected.")?;
+    // Clone the Arcs out and release both map locks before doing any I/O.
+    // Holding them across the query would serialize every tab through one
+    // mutex and undo the whole point of per-tab connections.
+    let server = session::server(state).await?;
+    let tab: Arc<TabSession> = session::tab(state, tab_id).await;
 
-    state.cancel_requested.store(false, Ordering::SeqCst);
-    state.running.store(true, Ordering::SeqCst);
+    let mut guard = tab.exec.lock().await;
+    session::ensure_exec(&mut guard, &tab, &server).await?;
+    let conn = guard
+        .as_mut()
+        .expect("ensure_exec guarantees a live connection");
+
+    tab.cancel_requested.store(false, Ordering::SeqCst);
+    tab.running.store(true, Ordering::SeqCst);
 
     let script_start = Instant::now();
     let mut statements = Vec::new();
@@ -245,9 +265,10 @@ pub async fn run_script(
     let mut cancelled = false;
     let mut timed_out = false;
     let mut new_db: Option<String> = None;
+    let mut rows_budget = MAX_SCRIPT_ROWS;
 
     for (idx, span) in split_out.statements.iter().enumerate() {
-        if state.cancel_requested.load(Ordering::SeqCst) {
+        if tab.cancel_requested.load(Ordering::SeqCst) {
             cancelled = true;
             break;
         }
@@ -266,12 +287,19 @@ pub async fn run_script(
         let started = Instant::now();
         let outcome = if returns_rows(kind) {
             let fut = (&mut *conn).fetch_all(raw(to_run));
-            match await_with_timeout(fut, timeout_secs, state, &mut timed_out).await {
+            match await_with_timeout(fut, timeout_secs, state, tab_id, &mut timed_out).await {
                 Ok(rows) => {
                     let columns = rows.first().map(columns_of).unwrap_or_default();
-                    let truncated = rewritten.is_some() && rows.len() >= MAX_ROWS;
+                    // Spend from the script-wide budget before decoding, so a
+                    // long script cannot balloon memory one statement at a time.
+                    let kept = rows.len().min(rows_budget);
+                    let over_budget = kept < rows.len();
+                    rows_budget -= kept;
+
+                    let truncated = over_budget || (rewritten.is_some() && rows.len() >= MAX_ROWS);
                     let decoded = rows
                         .iter()
+                        .take(kept)
                         .map(|r| (0..columns.len()).map(|i| decode_cell(r, i)).collect())
                         .collect();
                     Outcome::Rows {
@@ -286,7 +314,7 @@ pub async fn run_script(
             }
         } else {
             let fut = (&mut *conn).execute(raw(to_run));
-            match await_with_timeout(fut, timeout_secs, state, &mut timed_out).await {
+            match await_with_timeout(fut, timeout_secs, state, tab_id, &mut timed_out).await {
                 Ok(r) => {
                     if let Some(db) = used_database(text) {
                         new_db = Some(db);
@@ -313,7 +341,7 @@ pub async fn run_script(
         // Stop at the first error, but keep everything that already succeeded.
         if is_error {
             aborted_at = Some(idx);
-            if state.cancel_requested.load(Ordering::SeqCst) {
+            if tab.cancel_requested.load(Ordering::SeqCst) {
                 cancelled = true;
             }
             break;
@@ -323,15 +351,15 @@ pub async fn run_script(
     // A KILLed statement does not necessarily come back as an error: MySQL's
     // SLEEP() returns 1 when interrupted, so a cancelled single-statement
     // script would otherwise look like an ordinary success in the status bar.
-    let cancelled = cancelled || state.cancel_requested.load(Ordering::SeqCst);
+    let cancelled = cancelled || tab.cancel_requested.load(Ordering::SeqCst);
 
-    state.running.store(false, Ordering::SeqCst);
+    tab.running.store(false, Ordering::SeqCst);
     drop(guard);
 
+    // A bare `USE somedb;` in the script moves THIS tab's active database, and
+    // only this tab's — each script keeps its own.
     if let Some(db) = new_db {
-        if let Some(ctl) = state.ctl.lock().await.as_mut() {
-            ctl.current_db = Some(db);
-        }
+        *tab.current_db.lock().await = Some(db);
     }
 
     Ok(ScriptResult {

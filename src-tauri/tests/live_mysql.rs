@@ -12,6 +12,11 @@ use db_query_lib::decode::CellValue;
 use db_query_lib::exec::{self, Outcome, StatementKind};
 use db_query_lib::schema;
 use db_query_lib::session::{self, AppState, ConnConfig};
+use sqlx::Row;
+use std::sync::atomic::Ordering;
+
+/// Every test that does not care about tab identity uses this one.
+const T: &str = "t1";
 
 fn config() -> ConnConfig {
     ConnConfig {
@@ -32,6 +37,23 @@ async fn connected() -> AppState {
         .await
         .expect("connect failed — is the fixture container up?");
     state
+}
+
+/// Number of connections this client currently holds on the server. Used to
+/// prove tab connections are lazy and are actually released on close.
+async fn server_conn_count(state: &AppState) -> i64 {
+    let server = session::server(state).await.unwrap();
+    let mut meta = server.meta.lock().await;
+    sqlx::query(
+        "SELECT COUNT(*) AS n FROM information_schema.processlist \
+         WHERE user = ? AND id <> CONNECTION_ID()",
+    )
+    .bind("root")
+    .fetch_one(&mut *meta)
+    .await
+    .unwrap()
+    .try_get::<i64, _>("n")
+    .unwrap()
 }
 
 fn rows_of(o: &Outcome) -> &Vec<Vec<CellValue>> {
@@ -58,7 +80,13 @@ async fn m1_connects_and_lists_databases() {
         info.server_version
     );
     assert!(info.databases.iter().any(|d| d == "poc"));
-    assert!(info.connection_id > 0);
+
+    // Connecting must NOT open a tab connection: they are lazy, so a window
+    // full of idle tabs costs nothing on the server.
+    let st = session::tab_status(&state, T).await.unwrap();
+    assert!(st.connected);
+    assert_eq!(st.connection_id, 0, "a tab connection was opened eagerly");
+
     session::disconnect(&state).await.unwrap();
 }
 
@@ -95,6 +123,7 @@ async fn m2_null_is_json_null_and_distinct_from_the_string_null() {
     let state = connected().await;
     let r = exec::run_script(
         &state,
+        T,
         "SELECT c_literal_null FROM types_zoo ORDER BY id",
         true,
         None,
@@ -113,6 +142,7 @@ async fn m2_bigint_beyond_2_53_survives_as_text() {
     let state = connected().await;
     let r = exec::run_script(
         &state,
+        T,
         "SELECT c_bigint, c_bigint_u FROM types_zoo WHERE id = 2",
         true,
         None,
@@ -131,6 +161,7 @@ async fn m2_small_ints_stay_json_numbers() {
     let state = connected().await;
     let r = exec::run_script(
         &state,
+        T,
         "SELECT c_int FROM types_zoo WHERE id = 1",
         true,
         None,
@@ -149,6 +180,7 @@ async fn m2_decimal_keeps_full_precision_as_text() {
     let state = connected().await;
     let r = exec::run_script(
         &state,
+        T,
         "SELECT c_decimal FROM types_zoo WHERE id = 1",
         true,
         None,
@@ -166,7 +198,7 @@ async fn m2_decimal_keeps_full_precision_as_text() {
 #[ignore]
 async fn m2_every_column_type_decodes_without_panicking() {
     let state = connected().await;
-    let r = exec::run_script(&state, "SELECT * FROM types_zoo", true, None)
+    let r = exec::run_script(&state, T, "SELECT * FROM types_zoo", true, None)
         .await
         .unwrap();
     match &r.statements[0].outcome {
@@ -188,6 +220,7 @@ async fn m2b_script_stops_at_the_first_error_and_keeps_prior_results() {
     let state = connected().await;
     let r = exec::run_script(
         &state,
+        T,
         "SELECT 1; SELECT * FROM no_such_table; SELECT 3",
         true,
         None,
@@ -208,7 +241,7 @@ async fn m2b_script_stops_at_the_first_error_and_keeps_prior_results() {
 #[ignore]
 async fn m2b_semicolon_in_a_string_does_not_split_the_script() {
     let state = connected().await;
-    let r = exec::run_script(&state, "SELECT 'a;b' AS v", true, None)
+    let r = exec::run_script(&state, T, "SELECT 'a;b' AS v", true, None)
         .await
         .unwrap();
     assert_eq!(r.statements.len(), 1);
@@ -222,7 +255,7 @@ async fn m2b_semicolon_in_a_string_does_not_split_the_script() {
 #[ignore]
 async fn m2b_show_and_describe_return_rows_not_affected_counts() {
     let state = connected().await;
-    let r = exec::run_script(&state, "SHOW TABLES; DESCRIBE users", true, None)
+    let r = exec::run_script(&state, T, "SHOW TABLES; DESCRIBE users", true, None)
         .await
         .unwrap();
     assert_eq!(r.statements[0].kind, StatementKind::RowReturning);
@@ -252,9 +285,10 @@ async fn m3_lists_tables_views_and_columns_and_caches_them() {
     assert!(!email.nullable);
     assert_eq!(email.key.as_deref(), Some("UNI"));
 
-    // Second call must be served from cache. Proven by dropping the exec
-    // connection: a cached read still succeeds, an uncached one cannot.
-    session::drop_exec_for_test(&state).await;
+    // The cache's job is to keep information_schema round trips flat on repeat
+    // reads. Assert on the counter rather than inferring from timing.
+    let server = session::server(&state).await.unwrap();
+    let before = server.introspection_count.load(Ordering::SeqCst);
     assert_eq!(
         schema::list_tables(&state, "poc").await.unwrap().len(),
         tables.len()
@@ -266,6 +300,11 @@ async fn m3_lists_tables_views_and_columns_and_caches_them() {
             .len(),
         5
     );
+    assert_eq!(
+        server.introspection_count.load(Ordering::SeqCst),
+        before,
+        "cached reads still hit information_schema"
+    );
 }
 
 // ------------------------------------------------------------------ M5
@@ -274,7 +313,7 @@ async fn m3_lists_tables_views_and_columns_and_caches_them() {
 #[ignore]
 async fn m5_auto_limit_truncates_a_big_table_and_reports_the_rewrite() {
     let state = connected().await;
-    let r = exec::run_script(&state, "SELECT * FROM big", true, None)
+    let r = exec::run_script(&state, T, "SELECT * FROM big", true, None)
         .await
         .unwrap();
     let s = &r.statements[0];
@@ -297,7 +336,7 @@ async fn m5_auto_limit_truncates_a_big_table_and_reports_the_rewrite() {
 #[ignore]
 async fn m5_disabling_auto_limit_returns_the_whole_table() {
     let state = connected().await;
-    let r = exec::run_script(&state, "SELECT * FROM big", false, None)
+    let r = exec::run_script(&state, T, "SELECT * FROM big", false, None)
         .await
         .unwrap();
     assert!(r.statements[0].effective_sql.is_none());
@@ -313,11 +352,13 @@ async fn m5_cancel_kills_a_slow_query_promptly() {
     let killer = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        session::cancel_query(&killer).await.expect("cancel failed");
+        session::cancel_query(&killer, T)
+            .await
+            .expect("cancel failed");
     });
 
     let started = Instant::now();
-    let r = exec::run_script(&state, "SELECT SLEEP(30)", true, None)
+    let r = exec::run_script(&state, T, "SELECT SLEEP(30)", true, None)
         .await
         .unwrap();
     let elapsed = started.elapsed();
@@ -341,9 +382,9 @@ async fn m5_cancel_abandons_the_rest_of_the_script() {
     let killer = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        session::cancel_query(&killer).await.ok();
+        session::cancel_query(&killer, T).await.ok();
     });
-    let r = exec::run_script(&state, "SELECT SLEEP(30); SELECT 999", true, None)
+    let r = exec::run_script(&state, T, "SELECT SLEEP(30); SELECT 999", true, None)
         .await
         .unwrap();
     // Statement 2 must never run — matches the stop-at-first-error rule.
@@ -360,11 +401,11 @@ async fn m5_cancel_abandons_the_rest_of_the_script() {
 #[ignore]
 async fn a_bare_use_in_a_script_updates_the_active_database() {
     let state = connected().await;
-    exec::run_script(&state, "USE mysql; SELECT 1", true, None)
+    exec::run_script(&state, T, "USE mysql; SELECT 1", true, None)
         .await
         .unwrap();
-    let ctl = state.ctl.lock().await;
-    assert_eq!(ctl.as_ref().unwrap().current_db.as_deref(), Some("mysql"));
+    let tab = session::tab_if_open(&state, T).await.unwrap();
+    assert_eq!(tab.current_db.lock().await.as_deref(), Some("mysql"));
 }
 
 // --------------------------------------------------------------- Phase 6
@@ -376,7 +417,7 @@ async fn timeout_kills_a_slow_query_and_is_reported_separately_from_cancel() {
     let state = connected().await;
 
     let started = Instant::now();
-    let r = exec::run_script(&state, "SELECT SLEEP(30)", true, Some(1))
+    let r = exec::run_script(&state, T, "SELECT SLEEP(30)", true, Some(1))
         .await
         .unwrap();
     let elapsed = started.elapsed();
@@ -393,11 +434,11 @@ async fn timeout_kills_a_slow_query_and_is_reported_separately_from_cancel() {
 async fn timeout_of_zero_or_none_means_no_limit() {
     let state = connected().await;
     // A quick query must not be affected by either spelling of "off".
-    let r = exec::run_script(&state, "SELECT SLEEP(0.2)", true, None)
+    let r = exec::run_script(&state, T, "SELECT SLEEP(0.2)", true, None)
         .await
         .unwrap();
     assert!(!r.timed_out);
-    let r = exec::run_script(&state, "SELECT SLEEP(0.2)", true, Some(0))
+    let r = exec::run_script(&state, T, "SELECT SLEEP(0.2)", true, Some(0))
         .await
         .unwrap();
     assert!(!r.timed_out);
@@ -409,12 +450,12 @@ async fn the_connection_stays_usable_after_a_timeout() {
     // The real risk of a naive timeout: dropping the future mid-protocol
     // poisons the connection and every later query fails.
     let state = connected().await;
-    let timed = exec::run_script(&state, "SELECT SLEEP(30)", true, Some(1))
+    let timed = exec::run_script(&state, T, "SELECT SLEEP(30)", true, Some(1))
         .await
         .unwrap();
     assert!(timed.timed_out);
 
-    let after = exec::run_script(&state, "SELECT 1 + 1 AS two", true, None)
+    let after = exec::run_script(&state, T, "SELECT 1 + 1 AS two", true, None)
         .await
         .unwrap();
     assert_eq!(
@@ -430,24 +471,11 @@ async fn the_connection_stays_usable_after_a_timeout() {
 #[ignore]
 async fn lint_uses_the_live_schema_cache() {
     let state = connected().await;
-    session::use_database(&state, "poc").await.unwrap();
+    session::use_database(&state, T, "poc").await.unwrap();
     // Warm the cache the way the sidebar would.
     schema::list_columns(&state, "poc", "users").await.unwrap();
 
-    let cached = {
-        let g = state.ctl.lock().await;
-        let ctl = g.as_ref().unwrap();
-        ctl.schema_cache["poc"]
-            .columns
-            .iter()
-            .map(|(t, c)| {
-                (
-                    t.to_ascii_lowercase(),
-                    c.iter().map(|x| x.name.to_ascii_lowercase()).collect(),
-                )
-            })
-            .collect::<db_query_lib::lint::LintSchema>()
-    };
+    let cached = schema::lint_schema(&state, Some("poc")).await;
 
     let good = db_query_lib::lint::lint("SELECT email FROM users", &cached);
     assert!(good.is_empty(), "real column flagged: {good:?}");
@@ -455,4 +483,296 @@ async fn lint_uses_the_live_schema_cache() {
     let bad = db_query_lib::lint::lint("SELECT emial FROM users", &cached);
     assert_eq!(bad.len(), 1, "{bad:?}");
     assert!(bad[0].message.contains("no column `emial`"));
+}
+
+// ================================================================ Stage 1 / Phase 1
+// Per-tab sessions. These are the tests that justify the architecture.
+
+/// **N5.** The whole point of connection-per-tab: a slow query in one tab must
+/// not stall another. If this regresses, tabs are cosmetic.
+#[tokio::test]
+#[ignore]
+async fn n5_a_slow_query_in_one_tab_does_not_block_another() {
+    use std::time::{Duration, Instant};
+    let state = std::sync::Arc::new(connected().await);
+
+    let slow = state.clone();
+    let handle = tokio::spawn(async move {
+        exec::run_script(&slow, "slow-tab", "SELECT SLEEP(5)", true, None).await
+    });
+
+    // Give the slow tab a moment to actually take its connection.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let started = Instant::now();
+    let quick = exec::run_script(&state, "quick-tab", "SELECT 1 AS one", true, None)
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        as_json(&rows_of(&quick.statements[0].outcome)[0][0]),
+        serde_json::json!(1)
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "second tab waited {elapsed:?} — it is serialized behind the first"
+    );
+
+    handle.await.unwrap().unwrap();
+}
+
+/// Cancelling one tab must leave every other tab alone.
+#[tokio::test]
+#[ignore]
+async fn cancel_targets_only_the_requesting_tab() {
+    use std::time::Duration;
+    let state = std::sync::Arc::new(connected().await);
+
+    let victim = state.clone();
+    let survivor = state.clone();
+
+    let a = tokio::spawn(async move {
+        exec::run_script(&victim, "tab-a", "SELECT SLEEP(30)", true, None).await
+    });
+    let b = tokio::spawn(async move {
+        exec::run_script(&survivor, "tab-b", "SELECT SLEEP(3)", true, None).await
+    });
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    session::cancel_query(&state, "tab-a").await.unwrap();
+
+    let ra = a.await.unwrap().unwrap();
+    let rb = b.await.unwrap().unwrap();
+
+    assert!(ra.cancelled, "tab-a was not cancelled");
+    assert!(!rb.cancelled, "tab-b was cancelled by tab-a's request");
+    assert!(matches!(rb.statements[0].outcome, Outcome::Rows { .. }));
+}
+
+/// Connections are lazy: idle tabs cost nothing, and closing a tab gives its
+/// connection back rather than leaking it until disconnect.
+#[tokio::test]
+#[ignore]
+async fn tab_connections_are_lazy_and_released_on_close() {
+    let state = connected().await;
+    let baseline = server_conn_count(&state).await; // killer only
+
+    // Registering a tab must not open anything.
+    session::open_tab(&state, "lazy").await.unwrap();
+    assert_eq!(
+        server_conn_count(&state).await,
+        baseline,
+        "open_tab opened a connection eagerly"
+    );
+
+    // First run opens exactly one.
+    exec::run_script(&state, "lazy", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    assert_eq!(server_conn_count(&state).await, baseline + 1);
+
+    // A second tab opens exactly one more.
+    exec::run_script(&state, "lazy2", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    assert_eq!(server_conn_count(&state).await, baseline + 2);
+
+    session::close_tab(&state, "lazy").await.unwrap();
+    session::close_tab(&state, "lazy2").await.unwrap();
+    assert_eq!(
+        server_conn_count(&state).await,
+        baseline,
+        "closing tabs did not release their connections"
+    );
+}
+
+/// Each tab keeps its own `USE`. Surprising to some users, but it is what makes
+/// a script behave the same way it would run standalone.
+#[tokio::test]
+#[ignore]
+async fn each_tab_has_its_own_active_database() {
+    let state = connected().await;
+    session::use_database(&state, "tab-a", "mysql")
+        .await
+        .unwrap();
+    session::use_database(&state, "tab-b", "poc").await.unwrap();
+
+    let a = session::tab_status(&state, "tab-a").await.unwrap();
+    let b = session::tab_status(&state, "tab-b").await.unwrap();
+    assert_eq!(a.current_database.as_deref(), Some("mysql"));
+    assert_eq!(b.current_database.as_deref(), Some("poc"));
+
+    // And the server agrees, not just our bookkeeping.
+    let r = exec::run_script(&state, "tab-a", "SELECT DATABASE() AS d", true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        as_json(&rows_of(&r.statements[0].outcome)[0][0]),
+        serde_json::json!("mysql")
+    );
+    let r = exec::run_script(&state, "tab-b", "SELECT DATABASE() AS d", true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        as_json(&rows_of(&r.statements[0].outcome)[0][0]),
+        serde_json::json!("poc")
+    );
+}
+
+/// A `USE` inside one tab's script must not move any other tab.
+#[tokio::test]
+#[ignore]
+async fn a_use_in_one_tabs_script_does_not_move_another_tab() {
+    let state = connected().await;
+    session::use_database(&state, "tab-a", "poc").await.unwrap();
+    session::use_database(&state, "tab-b", "poc").await.unwrap();
+
+    exec::run_script(&state, "tab-a", "USE mysql; SELECT 1", true, None)
+        .await
+        .unwrap();
+
+    let a = session::tab_status(&state, "tab-a").await.unwrap();
+    let b = session::tab_status(&state, "tab-b").await.unwrap();
+    assert_eq!(a.current_database.as_deref(), Some("mysql"));
+    assert_eq!(b.current_database.as_deref(), Some("poc"), "tab-b drifted");
+}
+
+/// MySQL's `wait_timeout` reaps idle connections (8 hours by default), so a tab
+/// left open overnight finds its connection gone. Simulated here by killing the
+/// connection outright: the next run must reconnect transparently, land back in
+/// the right database, and not surface an error.
+#[tokio::test]
+#[ignore]
+async fn a_reaped_tab_connection_is_reopened_transparently() {
+    let state = connected().await;
+    session::use_database(&state, "reaped", "poc")
+        .await
+        .unwrap();
+    exec::run_script(&state, "reaped", "SELECT 1", true, None)
+        .await
+        .unwrap();
+
+    let old_id = session::tab_status(&state, "reaped")
+        .await
+        .unwrap()
+        .connection_id;
+    assert!(old_id > 0);
+
+    // KILL (not KILL QUERY) drops the whole connection, exactly as wait_timeout would.
+    {
+        let server = session::server(&state).await.unwrap();
+        let mut meta = server.meta.lock().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("KILL {old_id}")))
+            .execute(&mut *meta)
+            .await
+            .ok();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let r = exec::run_script(&state, "reaped", "SELECT DATABASE() AS d", true, None)
+        .await
+        .expect("reconnect failed — the tab is permanently broken");
+
+    let new_id = session::tab_status(&state, "reaped")
+        .await
+        .unwrap()
+        .connection_id;
+    assert_ne!(new_id, old_id, "connection was not actually replaced");
+    // The replacement session must land back in the tab's database.
+    assert_eq!(
+        as_json(&rows_of(&r.statements[0].outcome)[0][0]),
+        serde_json::json!("poc"),
+        "reconnected session lost the tab's active database"
+    );
+}
+
+/// disconnect must take every tab connection down with it.
+#[tokio::test]
+#[ignore]
+async fn disconnect_releases_every_tab_connection() {
+    let state = connected().await;
+    let baseline = server_conn_count(&state).await;
+    exec::run_script(&state, "d1", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    exec::run_script(&state, "d2", "SELECT 1", true, None)
+        .await
+        .unwrap();
+    assert_eq!(server_conn_count(&state).await, baseline + 2);
+
+    session::disconnect(&state).await.unwrap();
+
+    // Reconnect on a fresh state to count what the old one left behind.
+    let probe = connected().await;
+    assert_eq!(
+        server_conn_count(&probe).await,
+        baseline,
+        "tab connections outlived disconnect"
+    );
+    session::disconnect(&probe).await.ok();
+}
+
+// ================================================================ Stage 1 / Phase 7
+
+/// `MAX_ROWS` caps one statement; this caps the whole script. Without it a
+/// ten-SELECT script holds 50,000 rows, and that multiplies by open tabs.
+#[tokio::test]
+#[ignore]
+async fn a_long_script_is_bounded_by_the_script_wide_row_ceiling() {
+    let state = connected().await;
+    // Five statements × 5000 auto-limited rows = 25,000, over the 20,000 budget.
+    let sql = "SELECT * FROM big; SELECT * FROM big; SELECT * FROM big; \
+               SELECT * FROM big; SELECT * FROM big";
+    let r = exec::run_script(&state, T, sql, true, None).await.unwrap();
+
+    let total: usize = r
+        .statements
+        .iter()
+        .map(|s| match &s.outcome {
+            Outcome::Rows { rows, .. } => rows.len(),
+            _ => 0,
+        })
+        .sum();
+
+    assert_eq!(r.statements.len(), 5, "every statement should still run");
+    assert!(
+        total <= exec::MAX_SCRIPT_ROWS,
+        "script held {total} rows, over the {} ceiling",
+        exec::MAX_SCRIPT_ROWS
+    );
+    // The statement where the budget ran out must say so, not silently shrink.
+    let last = r.statements.last().unwrap();
+    match &last.outcome {
+        Outcome::Rows { truncated, .. } => {
+            assert!(
+                *truncated,
+                "budget exhaustion was not reported as truncation"
+            )
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+/// A script that fits under the ceiling must be entirely unaffected by it.
+#[tokio::test]
+#[ignore]
+async fn a_short_script_is_untouched_by_the_ceiling() {
+    let state = connected().await;
+    let r = exec::run_script(&state, T, "SELECT * FROM big; SELECT 1", true, None)
+        .await
+        .unwrap();
+    match &r.statements[0].outcome {
+        Outcome::Rows { rows, .. } => assert_eq!(rows.len(), 5000),
+        other => panic!("expected rows, got {other:?}"),
+    }
+    match &r.statements[1].outcome {
+        Outcome::Rows {
+            rows, truncated, ..
+        } => {
+            assert_eq!(rows.len(), 1);
+            assert!(!truncated, "false truncation on a small result");
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
 }

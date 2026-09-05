@@ -10,6 +10,22 @@ const ROW_H = 22;
 const OVERSCAN = 12;
 const DEFAULT_COL_W = 150;
 
+/**
+ * What the view needs to render one script tab's results.
+ *
+ * The view owns no result state of its own: everything lives on the tab, so
+ * switching away and back restores the grid, the selected statement, the
+ * column widths and the scroll position exactly as they were left.
+ */
+export interface ResultsFor {
+  result: ScriptResult;
+  activeIndex: number;
+  widths: Map<string, number>;
+  scrollTop: number;
+  onSelect: (index: number) => void;
+  onScrolled: (scrollTop: number) => void;
+}
+
 export class ResultView {
   private tabsEl: HTMLElement;
   private gridEl: HTMLElement;
@@ -17,7 +33,12 @@ export class ResultView {
   private result: ScriptResult | null = null;
   private active = 0;
   private widths = new Map<string, number>();
-  private onScroll = () => this.paintRows();
+  private onSelect: (index: number) => void = () => {};
+  private onScrolled: (scrollTop: number) => void = () => {};
+  private onScroll = () => {
+    this.paintRows();
+    this.onScrolled(this.gridEl.scrollTop);
+  };
 
   constructor(tabs: HTMLElement, grid: HTMLElement, status: HTMLElement) {
     this.tabsEl = tabs;
@@ -28,18 +49,35 @@ export class ResultView {
 
   setMessage(html: string) {
     this.result = null;
+    this.onSelect = () => {};
+    this.onScrolled = () => {};
     this.tabsEl.replaceChildren();
     this.gridEl.replaceChildren(el("div", "empty", html));
     this.statusEl.replaceChildren();
   }
 
-  show(result: ScriptResult) {
-    this.result = result;
-    this.widths.clear();
-    // Focus the statement that failed if there was one, else the last result.
-    this.active = result.abortedAt ?? Math.max(0, result.statements.length - 1);
+  /** Render one tab's results, restoring exactly what it had before. */
+  show(opts: ResultsFor) {
+    this.onSelect = opts.onSelect;
+    this.onScrolled = opts.onScrolled;
+    this.widths = opts.widths;
+
+    this.result = opts.result;
+    this.active = Math.min(
+      Math.max(0, opts.activeIndex),
+      Math.max(0, opts.result.statements.length - 1),
+    );
     this.renderTabs();
     this.renderActive();
+    // Restore scroll after layout exists.
+    this.gridEl.scrollTop = opts.scrollTop;
+    this.paintRows();
+  }
+
+  /** Index the UI should select for a freshly-arrived result. */
+  static initialIndex(result: ScriptResult): number {
+    // The statement that failed if there was one, else the last result.
+    return result.abortedAt ?? Math.max(0, result.statements.length - 1);
   }
 
   private renderTabs() {
@@ -65,7 +103,12 @@ export class ResultView {
       }
       t.append(badge);
       if (i === this.active) t.classList.add("active");
-      t.onclick = () => { this.active = i; this.renderTabs(); this.renderActive(); };
+      t.onclick = () => {
+        this.active = i;
+        this.onSelect(i);
+        this.renderTabs();
+        this.renderActive();
+      };
       return t;
     });
     this.tabsEl.replaceChildren(...nodes);
@@ -104,6 +147,7 @@ export class ResultView {
     const colgroup = document.createElement("colgroup");
     cols.forEach((c) => {
       const cg = document.createElement("col");
+      // Widths come from the tab, so a drag survives a tab switch.
       cg.style.width = `${this.widths.get(c.name) ?? DEFAULT_COL_W}px`;
       colgroup.append(cg);
     });
@@ -131,7 +175,6 @@ export class ResultView {
     // Spacer rows above and below the window hold the full scroll height,
     // so only the visible slice of <tr>s ever exists in the DOM.
     this.gridEl.replaceChildren(table);
-    this.gridEl.scrollTop = 0;
     this.paintRows();
   }
 

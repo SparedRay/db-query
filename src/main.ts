@@ -3,6 +3,10 @@ import type { SQLNamespace } from "@codemirror/lang-sql";
 
 import { api, type ConnConfig, type TableRef } from "./api";
 import { ResultView } from "./grid";
+import { TabManager, type ScriptTab } from "./tabs";
+import { createFileUx, type FileUx } from "./files";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, selectedText,
   setLinting, setSchema,
@@ -20,6 +24,7 @@ const els = {
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
   timeout: $<HTMLInputElement>("num-timeout"),
+  fileNote: $<HTMLSpanElement>("file-note"),
   dialog: $<HTMLDialogElement>("conn-dialog"),
   form: $<HTMLFormElement>("conn-form"),
   connError: $<HTMLParagraphElement>("conn-error"),
@@ -29,10 +34,20 @@ const els = {
 
 const results = new ResultView($("tabs"), $("grid"), $("status"));
 
-let view: EditorView;
+let view!: EditorView;
+let tabs!: TabManager;
+let files!: FileUx;
+
+/** The tab every command in this module acts on. */
+const activeTab = (): ScriptTab => {
+  const t = tabs.active();
+  if (!t) throw new Error("no active tab");
+  return t;
+};
+
 let connected = false;
 let activeDb: string | null = null;
-let inFlight = false;
+let hostLabel: string | null = null;
 /** Accumulated schema for CodeMirror autocomplete, grown as the tree loads. */
 const schemaMap: SQLNamespace = {};
 
@@ -53,13 +68,41 @@ function makeByteToChar(text: string): (byteOffset: number) => number {
   return (b) => dec.decode(bytes.slice(0, Math.min(Math.max(b, 0), bytes.length))).length;
 }
 
+/**
+ * Linting budget, chosen from measurements (Stage 1 Phase 7), not guesswork.
+ *
+ * A lint pass costs roughly `IPC(serialise the whole doc) + Rust(scan it)`:
+ *
+ *     64 KB → ~3 ms      256 KB → ~9 ms
+ *      1 MB → ~29 ms       5 MB → ~158 ms
+ *
+ * At 5 MB with a 300 ms debounce that is over half a core spent re-linting
+ * while you type. So: full linting up to the cap, with the debounce widening
+ * as the buffer grows, and off entirely beyond it.
+ */
+const LINT_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Debounce for the current buffer size, quantised to 100 ms so it only
+ * reconfigures every ~100 KB typed rather than on every keystroke.
+ * `null` means "do not lint this buffer at all".
+ */
+function lintDelayFor(docLength: number): number | null {
+  if (docLength > LINT_MAX_BYTES) return null;
+  const raw = 300 + docLength / 1024;
+  return Math.min(1500, Math.round(raw / 100) * 100);
+}
+
 /** Advisory diagnostics. Never gates Run — see the tracker's Phase 5b rule. */
 async function lintSource(v: EditorView) {
   if (!connected) return [];
+  // Second guard: the compartment may not have been reconfigured yet if the
+  // buffer just grew past the cap.
+  if (lintDelayFor(v.state.doc.length) === null) return [];
   const text = v.state.doc.toString();
   let diags;
   try {
-    diags = await api.lintSql(text);
+    diags = await api.lintSql(activeTab().id, text);
   } catch {
     // A linter failure must never surface as an error the user has to dismiss.
     return [];
@@ -77,25 +120,113 @@ async function lintSource(v: EditorView) {
   });
 }
 
-function applyLintSetting() {
-  setLinting(view, els.lintOn.checked ? lintSource : null);
+/** Delay currently configured, so we only reconfigure when the bucket changes. */
+let appliedLintDelay: number | null | undefined;
+
+function applyLintSetting(force = false) {
+  // doc.length counts UTF-16 units, not bytes. Close enough for a size bucket,
+  // and far cheaper than encoding the whole buffer on every keystroke.
+  const delay = els.lintOn.checked ? lintDelayFor(view.state.doc.length) : null;
+  if (!force && delay === appliedLintDelay) return;
+  appliedLintDelay = delay;
+  setLinting(view, delay === null ? null : lintSource, delay ?? 300);
+  refreshFileNote();
 }
 
-function setBusy(busy: boolean) {
-  inFlight = busy;
+/** Reflect the ACTIVE tab's busy state. Other tabs keep running regardless. */
+/**
+ * Per-tab file indicator. Its whole job is to make "you cannot save this"
+ * visible BEFORE the user tries, rather than only in the dialog afterwards.
+ */
+function refreshFileNote() {
+  const tab = tabs?.active();
+  if (!tab) {
+    els.fileNote.hidden = true;
+    return;
+  }
+  if (tab.encoding === "utf-8-lossy") {
+    els.fileNote.hidden = false;
+    els.fileNote.className = "chip warn";
+    els.fileNote.textContent = "invalid UTF-8 · Save disabled";
+    els.fileNote.title =
+      "This file was not valid UTF-8, so it opened with replacement characters. " +
+      "Saving over it would discard the original bytes. Use Save As to write a copy.";
+    return;
+  }
+  if (els.lintOn.checked && lintDelayFor(view.state.doc.length) === null) {
+    els.fileNote.hidden = false;
+    els.fileNote.className = "chip warn";
+    els.fileNote.textContent = "large buffer · linting off";
+    els.fileNote.title =
+      `Buffers over ${LINT_MAX_BYTES / 1048576} MB are not linted: a pass would cost ` +
+      "more than the debounce window and make typing sluggish. Running is unaffected.";
+    return;
+  }
+  if (tab.lineEnding === "crlf") {
+    els.fileNote.hidden = false;
+    els.fileNote.className = "chip";
+    els.fileNote.textContent = "CRLF";
+    els.fileNote.title = "Line endings are preserved on save.";
+    return;
+  }
+  els.fileNote.hidden = true;
+}
+
+function syncBusy() {
+  const tab = tabs?.active();
+  const busy = tab?.busy ?? false;
   els.btnRun.disabled = busy || !connected;
   els.btnRunAll.disabled = busy || !connected;
   els.btnCancel.hidden = !busy;
+  syncConnLabel();
+}
+
+/**
+ * Connection label doubles as the cross-tab indicator: how many tabs are
+ * running right now, and how many connections we hold.
+ *
+ * The count matters because tabs are not free on the server — the model is
+ * one connection per tab that has run, plus a shared killer and meta.
+ */
+function syncConnLabel() {
+  if (!connected) {
+    els.connLabel.textContent = "Not connected";
+    els.connLabel.title = "";
+    return;
+  }
+  const all = tabs?.all() ?? [];
+  const running = all.filter((t) => t.busy).length;
+  const withConn = all.filter((t) => t.connectionId > 0).length;
+
+  const db = tabs?.active()?.activeDb ?? activeDb;
+  const parts = [hostLabel ?? ""];
+  if (db) parts.push(db);
+  if (running > 0) parts.push(`${running} running`);
+  els.connLabel.textContent = parts.join(" · ");
+  els.connLabel.title =
+    `${withConn} tab connection${withConn === 1 ? "" : "s"} + 2 shared ` +
+    `(killer, meta) = ${withConn + 2} total.\n` +
+    "Tab connections open on a tab's first query and close with the tab.";
+}
+
+function setBusy(tab: ScriptTab, busy: boolean) {
+  tab.busy = busy;
+  tabs.render();
+  syncBusy();
+}
+
+/** True when `tab` is the one currently on screen. */
+function isFocused(tab: ScriptTab): boolean {
+  return tabs.active()?.id === tab.id;
 }
 
 function setConnected(label: string | null, db: string | null) {
   connected = label !== null;
   activeDb = db;
-  els.connLabel.textContent = label
-    ? `${label}${db ? ` · ${db}` : ""}`
-    : "Not connected";
+  hostLabel = label;
+  if (!connected) for (const t of tabs?.all() ?? []) t.connectionId = 0;
   els.btnConnect.textContent = connected ? "Disconnect" : "Connect";
-  setBusy(false);
+  syncBusy();
 }
 
 // --------------------------------------------------------------- connection
@@ -103,6 +234,7 @@ function setConnected(label: string | null, db: string | null) {
 els.btnConnect.onclick = async () => {
   if (connected) {
     await api.disconnect();
+    hostLabel = null;
     els.tree.replaceChildren();
     results.setMessage("Disconnected.");
     setConnected(null, null);
@@ -132,7 +264,9 @@ els.form.addEventListener("submit", async (e) => {
   try {
     const info = await api.connect(config);
     els.dialog.close();
-    setConnected(`${config.user}@${config.host}:${config.port}`, info.currentDatabase);
+    hostLabel = `${config.user}@${config.host}:${config.port}`;
+    for (const t of tabs.all()) await api.openTab(t.id);
+    setConnected(hostLabel, info.currentDatabase);
     renderDatabases(info.databases);
     results.setMessage(`Connected to MySQL ${info.serverVersion}.`);
   } catch (err) {
@@ -191,14 +325,16 @@ function buildDbNode(db: string): HTMLElement {
   n.onclick = async () => {
     // Clicking a database both expands it and makes it the active schema, so
     // unqualified table names in the editor resolve against it.
-    if (activeDb !== db) {
+    const tab = activeTab();
+    if (tab.activeDb !== db) {
       try {
-        await api.useDatabase(db);
+        await api.useDatabase(tab.id, db);
+        tab.activeDb = db;
         activeDb = db;
         els.tree.querySelectorAll(".node.db-active").forEach((x) => x.classList.remove("db-active"));
         n.classList.add("db-active");
-        const label = els.connLabel.textContent?.split(" · ")[0] ?? "";
-        els.connLabel.textContent = `${label} · ${db}`;
+        activeDb = db;
+        syncConnLabel();
       } catch (err) {
         results.setMessage(String(err));
       }
@@ -285,24 +421,82 @@ function buildTableNode(db: string, t: TableRef): HTMLElement {
 
 // ---------------------------------------------------------------- execution
 
+/**
+ * Render whatever this tab should currently be showing.
+ *
+ * Busy is checked FIRST and deliberately. A running tab must not display the
+ * result of its previous run: switching away and back would otherwise show
+ * stale rows with no hint they are stale, while the real query is still in
+ * flight. The running state belongs to the tab, not to whichever tab happened
+ * to be focused when the run started.
+ */
+function showResults(tab: ScriptTab) {
+  if (tab.busy) {
+    results.setMessage(
+      tab.result
+        ? "Running… the previous result is superseded."
+        : "Running…",
+    );
+    return;
+  }
+  if (tab.error) {
+    results.setMessage(tab.error);
+    return;
+  }
+  if (!tab.result) {
+    results.setMessage(
+      connected ? "No results yet. Ctrl+Enter to run." : "Not connected.",
+    );
+    return;
+  }
+  results.show({
+    result: tab.result,
+    activeIndex: tab.activeResultIndex,
+    widths: tab.colWidths,
+    scrollTop: tab.scrollTop,
+    onSelect: (i) => { tab.activeResultIndex = i; },
+    onScrolled: (top) => { tab.scrollTop = top; },
+  });
+}
+
 async function run(sql: string) {
-  if (!connected || inFlight || !sql.trim()) return;
-  setBusy(true);
-  results.setMessage("Running…");
+  const tab = activeTab();
+  if (!connected || tab.busy || !sql.trim()) return;
+  tab.error = null;
+  setBusy(tab, true);
+  if (isFocused(tab)) showResults(tab);
+
   try {
     const secs = Number(els.timeout.value) || 0;
-    const res = await api.runScript(sql, els.autoLimit.checked, secs > 0 ? secs : null);
-    results.show(res);
-    // A `USE db` inside the script may have moved the active database.
-    const st = await api.status();
-    if (st.currentDatabase && st.currentDatabase !== activeDb) {
-      setConnected(st.hostLabel, st.currentDatabase);
+    const res = await api.runScript(tab.id, sql, els.autoLimit.checked, secs > 0 ? secs : null);
+    // A `USE db` inside the script may have moved THIS tab's database.
+    const st = await api.tabStatus(tab.id);
+
+    tab.result = res;
+    tab.error = null;
+    tab.activeResultIndex = ResultView.initialIndex(res);
+    tab.scrollTop = 0;
+    tab.colWidths.clear();
+    tab.activeDb = st.currentDatabase;
+    tab.connectionId = st.connectionId;
+
+    if (st.currentDatabase && st.currentDatabase !== activeDb && isFocused(tab)) {
+      activeDb = st.currentDatabase;
       markActiveDb(st.currentDatabase);
     }
   } catch (err) {
-    results.setMessage(String(err));
+    tab.result = null;
+    tab.error = String(err);
   } finally {
-    setBusy(false);
+    // Clear busy BEFORE painting: showResults renders the running state while
+    // the flag is set, so painting first would leave "Running…" over the rows.
+    setBusy(tab, false);
+    // The user may have switched tabs while this ran; only paint if still here.
+    // Either way the outcome is on the tab, so switching back shows it.
+    if (isFocused(tab)) {
+      showResults(tab);
+      syncConnLabel();
+    }
   }
 }
 
@@ -329,7 +523,7 @@ els.btnRun.onclick = () => void runStatementUnderCursor();
 els.btnRunAll.onclick = () => void run(docText(view));
 els.btnCancel.onclick = async () => {
   try {
-    await api.cancelQuery();
+    await api.cancelQuery(activeTab().id);
   } catch (err) {
     results.setMessage(String(err));
   }
@@ -369,10 +563,95 @@ draggable(els.hsplit, "y");
 view = createEditor($("editor"), {
   onRunStatement: () => void runStatementUnderCursor(),
   onRunAll: () => void run(docText(view)),
+  // Keeps the dirty dot honest without polling.
+  onDocChanged: () => {
+    tabs?.render();
+    applyLintSetting();
+  },
 });
 
-els.lintOn.onchange = applyLintSetting;
-applyLintSetting();
+tabs = new TabManager($("script-tabs"), view, {
+  onCreated: (tab) => {
+    // Register with the backend so it can hold a session for this tab. Harmless
+    // before a connection exists; connect() registers everything again.
+    if (connected) void api.openTab(tab.id);
+  },
+  onActivate: (tab) => {
+    // Compartment contents live in the EditorState, so a swapped-in state has
+    // whatever config it was born with. Re-apply both after every switch.
+    setSchema(view, schemaMap);
+    applyLintSetting(true);
+    showResults(tab);
+    syncBusy();
+    refreshFileNote();
+    if (tab.activeDb) markActiveDb(tab.activeDb);
+    view.focus();
+  },
+  canClose: (tab) => files.confirmClose(tab),
+  onClosed: (tab) => {
+    // Releases that tab's MySQL connection; leaving it would leak until
+    // disconnect.
+    if (connected) void api.closeTab(tab.id);
+  },
+});
+
+files = createFileUx({
+  tabs,
+  view,
+  notify: (m) => results.setMessage(m),
+  refreshNote: refreshFileNote,
+});
+
+tabs.create();
+
+// Dropping a file onto the window opens it. Tauri intercepts drag-and-drop at
+// the webview level, so the HTML5 drop events never fire — this is the only
+// way to receive them.
+void getCurrentWebview().onDragDropEvent((event) => {
+  if (event.payload.type === "drop") {
+    void files.openPaths(event.payload.paths);
+  }
+});
+
+// Quitting with unsaved work must ask first. `preventDefault` keeps the window
+// open while we do.
+void getCurrentWindow().onCloseRequested(async (event) => {
+  if (!(await files.confirmQuit())) event.preventDefault();
+});
+
+// --- tab keybindings, at window level so they work even when the tab bar has
+// focus. Ctrl+W in particular must be intercepted or the webview may act on it.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const inDialog = els.dialog.open;
+  if (inDialog) return;
+
+  if (e.key === "t" || e.key === "T") {
+    e.preventDefault();
+    tabs.create();
+  } else if (e.key === "w" || e.key === "W") {
+    e.preventDefault();
+    const t = tabs.active();
+    if (t) void tabs.close(t.id);
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    tabs.cycle(e.shiftKey ? -1 : 1);
+  } else if (/^[1-9]$/.test(e.key)) {
+    e.preventDefault();
+    tabs.activateIndex(Number(e.key) - 1);
+  } else if (e.key === "o" || e.key === "O") {
+    e.preventDefault();
+    void files.openViaDialog();
+  } else if (e.key === "s" || e.key === "S") {
+    e.preventDefault();
+    const t = tabs.active();
+    if (!t) return;
+    void (e.shiftKey ? files.saveAs(t) : files.save(t));
+  }
+});
+
+els.lintOn.onchange = () => applyLintSetting(true);
+applyLintSetting(true);
 
 results.setMessage("Not connected. Press Connect to get started.");
 setConnected(null, null);
