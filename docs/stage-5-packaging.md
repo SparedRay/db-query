@@ -139,6 +139,7 @@ Answered by the user, and they narrow this stage sharply.
 | Repo visibility | **Public** | Unlimited free CI minutes, and release assets are plain URLs. History was scanned for secrets before this was agreed — see §4.6. |
 | Auto-update | **Yes, in the first release** | Forces a format decision on Linux. See §4.4. |
 | Licensing | **Fully open source is fine**; the care is that everything is properly attributed | The repo needs its own `LICENSE`, which it does not have. See §4.5. |
+| Authorship | **`SparedRay`, via GitHub's private no-reply address** | Done. All five commits rewritten before any push, so the real address never reaches a public repo. |
 
 ### 4.1 Why Windows currently needs a command line, and what fixes it
 
@@ -172,13 +173,26 @@ list while leaving the passwords behind — the worst of both. **Decide before
 anything is distributed**, and if it changes, ship the migration in the same
 release.
 
-### 4.3 Icons — a hard blocker for Windows
+### 4.3 Icons — resolved 2026-09-06
 
-`src-tauri/icons/` holds four PNGs and `bundle.icon` lists three of them.
-**Windows bundling needs an `icon.ico`, which does not exist**, and the current
-PNGs are Tauri's defaults. `tauri icon` generates the whole set — `.ico`
-included — from one square source image, which we do not have either. This is
-the one item that will stop the first Windows build outright.
+*Was: a hard blocker. Windows bundling needs an `icon.ico`, and the repo had
+only four PNGs, all Tauri's defaults.*
+
+**Done.** The mark is a result grid with one column selected — the app's own
+signature gesture, and the option that stayed legible when four candidates were
+rendered at 512, 128, 48 and 32 px on both dark and light grounds. The source is
+[`design/logo-c-column.svg`](../design/logo-c-column.svg); three rejected
+candidates sit beside it for the record.
+
+`tauri icon` generated the set from it. `icon.ico` carries six frames — 16, 24,
+32, 48, 64 and 256 px — each checked by rendering it back out. At 16 px the grid
+compresses to a blue stripe, which still reads as a selected column; from 24 px
+up it is crisp. `bundle.icon` now lists `.ico` and `.icns` alongside the PNGs,
+and a rebuilt `.deb` installs them into `usr/share/icons/hicolor/`, so the
+launcher entry gets the mark.
+
+The Android and iOS assets `tauri icon` also emits were deleted: those platforms
+are not in scope, and unused binaries in a public repo are noise.
 
 ### 4.4 Auto-update forces a Linux format decision — and it is measured
 
@@ -294,7 +308,7 @@ notes rather than being glossed.
 
 ### Phase 1 — Make the bundle releasable
 - [ ] **Final bundle identifier**; migration if it changes (§4.2)
-- [ ] **A real icon; `tauri icon` to generate `icon.ico`** — blocks Windows entirely (§4.3)
+- [x] **A real icon; `tauri icon` to generate `icon.ico`** — done, §4.3
 - [ ] Explicit per-platform `bundle.targets`: `deb` on Linux, `nsis` on Windows — not `"all"`
 - [ ] A display `productName` (`db-query` is a directory name, not a title)
 - [ ] Version single-sourced between `Cargo.toml`, `package.json` and `tauri.conf.json`
@@ -340,8 +354,8 @@ notes rather than being glossed.
 
 ## 8. Risks
 
-- **The icon blocks Windows.** Cheapest item here and a hard stop — no `.ico`,
-  no Windows bundle. Do it first.
+- ~~**The icon blocks Windows.**~~ **Cleared** — `icon.ico` exists and the
+  bundle config points at it (§4.3).
 - **`com.dbquery.poc` escaping into a release.** The cheapest catastrophe on
   this list to prevent and the most annoying to undo.
 - **Unsigned Windows builds carry an unsigned updater.** The update *channel* is
