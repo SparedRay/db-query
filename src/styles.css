@@ -100,6 +100,15 @@ input.num {
 .cm-diagnostic { padding: 4px 8px; }
 .cm-gutter-lint { width: 12px; }
 
+/* `hidden` must actually hide.
+   The UA sheet's `[hidden] { display: none }` loses to ANY author rule that
+   sets `display`, regardless of specificity — so `.toggle { display: flex }`
+   silently defeated it, and the "Remember password" row stayed visible after
+   its "Save this connection" checkbox was unticked. That let a password be
+   marked for the keychain against a connection that was never being saved.
+   Found by a UI test; invisible to every other layer. */
+[hidden] { display: none !important; }
+
 .toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-dim); cursor: pointer; }
 
 /* --- connection rail --- */
@@ -154,8 +163,16 @@ input.num {
   background: none; border: none; color: var(--fg); text-align: left;
   padding: 5px 10px; border-radius: 4px; font-size: 12.5px; cursor: pointer;
 }
-.ctx-menu button:hover { background: #2c313b; }
+.ctx-menu button:hover:not(:disabled) { background: #2c313b; }
 .ctx-menu button.danger { color: #fca5a5; }
+.ctx-menu button:disabled { color: var(--fg-dim); cursor: default; }
+/* A label, not a control: it names what the items below act on. */
+.ctx-heading {
+  padding: 5px 10px 3px; font-size: 11px; color: var(--fg-dim);
+  border-bottom: 1px solid var(--border); margin-bottom: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px;
+}
+.ctx-menu .ctx-heading + button { margin-top: 0; }
 
 /* --- schema tree --- */
 .tree { flex: 1; overflow: auto; padding: 4px 0; }
@@ -167,6 +184,17 @@ input.num {
 .node .meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; padding-left: 8px; }
 .node.loading .twisty { opacity: .5; }
 .children { margin-left: 14px; }
+
+/* Groups make the table/view/routine separation structural rather than a
+   matter of noticing which emoji is in front of the name. */
+.node.group > .label { color: var(--fg-dim); font-size: 11.5px; letter-spacing: .02em; }
+.node.routine > .label { font-style: normal; }
+.node.routine > .meta {
+  font-family: var(--mono, ui-monospace, monospace);
+  max-width: 55%; overflow: hidden; text-overflow: ellipsis;
+}
+/* Double-click opens data, so make it feel like something worth aiming at. */
+.node.table, .node.routine { user-select: none; }
 
 /* --- script tabs (one per open SQL buffer) --- */
 .script-tabs {
@@ -246,11 +274,75 @@ table.rs td.numeric { text-align: right; color: var(--numeric); }
 table.rs td.null { color: var(--null); font-style: italic; }
 table.rs tr:hover td { background: #1b1e25; }
 
+.result-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  border-top: 1px solid var(--border); background: var(--bg-raised);
+}
+.result-bar .status { flex: 1; border-top: none; min-width: 0; }
+/* Feedback that must NOT cost the user their results — see `showNote`. */
+.result-note {
+  flex: 0 1 auto; min-width: 0; font-size: 11.5px; color: var(--fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: 2px 8px; border-radius: 4px; background: #23272f;
+}
+.result-actions { display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
+.result-actions button {
+  padding: 3px 9px; border-radius: 4px; border: 1px solid var(--border);
+  background: #262a33; color: var(--fg); cursor: pointer; font-size: 11.5px;
+}
+.result-actions button:disabled { opacity: .45; cursor: default; }
+.result-actions button:hover:not(:disabled) { background: #2c313b; }
+
 .status {
   flex: 0 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 5px 10px; border-top: 1px solid var(--border);
   background: var(--bg-raised); font-size: 11.5px; color: var(--fg-dim); min-height: 28px;
 }
+
+/* The row-number gutter: the thing to aim at when selecting rows.
+   `table.rs th` makes every th sticky to the TOP, which is right for the header
+   and wrong for a body row — it would park the numbers over the header. So the
+   body gutter sticks only to the left, and the corner sticks to both. */
+table.rs th.rownum {
+  position: sticky; top: auto; left: 0; z-index: 1;
+  background: var(--bg-raised); border-right: 1px solid var(--border);
+  color: var(--fg-dim); font-weight: 400; text-align: right;
+  padding: 0 6px; font-size: 11px; user-select: none; cursor: pointer;
+}
+table.rs th.rownum-h {
+  position: sticky; top: 0; left: 0; z-index: 3;
+  border-right: 1px solid var(--border); cursor: pointer; padding: 0 6px;
+}
+table.rs th.rownum-h::after { content: "\25f0"; opacity: .45; font-size: 11px; }
+table.rs th.rownum:hover { color: var(--fg); background: #23272f; }
+
+/* Selection. These must outrank `table.rs tr:hover td`, which is otherwise more
+   specific and would erase the highlight the moment the pointer crossed it. */
+table.rs th.sel, table.rs th.rownum.sel { background: #2b3a55; color: #fff; }
+table.rs tr td.sel, table.rs tr:hover td.sel { background: rgba(59,130,246,.20); }
+
+/* --- export dialog --- */
+#export-dialog { min-width: 420px; max-width: 520px; }
+#export-dialog fieldset {
+  border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px 4px; margin: 0 0 10px;
+}
+#export-dialog legend { font-size: 11px; color: var(--fg-dim); padding: 0 4px; }
+#export-dialog select {
+  display: block; width: 100%; margin-top: 3px; padding: 5px 7px;
+  background: var(--bg-input); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 12px;
+}
+#export-dialog .hint {
+  margin: -4px 0 10px; font-size: 11px; color: var(--fg-dim); line-height: 1.5;
+}
+#export-dialog .hint code { font-family: var(--mono); background: #23272f; padding: 0 3px; border-radius: 3px; }
+#export-dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+#export-dialog .actions button {
+  padding: 5px 14px; border-radius: 4px; border: 1px solid var(--border);
+  background: #262a33; color: var(--fg); cursor: pointer; font-size: 12px;
+}
+#export-dialog .actions button[type="submit"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+#export-scope-note { margin: -6px 0 12px; }
 .chip { padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: #22262e; cursor: default; }
 .chip.warn { border-color: var(--warn); color: #fcd34d; cursor: help; }
 .chip.err { border-color: var(--danger); color: #fca5a5; }

@@ -1,7 +1,21 @@
 import type { EditorView } from "@codemirror/view";
 import type { SQLNamespace } from "@codemirror/lang-sql";
 
-import { api, type ConnProfile, type TableRef } from "./api";
+import {
+  api,
+  defaultCsvOptions,
+  type ConnProfile,
+  type TableRef,
+  type RoutineRef,
+  type ColumnInfo,
+  type CsvOptions,
+  type InsertOptions,
+  type ExportFormat,
+  type ExportOutcome,
+  type SourceTable,
+} from "./api";
+import { copyText } from "./clipboard";
+import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
 import {
@@ -34,6 +48,30 @@ const els = {
   connColours: $("conn-colours"),
   connSave: $<HTMLInputElement>("conn-save"),
   connRemember: $<HTMLInputElement>("conn-remember"),
+  resultNote: $<HTMLElement>("result-note"),
+  btnCopy: $<HTMLButtonElement>("btn-copy"),
+  btnCopyNoHead: $<HTMLButtonElement>("btn-copy-nohead"),
+  btnExport: $<HTMLButtonElement>("btn-export"),
+  exportDialog: $<HTMLDialogElement>("export-dialog"),
+  exportForm: $<HTMLFormElement>("export-form"),
+  exportFormat: $<HTMLSelectElement>("export-format"),
+  exportScope: $<HTMLSelectElement>("export-scope"),
+  exportScopeNote: $<HTMLParagraphElement>("export-scope-note"),
+  exportCsvOpts: $<HTMLFieldSetElement>("export-csv-opts"),
+  exportSqlOpts: $<HTMLFieldSetElement>("export-sql-opts"),
+  exportError: $<HTMLParagraphElement>("export-error"),
+  exportCancel: $<HTMLButtonElement>("export-cancel"),
+  exportOk: $<HTMLButtonElement>("export-ok"),
+  csvDelim: $<HTMLInputElement>("csv-delim"),
+  csvHeaders: $<HTMLInputElement>("csv-headers"),
+  csvNull: $<HTMLInputElement>("csv-null"),
+  csvCrlf: $<HTMLInputElement>("csv-crlf"),
+  csvBom: $<HTMLInputElement>("csv-bom"),
+  csvGuard: $<HTMLInputElement>("csv-guard"),
+  sqlTable: $<HTMLInputElement>("sql-table"),
+  sqlCreate: $<HTMLInputElement>("sql-create"),
+  sqlCreateNote: $<HTMLParagraphElement>("sql-create-note"),
+  sqlBatch: $<HTMLInputElement>("sql-batch"),
   connRememberRow: $<HTMLLabelElement>("conn-remember-row"),
   dialog: $<HTMLDialogElement>("conn-dialog"),
   form: $<HTMLFormElement>("conn-form"),
@@ -42,7 +80,9 @@ const els = {
   vsplit: $("vsplit"), hsplit: $("hsplit"),
 };
 
-const results = new ResultView($("tabs"), $("grid"), $("status"));
+// `refreshExportBar` is a hoisted function declaration, so it can be handed
+// over here even though it is defined further down.
+const results = new ResultView($("tabs"), $("grid"), $("status"), () => refreshExportBar());
 
 let view!: EditorView;
 let tabs!: TabManager;
@@ -62,6 +102,15 @@ const activeTab = (): ScriptTab => {
 
 let connected = false;
 let activeDb: string | null = null;
+
+/**
+ * Rows a generated `SELECT` asks for.
+ *
+ * Seeded from the backend at boot rather than written down here as well — it is
+ * a different number from the executor's safety ceiling, and two places that
+ * both "know" it is how they drift apart.
+ */
+let browseLimit = 1000;
 /** Accumulated schema for CodeMirror autocomplete, grown as the tree loads. */
 const schemaMap: SQLNamespace = {};
 
@@ -121,6 +170,10 @@ async function lintSource(v: EditorView) {
     // A linter failure must never surface as an error the user has to dismiss.
     return [];
   }
+  // The `catch` above only covers a rejection. A response that *resolves* to
+  // something other than a list would reach `.map` below and throw an uncaught
+  // page error — which is exactly the outcome the comment above rules out.
+  if (!Array.isArray(diags)) return [];
   const toChar = makeByteToChar(text);
   const len = v.state.doc.length;
   return diags.map((d) => {
@@ -434,6 +487,69 @@ function node(cls: string, label: string, twisty: string, icon: string) {
 }
 
 /**
+ * Single click and double click on the same element, without them fighting.
+ *
+ * The single action is deferred until the double-click window has passed and
+ * cancelled if a second click arrives. Nothing here is instant anyway — expanding
+ * a table fetches its columns — so the delay is invisible, whereas expanding on
+ * the first click of a double-click makes the tree jump under the cursor.
+ */
+function clickOrDouble(el: HTMLElement, single: () => void, double: () => void) {
+  let timer: number | undefined;
+  el.onclick = (e) => {
+    e.stopPropagation();
+    window.clearTimeout(timer);
+    timer = window.setTimeout(single, 220);
+  };
+  el.ondblclick = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    window.clearTimeout(timer);
+    double();
+  };
+}
+
+/**
+ * Put generated SQL in front of the user.
+ *
+ * A **new tab**, always — generating into the script someone is working on
+ * would edit their work to show them something. The one exception is the
+ * routine "append", which is what was asked for and what a CALL is usually for.
+ *
+ * Nothing is ever run. That is the rule this whole stage obeys.
+ */
+async function showGenerated(
+  title: string,
+  produce: () => Promise<string>,
+  sourceTable?: SourceTable,
+) {
+  try {
+    tabs.create({ contents: await produce(), title, sourceTable: sourceTable ?? null });
+    view.focus();
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
+
+/** Append generated SQL to the end of the current tab, leaving the cursor after it. */
+async function appendGenerated(produce: () => Promise<string>) {
+  try {
+    const text = await produce();
+    const end = view.state.doc.length;
+    const needsBlankLine = end > 0 && !view.state.sliceDoc(Math.max(0, end - 2), end).endsWith("\n\n");
+    const insert = (end > 0 ? (needsBlankLine ? "\n\n" : "") : "") + text;
+    view.dispatch({
+      changes: { from: end, insert },
+      selection: { anchor: end + insert.length },
+      scrollIntoView: true,
+    });
+    view.focus();
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
+
+/**
  * Build (or reveal) the schema tree for one connection.
  *
  * Each connection keeps its own tree element, so switching away and back does
@@ -467,7 +583,7 @@ function buildDbNode(connId: string, db: string): HTMLElement {
     await api.refreshSchema(connId, db);
     children.replaceChildren();
     children.dataset.loaded = "";
-    if (!children.hidden) await loadTables(connId, db, children, n);
+    if (!children.hidden) await loadDbChildren(connId, db, children, n);
   };
   n.append(refresh);
 
@@ -491,7 +607,7 @@ function buildDbNode(connId: string, db: string): HTMLElement {
     children.hidden = !children.hidden;
     twisty.textContent = children.hidden ? "▸" : "▾";
     if (!children.hidden && !children.dataset.loaded) {
-      await loadTables(connId, db, children, n);
+      await loadDbChildren(connId, db, children, n);
     }
   };
 
@@ -499,12 +615,49 @@ function buildDbNode(connId: string, db: string): HTMLElement {
   return wrap;
 }
 
-async function loadTables(connId: string, db: string, host: HTMLElement, dbNode: HTMLElement) {
+/**
+ * A database's children, grouped by kind.
+ *
+ * Tables and views were previously one flat list distinguished only by icon,
+ * and routines were not shown at all. Grouping makes the separation structural
+ * rather than a matter of noticing an emoji — and it is where procedures and
+ * functions can live without being mistaken for tables.
+ *
+ * Tables open automatically: it is the common case and should not cost a click.
+ */
+async function loadDbChildren(
+  connId: string,
+  db: string,
+  host: HTMLElement,
+  dbNode: HTMLElement,
+) {
   dbNode.classList.add("loading");
   try {
-    const tables = await api.listTables(connId, db);
-    host.replaceChildren(...tables.map((t) => buildTableNode(connId, db, t)));
+    const [tables, routines] = await Promise.all([
+      api.listTables(connId, db),
+      // A server that will not report routines (no privilege, an old version)
+      // must not stop the tables from appearing.
+      api.listRoutines(connId, db).catch(() => [] as RoutineRef[]),
+    ]);
+
+    const baseTables = tables.filter((t) => !t.kind.toUpperCase().includes("VIEW"));
+    const views = tables.filter((t) => t.kind.toUpperCase().includes("VIEW"));
+    const procs = routines.filter((r) => r.kind === "procedure");
+    const funcs = routines.filter((r) => r.kind === "function");
+
+    host.replaceChildren(
+      buildGroup("Tables", "\u25a6", baseTables.length, () =>
+        baseTables.map((t) => buildTableNode(connId, db, t)),
+      { open: true }),
+      buildGroup("Views", "\u{1f441}", views.length, () =>
+        views.map((t) => buildTableNode(connId, db, t))),
+      buildGroup("Procedures", "\u2699", procs.length, () =>
+        procs.map((r) => buildRoutineNode(connId, db, r))),
+      buildGroup("Functions", "\u0192", funcs.length, () =>
+        funcs.map((r) => buildRoutineNode(connId, db, r))),
+    );
     host.dataset.loaded = "1";
+
     // Seed autocomplete with table names immediately; columns fill in lazily.
     for (const t of tables) {
       if (!(t.name in schemaMap)) (schemaMap as Record<string, string[]>)[t.name] = [];
@@ -520,36 +673,56 @@ async function loadTables(connId: string, db: string, host: HTMLElement, dbNode:
   }
 }
 
-function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
+/** A collapsible "Tables (12)" style grouping. Empty groups are not rendered. */
+function buildGroup(
+  label: string,
+  icon: string,
+  count: number,
+  build: () => HTMLElement[],
+  opts?: { open?: boolean },
+): HTMLElement {
   const wrap = document.createElement("div");
-  const isView = t.kind.toUpperCase().includes("VIEW");
-  const { n, twisty, label } = node("table", t.name, "▸", isView ? "👁" : "▦");
+  if (count === 0) return wrap;
+
+  const { n, twisty } = node("group", `${label} (${count})`, "\u25b8", icon);
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
 
-  // Clicking the name inserts it; clicking the twisty expands columns.
-  label.onclick = (e) => {
+  const toggle = () => {
+    children.hidden = !children.hidden;
+    twisty.textContent = children.hidden ? "\u25b8" : "\u25be";
+    if (!children.hidden && !children.dataset.loaded) {
+      children.replaceChildren(...build());
+      children.dataset.loaded = "1";
+    }
+  };
+  n.onclick = (e) => {
     e.stopPropagation();
-    insertAtCursor(view, t.name);
+    toggle();
   };
 
-  n.onclick = async () => {
+  wrap.append(n, children);
+  if (opts?.open) toggle();
+  return wrap;
+}
+
+function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
+  const wrap = document.createElement("div");
+  const isView = t.kind.toUpperCase().includes("VIEW");
+  const { n, twisty, label } = node("table", t.name, "\u25b8", isView ? "\u{1f441}" : "\u25a6");
+  const children = document.createElement("div");
+  children.className = "children";
+  children.hidden = true;
+
+  const expand = async () => {
     children.hidden = !children.hidden;
-    twisty.textContent = children.hidden ? "▸" : "▾";
+    twisty.textContent = children.hidden ? "\u25b8" : "\u25be";
     if (!children.hidden && !children.dataset.loaded) {
       n.classList.add("loading");
       try {
         const cols = await api.listColumns(connId, db, t.name);
-        children.replaceChildren(...cols.map((c) => {
-          const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "🔑" : "·");
-          const meta = document.createElement("span");
-          meta.className = "meta";
-          meta.textContent = c.dataType + (c.nullable ? "" : " ·");
-          cn.append(meta);
-          cn.onclick = (e) => { e.stopPropagation(); insertAtCursor(view, c.name); };
-          return cn;
-        }));
+        children.replaceChildren(...cols.map((c) => buildColumnNode(db, t.name, c)));
         children.dataset.loaded = "1";
         (schemaMap as Record<string, string[]>)[t.name] = cols.map((c) => c.name);
         setSchema(view, schemaMap);
@@ -564,9 +737,352 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
     }
   };
 
+  const browse = () =>
+    void showGenerated(
+      t.name,
+      () => api.generateSelect(db, t.name, browseLimit),
+      // The one place the source table is known for certain, which is what lets
+      // an exported CREATE TABLE be the server's own rather than a guess.
+      { connectionId: connId, db, table: t.name },
+    );
+
+  // Single click expands, double click browses. The label used to insert the
+  // table name on a plain click, which cannot coexist with a double-click
+  // action — that action now lives in the context menu, where it is also
+  // easier to find than "click the text but not the row".
+  clickOrDouble(n, () => void expand(), browse);
+  clickOrDouble(label, () => void expand(), browse);
+
+  n.oncontextmenu = (e) =>
+    contextMenu(e, [
+      { label: `${isView ? "View" : "Table"} ${t.name}`, run: () => {}, heading: true },
+      { label: `Select first ${browseLimit} rows`, run: browse },
+      { label: "Insert name at cursor", run: () => insertAtCursor(view, t.name) },
+      {
+        label: isView ? "Drop view…" : "Drop table…",
+        danger: true,
+        run: () =>
+          void showGenerated(`drop ${t.name}`, () =>
+            api.generateDrop({ type: isView ? "view" : "table", db, name: t.name })),
+      },
+    ]);
+
   wrap.append(n, children);
   return wrap;
 }
+
+function buildColumnNode(
+  db: string,
+  table: string,
+  c: ColumnInfo,
+): HTMLElement {
+  const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "\u{1f511}" : "\u00b7");
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = c.dataType + (c.nullable ? "" : " \u00b7");
+  cn.append(meta);
+  // No double-click action on a column, so a plain click can still insert the
+  // name — the fastest way to build a select list while writing.
+  cn.onclick = (e) => {
+    e.stopPropagation();
+    insertAtCursor(view, c.name);
+  };
+  cn.oncontextmenu = (e) =>
+    contextMenu(e, [
+      { label: `Column ${table}.${c.name}`, run: () => {}, heading: true },
+      { label: "Insert name at cursor", run: () => insertAtCursor(view, c.name) },
+      {
+        label: "Drop column…",
+        danger: true,
+        run: () =>
+          void showGenerated(`drop ${c.name}`, () =>
+            api.generateDrop({ type: "column", db, table, name: c.name })),
+      },
+    ]);
+  return cn;
+}
+
+function buildRoutineNode(connId: string, db: string, r: RoutineRef): HTMLElement {
+  const isFn = r.kind === "function";
+  const { n } = node("routine", r.name, "", isFn ? "\u0192" : "\u2699");
+
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  // The signature at a glance: a routine you cannot call without opening
+  // something else is barely listed at all.
+  const args = r.params.map((p) => p.name).join(", ");
+  meta.textContent = isFn ? `(${args}) \u2192 ${r.returns ?? "?"}` : `(${args})`;
+  n.append(meta);
+
+  const append = () => void appendGenerated(() => api.generateCall(connId, db, r.name));
+
+  // Double click appends the call to the tab in progress, as asked: calling a
+  // routine is usually a step inside a script, not a fresh task the way
+  // browsing a table is.
+  n.ondblclick = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    append();
+  };
+
+  n.oncontextmenu = (e) =>
+    contextMenu(e, [
+      { label: `${isFn ? "Function" : "Procedure"} ${r.name}`, run: () => {}, heading: true },
+      { label: "Append call to this tab", run: append },
+      {
+        label: "Examine definition\u2026",
+        run: () =>
+          void showGenerated(r.name, () => api.routineDdl(connId, db, r.name, r.kind)),
+      },
+      {
+        label: `Drop ${isFn ? "function" : "procedure"}\u2026`,
+        danger: true,
+        run: () =>
+          void showGenerated(`drop ${r.name}`, () =>
+            api.generateDrop({ type: "routine", db, name: r.name, kind: r.kind })),
+      },
+    ]);
+
+  return n;
+}
+
+// ------------------------------------------------------------------- export
+
+/**
+ * The table the active tab's results came from, when they came from one.
+ *
+ * Set only by the schema tree's browse action, which is the one place we *know*
+ * the answer. Guessing it by parsing the SQL would be wrong for a join and would
+ * make an exported `CREATE TABLE` claim a fidelity it does not have.
+ */
+const exportSourceOf = (): SourceTable | null => tabs.active()?.sourceTable ?? null;
+
+/** "3 rows", "2 columns", "3 rows × 2 columns" — or nothing when all is selected. */
+function describeSelection(): string {
+  const { rows, cols } = results.selectionCounts();
+  const parts: string[] = [];
+  if (rows) parts.push(`${rows} row${rows === 1 ? "" : "s"}`);
+  if (cols) parts.push(`${cols} column${cols === 1 ? "" : "s"}`);
+  return parts.join(" \u00d7 ");
+}
+
+/**
+ * Report what a copy or export did **without destroying the result**.
+ *
+ * `results.setMessage` replaces the grid — right for "no results yet" and an
+ * error, catastrophic for "Copied 2 rows": copying your results used to delete
+ * them from the screen and disable the button, so you could not copy twice
+ * without re-running the query. Found by a UI test that had been passing,
+ * because it asserted the clipboard and never looked at what was left behind.
+ */
+function showNote(text: string) {
+  els.resultNote.textContent = text;
+  els.resultNote.title = text;
+  els.resultNote.hidden = !text;
+}
+
+function refreshExportBar() {
+  const data = results.selectedData();
+  const has = data !== null;
+  els.btnCopy.disabled = !has;
+  els.btnCopyNoHead.disabled = !has;
+  els.btnExport.disabled = !has;
+  const what = describeSelection();
+  els.btnCopy.textContent = what ? `Copy ${what}` : "Copy";
+  els.btnCopy.title = what
+    ? `Copy the selected ${what} (Ctrl+C)`
+    : "Copy every row and column (Ctrl+C)";
+}
+
+async function copySelection(headers: boolean) {
+  const data = results.selectedData();
+  if (!data) return;
+  try {
+    const text = await api.clipboardText(
+      { columns: data.columns, rows: data.rows, truncated: data.truncated },
+      { ...defaultCsvOptions(), delimiter: "\t", headers, bom: false, crlf: false },
+    );
+    const how = await copyText(text);
+    const what = describeSelection();
+    const scope = what
+      ? `the selected ${what}`
+      : `all ${data.rows.length} row(s) \u00d7 ${data.columns.length} column(s)`;
+    showNote(
+      `Copied ${scope}${headers ? " with headers" : ""}.` +
+        (data.truncated ? " The result was truncated, so this is not the whole query." : "") +
+        (how === "exec-command" ? " (via the legacy clipboard path)" : ""),
+    );
+  } catch (err) {
+    // Never a silent no-op — that is the whole lesson of the delete button.
+    showNote(String(err));
+  }
+}
+
+els.btnCopy.onclick = () => void copySelection(true);
+els.btnCopyNoHead.onclick = () => void copySelection(false);
+els.btnExport.onclick = () => openExportDialog();
+
+function openExportDialog() {
+  const data = results.selectedData();
+  if (!data) return;
+
+  els.exportError.hidden = true;
+  const sql = results.activeStatementSql();
+  const what = describeSelection();
+  els.exportScopeNote.textContent =
+    (what ? `Selected: ${what}. ` : "") +
+    `${data.rows.length} row(s), ${data.columns.length} column(s) will be written.` +
+    (data.truncated
+      ? ` This result was cut off at ${data.rows.length} rows — "re-run the query" fetches the rest.`
+      : "");
+
+  // The unbounded path re-executes the statement, so it is only offered when
+  // that can be done safely. Disabling it with a reason beats offering it and
+  // being wrong once.
+  const rerunOk = sql !== null && results.isEverything();
+  const allOption = els.exportScope.options[1];
+  allOption.disabled = !rerunOk;
+  allOption.textContent = rerunOk
+    ? "Re-run the query and export every row"
+    : !results.isEverything()
+      ? "Re-run the query \u2014 not available while a subset is selected"
+      : "Re-run the query \u2014 not available for this statement";
+  if (!rerunOk) els.exportScope.value = "shown";
+  else if (data.truncated) els.exportScope.value = "all";
+
+  const source = exportSourceOf();
+  els.sqlTable.value = source?.table ?? "exported_rows";
+  els.sqlCreateNote.textContent = source
+    ? "Uses the server's own CREATE TABLE for this table, so it is exact."
+    : "These rows are not from a single table, so the schema is derived from the result columns: types are widened, and there are no keys or defaults.";
+
+  syncExportFormat();
+  els.exportDialog.showModal();
+}
+
+function syncExportFormat() {
+  const csv = els.exportFormat.value === "csv";
+  els.exportCsvOpts.hidden = !csv;
+  els.exportSqlOpts.hidden = csv;
+}
+els.exportFormat.onchange = syncExportFormat;
+els.exportCancel.onclick = () => els.exportDialog.close();
+
+function csvOptionsFromForm(): CsvOptions {
+  return {
+    delimiter: els.csvDelim.value || ",",
+    crlf: els.csvCrlf.checked,
+    bom: els.csvBom.checked,
+    headers: els.csvHeaders.checked,
+    nullAs: els.csvNull.value,
+    formulaGuard: els.csvGuard.checked,
+  };
+}
+
+function insertOptionsFromForm(): InsertOptions {
+  return {
+    table: els.sqlTable.value.trim() || "exported_rows",
+    db: exportSourceOf()?.db ?? null,
+    createTable: els.sqlCreate.checked,
+    batchSize: Math.max(1, Number(els.sqlBatch.value) || 100),
+  };
+}
+
+els.exportForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const data = results.selectedData();
+  if (!data) return;
+
+  const format = els.exportFormat.value as ExportFormat;
+  const all = els.exportScope.value === "all";
+  const csv = csvOptionsFromForm();
+  const inserts = insertOptionsFromForm();
+  const name = `${inserts.table}.${format === "csv" ? "csv" : "sql"}`;
+
+  els.exportOk.disabled = true;
+  els.exportOk.textContent = "Exporting…";
+  try {
+    const outcome = all
+      ? await api.exportRerun(
+          activeTab().id,
+          results.activeStatementSql() ?? "",
+          format,
+          { csv, inserts },
+          name,
+        )
+      : format === "csv"
+        ? await api.exportCsv(
+            { columns: data.columns, rows: data.rows, truncated: data.truncated },
+            csv,
+            name,
+          )
+        : await api.exportInserts(
+            { columns: data.columns, rows: data.rows, truncated: data.truncated },
+            inserts,
+            exportSourceOf(),
+            name,
+          );
+
+    // null means the user cancelled the save dialog, which is not a failure
+    // and must not be reported as one.
+    if (outcome) {
+      showNote(describeExport(outcome, all));
+      els.exportDialog.close();
+    } else {
+      els.exportOk.disabled = false;
+      els.exportOk.textContent = "Export";
+    }
+  } catch (err) {
+    // Keeps the dialog open with its values, so a refusal can be corrected
+    // rather than re-entered.
+    els.exportError.textContent = String(err);
+    els.exportError.hidden = false;
+    els.exportOk.disabled = false;
+    els.exportOk.textContent = "Export";
+  }
+});
+
+/**
+ * Say what actually landed in the file.
+ *
+ * A truncated source is stated outright: writing 5000 rows and letting it look
+ * like the whole table is the same silent-wrong-answer failure as Stage 0's
+ * empty schema tree.
+ */
+function describeExport(o: ExportOutcome, wasRerun: boolean): string {
+  const size = o.bytesWritten > 1024 * 1024
+    ? `${(o.bytesWritten / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(o.bytesWritten / 1024))} KB`;
+  const parts = [`Exported ${o.rowsWritten} row(s), ${size}, to ${o.path}.`];
+  if (o.truncatedSource) {
+    parts.push(
+      "These were the rows on screen, and the result had already been cut off — " +
+        "the query has more. Use \u201cre-run the query\u201d to export all of them.",
+    );
+  } else if (wasRerun) {
+    parts.push("The query was re-run with no row limit, so this is every row.");
+  }
+  parts.push(...o.warnings);
+  return parts.join(" ");
+}
+
+// Grid keyboard: Ctrl+C copies the selection, Ctrl+A selects every column.
+// Scoped to the grid so neither shadows the editor's own Ctrl+C / Ctrl+A —
+// which is why the grid carries a tabindex and can hold focus at all.
+$("grid").addEventListener("keydown", (e) => {
+  const ev = e as KeyboardEvent;
+  if (!(ev.ctrlKey || ev.metaKey)) return;
+  if (ev.key === "c" || ev.key === "C") {
+    ev.preventDefault();
+    void copySelection(!ev.shiftKey);
+  } else if (ev.key === "a" || ev.key === "A") {
+    ev.preventDefault();
+    results.selectAll();
+  }
+});
+$("grid").addEventListener("keydown", (e) => {
+  if ((e as KeyboardEvent).key === "Escape") results.clearSelection();
+});
 
 // ---------------------------------------------------------------- execution
 
@@ -580,6 +1096,19 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
  * to be focused when the run started.
  */
 function showResults(tab: ScriptTab) {
+  // A note describes what was done to the *previous* result, so it goes when
+  // that result does.
+  showNote("");
+  // Every early return below ends in "no exportable data", so the bar is
+  // refreshed on the way out rather than at each one.
+  try {
+    showResultsInner(tab);
+  } finally {
+    refreshExportBar();
+  }
+}
+
+function showResultsInner(tab: ScriptTab) {
   if (tab.busy) {
     results.setMessage(
       tab.result
@@ -603,8 +1132,10 @@ function showResults(tab: ScriptTab) {
     activeIndex: tab.activeResultIndex,
     widths: tab.colWidths,
     scrollTop: tab.scrollTop,
+    selection: tab.colSelection,
     onSelect: (i) => { tab.activeResultIndex = i; },
     onScrolled: (top) => { tab.scrollTop = top; },
+    onSelectionChanged: () => refreshExportBar(),
   });
 }
 
@@ -799,6 +1330,12 @@ files = createFileUx({
 
 // No tab is created here: a tab must belong to a connection, and at boot there
 // is none. The first tab appears when a connection becomes active.
+
+// One source of truth for the row numbers: the backend owns them, and the UI
+// asks rather than repeating them.
+void api.appDefaults().then((d) => {
+  browseLimit = d.browseLimit;
+});
 
 // Saved connections appear in the rail immediately, disconnected. Nothing is
 // contacted until the user clicks one.

@@ -36,6 +36,125 @@ export type ProfileView = ConnProfile & {
   rememberPassword: boolean;
 };
 
+/** Procedure or function. Mirrors Rust's `RoutineKind`. */
+export type RoutineKind = "procedure" | "function";
+
+export interface RoutineParam {
+  name: string;
+  /** "IN" | "OUT" | "INOUT". Functions report no mode; they are all IN. */
+  mode: string;
+  dataType: string;
+}
+
+export interface RoutineRef {
+  name: string;
+  kind: RoutineKind;
+  /** Return type — set for functions, null for procedures. */
+  returns: string | null;
+  params: RoutineParam[];
+}
+
+/**
+ * What a generated `DROP` targets.
+ *
+ * A discriminated union rather than a name plus a kind string: a half-specified
+ * target — a column with no table, a routine with no kind — cannot be built.
+ */
+export type DropTarget =
+  | { type: "schema"; db: string }
+  | { type: "table"; db: string; name: string }
+  | { type: "view"; db: string; name: string }
+  | { type: "column"; db: string; table: string; name: string }
+  | { type: "routine"; db: string; name: string; kind: RoutineKind };
+
+export interface AppDefaults {
+  /** Rows a generated SELECT asks for. */
+  browseLimit: number;
+  /** The executor's per-statement safety ceiling. A different thing entirely. */
+  maxRows: number;
+}
+
+/**
+ * How a CSV should be written.
+ *
+ * Every field here is a decision the format forces and cannot make for us —
+ * most of all `nullAs`, because CSV has no way to tell NULL from an empty
+ * string and they are different values.
+ */
+export interface CsvOptions {
+  delimiter: string;
+  /** RFC 4180 and Excel want CRLF; Unix tools do not. */
+  crlf: boolean;
+  /** Without it Excel mangles non-ASCII; with it some Unix tools show a stray BOM. */
+  bom: boolean;
+  headers: boolean;
+  /** What a NULL becomes. Empty by default — and warned about. */
+  nullAs: string;
+  /**
+   * Prefix `'` to fields starting `=`, `+`, `-`, `@` so spreadsheets do not
+   * execute them. Off by default: it changes the exported value.
+   */
+  formulaGuard: boolean;
+}
+
+export const defaultCsvOptions = (): CsvOptions => ({
+  delimiter: ",",
+  crlf: true,
+  bom: true,
+  headers: true,
+  nullAs: "",
+  formulaGuard: false,
+});
+
+export interface InsertOptions {
+  table: string;
+  db: string | null;
+  createTable: boolean;
+  /** Rows per statement. Multi-row inserts replay far faster than one each. */
+  batchSize: number;
+}
+
+/** The table a result set came from, when it came from exactly one. */
+export interface SourceTable {
+  connectionId: string;
+  db: string;
+  table: string;
+}
+
+export type ExportFormat = "csv" | "inserts";
+
+/**
+ * A result set as the grid holds it.
+ *
+ * One object rather than three arguments because they are one thing: rows
+ * without `truncated` is how a partial export gets presented as a whole one.
+ */
+export interface ResultSet {
+  columns: ColumnMeta[];
+  rows: CellValue[][];
+  /** The row ceiling had already cut this short before it reached the grid. */
+  truncated: boolean;
+}
+
+export interface ExportOptions {
+  csv: CsvOptions;
+  inserts: InsertOptions;
+}
+
+export interface ExportOutcome {
+  path: string;
+  rowsWritten: number;
+  /**
+   * The rows exported were already cut short by the row ceiling. The file is
+   * complete for what was on screen and incomplete for the query — never
+   * present it as the latter.
+   */
+  truncatedSource: boolean;
+  bytesWritten: number;
+  /** True and unwelcome: a binary column, a NULL CSV cannot express. */
+  warnings: string[];
+}
+
 export interface ConnInfo {
   id: string;
   serverVersion: string;
@@ -173,6 +292,49 @@ export const api = {
   hasStoredPassword: (id: string) => invoke<boolean>("has_stored_password", { id }),
 
   // --- connections. Several can be live at once; every call names one.
+  listRoutines: (connectionId: string, db: string) =>
+    invoke<RoutineRef[]>("list_routines", { connectionId, db }),
+  /** The re-runnable creation script for a routine. Text only — never executed. */
+  routineDdl: (connectionId: string, db: string, name: string, kind: RoutineKind) =>
+    invoke<string>("routine_ddl", { connectionId, db, name, kind }),
+
+  // --- generated SQL. Every one of these returns text for the user to read
+  // and run themselves; nothing here executes anything.
+  appDefaults: () => invoke<AppDefaults>("app_defaults"),
+  generateSelect: (db: string, table: string, limit: number) =>
+    invoke<string>("generate_select", { db, table, limit }),
+  generateDrop: (target: DropTarget) => invoke<string>("generate_drop", { target }),
+  generateCall: (connectionId: string, db: string, name: string) =>
+    invoke<string>("generate_call", { connectionId, db, name }),
+
+  // --- export. The save dialog and the file write both live in Rust; these
+  // return null when the user cancels the dialog.
+  exportCsv: (result: ResultSet, options: CsvOptions, suggestedName: string) =>
+    invoke<ExportOutcome | null>("export_csv", { result, options, suggestedName }),
+  exportInserts: (
+    result: ResultSet,
+    options: InsertOptions,
+    source: SourceTable | null,
+    suggestedName: string,
+  ) =>
+    invoke<ExportOutcome | null>("export_inserts", {
+      result, options, source, suggestedName,
+    }),
+  /** Re-run the statement with no row ceiling and stream every row to a file. */
+  exportRerun: (
+    tabId: string,
+    sql: string,
+    format: ExportFormat,
+    options: ExportOptions,
+    suggestedName: string,
+  ) =>
+    invoke<ExportOutcome | null>("export_rerun", {
+      tabId, sql, format, options, suggestedName,
+    }),
+  /** Delimited text for the clipboard. The frontend owns the clipboard call. */
+  clipboardText: (result: ResultSet, options: CsvOptions) =>
+    invoke<string>("clipboard_text", { result, options }),
+
   connect: (profile: ConnProfile, password: string) =>
     invoke<ConnInfo>("connect", { profile, password }),
   /** Connect using a profile's remembered password; errors if none is stored. */

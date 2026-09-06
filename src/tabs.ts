@@ -4,8 +4,9 @@
 import type { EditorState, Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
-import type { ScriptResult } from "./api";
+import type { ScriptResult, SourceTable } from "./api";
 import { createEditorState, STARTER_DOC } from "./editor";
+import { emptySelection, type GridSelection } from "./grid";
 
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
@@ -41,6 +42,18 @@ export interface ScriptTab {
   error: string | null;
   activeResultIndex: number;
   colWidths: Map<string, number>;
+  /**
+   * Selected rows and columns of the active statement's result. Lives on the
+   * tab so a selection survives a tab switch, like widths and scroll position.
+   */
+  colSelection: GridSelection;
+  /**
+   * The table this tab's results came from, when they came from exactly one —
+   * set by the schema tree's browse action, which is the only place we know it.
+   * Per tab, not global: switching tabs must not carry another tab's source
+   * into an export and claim a fidelity it does not have.
+   */
+  sourceTable: SourceTable | null;
   scrollTop: number;
 
   busy: boolean;
@@ -168,6 +181,7 @@ export class TabManager {
     connectionId?: string;
     contents?: string;
     title?: string;
+    sourceTable?: SourceTable | null;
     filePath?: string | null;
     dialect?: string;
     encoding?: string;
@@ -199,6 +213,8 @@ export class TabManager {
       error: null,
       activeResultIndex: 0,
       colWidths: new Map(),
+      colSelection: emptySelection(),
+      sourceTable: opts?.sourceTable ?? null,
       scrollTop: 0,
       busy: false,
       activeDb: null,

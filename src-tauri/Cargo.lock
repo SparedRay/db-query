@@ -857,6 +857,7 @@ dependencies = [
 name = "db-query"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "keyring",
  "serde",
  "serde_json",

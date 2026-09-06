@@ -16,8 +16,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 # Native open/save dialogs. Invoked from Rust so the pick-and-read is a single
-# round trip; `tauri-plugin-fs` is deliberately NOT used — it exists to give
-# JavaScript filesystem access, and all of our file I/O lives in Rust.
+# round trip.
+#
+# `tauri-plugin-fs` is **linked in regardless** — it is a transitive dependency
+# of this plugin (`cargo tree -i tauri-plugin-fs` confirms it). What we control
+# is that we neither call it nor grant it: the capabilities file lists no `fs:`
+# permission, so JavaScript cannot reach the filesystem through it, and every
+# file operation we perform lives in Rust. The distinction matters for the
+# licence manifest, which must list what is compiled in, not what we chose to
+# call.
 tauri-plugin-dialog = "2"
 
 # Credential storage. `keyring` 4.x's default `v1` feature maps to the native
@@ -28,6 +35,10 @@ keyring = "4"
 # Best-effort scrubbing of the in-memory password. Hygiene, not a guarantee —
 # see the Secret newtype's docs.
 zeroize = "1"
+# Streaming an unbounded export row-by-row: sqlx hands back a Stream and this
+# is the `.next()` on it. Already in the tree via sqlx, so no new download.
+# Licence verified 2026-09-05: MIT OR Apache-2.0.
+futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

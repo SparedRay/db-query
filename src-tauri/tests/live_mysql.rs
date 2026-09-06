@@ -1102,3 +1102,697 @@ async fn a_serialised_profile_carries_no_secret() {
     assert!(!json.contains(PASSWORD), "{json}");
     assert!(!json.contains(CANARY), "{json}");
 }
+
+// ------------------------------------------------------- Stage 3: routines
+
+/// E3. Procedures and functions are listed with the detail the tree needs to
+/// show them separately and generate a call.
+#[tokio::test]
+#[ignore]
+async fn routines_are_listed_with_parameters_and_return_types() {
+    let state = connected().await;
+    let routines = schema::list_routines(&state, C, "poc").await.unwrap();
+
+    let names: Vec<&str> = routines.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"top_spenders"), "{names:?}");
+    assert!(names.contains(&"order_count"), "{names:?}");
+    assert!(names.contains(&"ping_poc"), "{names:?}");
+
+    let proc = routines.iter().find(|r| r.name == "top_spenders").unwrap();
+    assert_eq!(proc.kind, schema::RoutineKind::Procedure);
+    assert_eq!(proc.returns, None, "a procedure returns nothing");
+    assert_eq!(
+        proc.params
+            .iter()
+            .map(|p| (p.name.as_str(), p.mode.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("min_total", "IN"), ("max_rows", "IN")],
+        "parameters must arrive in declaration order",
+    );
+    assert!(proc.params[0].data_type.starts_with("decimal"), "{proc:?}");
+
+    let func = routines.iter().find(|r| r.name == "order_count").unwrap();
+    assert_eq!(func.kind, schema::RoutineKind::Function);
+    assert_eq!(func.returns.as_deref(), Some("int"));
+    // The regression that motivated the ordinal_position filter: a function's
+    // return value is row 0 in information_schema.parameters, with a NULL name
+    // and NULL mode. Including it puts a nameless argument in every call.
+    assert_eq!(
+        func.params
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["uid"],
+        "row 0 is the RETURN type, not a parameter: {func:?}",
+    );
+
+    let noargs = routines.iter().find(|r| r.name == "ping_poc").unwrap();
+    assert!(noargs.params.is_empty(), "{noargs:?}");
+}
+
+/// **E4.** The milestone check: examine a procedure, run the script it produced,
+/// and read the definition back. If `DROP … IF EXISTS` were missing the rerun
+/// fails; if the `DELIMITER` wrapper were missing the body is truncated at its
+/// first internal semicolon. Both failures show up here as a changed body.
+#[tokio::test]
+#[ignore]
+async fn examining_a_routine_produces_a_script_that_recreates_it_exactly() {
+    let state = connected().await;
+
+    let before = body_of(&state, "top_spenders").await;
+    let script = schema::routine_ddl(
+        &state,
+        C,
+        "poc",
+        "top_spenders",
+        schema::RoutineKind::Procedure,
+    )
+    .await
+    .unwrap();
+
+    assert!(script.contains("DROP PROCEDURE IF EXISTS"), "{script}");
+    assert!(script.contains("DELIMITER $$"), "{script}");
+    assert!(script.contains("USE `poc`;"), "{script}");
+
+    // Run it exactly as the user would: one script through the real executor.
+    let out = exec::run_script(&state, T, &script, false, None)
+        .await
+        .unwrap();
+    for st in &out.statements {
+        assert!(
+            !matches!(st.outcome, Outcome::Error { .. }),
+            "generated script failed: {:?}\n--- script ---\n{script}",
+            st.outcome
+        );
+    }
+
+    let after = body_of(&state, "top_spenders").await;
+    assert_eq!(
+        before, after,
+        "the routine did not survive its own re-creation script",
+    );
+    // And the body really does contain the semicolons that make DELIMITER
+    // necessary — otherwise this test would pass on a trivial routine.
+    assert!(
+        before.contains(';'),
+        "fixture too simple to prove the point"
+    );
+}
+
+/// Reads the stored body straight from the server, bypassing our generator, so
+/// the comparison above cannot be fooled by a bug shared with it.
+async fn body_of(state: &AppState, name: &str) -> String {
+    let server = session::server(state, C).await.unwrap();
+    let mut meta = server.meta.lock().await;
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SHOW CREATE PROCEDURE `poc`.`{name}`"
+    )))
+    .fetch_one(&mut *meta)
+    .await
+    .unwrap();
+    row.try_get::<Option<String>, _>("Create Procedure")
+        .unwrap()
+        .expect("no privilege to read the routine body")
+}
+
+/// A function's DDL uses a different result column ("Create Function"), which is
+/// the kind of detail that only fails against a real server.
+#[tokio::test]
+#[ignore]
+async fn a_function_ddl_uses_its_own_result_column() {
+    let state = connected().await;
+    let script = schema::routine_ddl(
+        &state,
+        C,
+        "poc",
+        "order_count",
+        schema::RoutineKind::Function,
+    )
+    .await
+    .unwrap();
+    assert!(
+        script.contains("DROP FUNCTION IF EXISTS `order_count`;"),
+        "{script}"
+    );
+    assert!(
+        script.contains("CREATE") && script.contains("order_count"),
+        "{script}"
+    );
+}
+
+/// Asking for a routine that is not there must be a readable error, not a panic
+/// and not an empty tab.
+#[tokio::test]
+#[ignore]
+async fn a_missing_routine_is_a_readable_error() {
+    let state = connected().await;
+    let err = schema::routine_ddl(
+        &state,
+        C,
+        "poc",
+        "no_such_routine",
+        schema::RoutineKind::Procedure,
+    )
+    .await
+    .expect_err("should not succeed");
+    assert!(!err.is_empty());
+    assert!(!err.to_lowercase().contains("panic"), "{err}");
+}
+
+/// Routines are cached like tables, and `refresh` must clear both — a stale
+/// routine list after a refresh is the same silent-wrong-answer class of bug as
+/// the empty schema tree in Stage 0.
+#[tokio::test]
+#[ignore]
+async fn refresh_clears_the_routine_cache_too() {
+    let state = connected().await;
+    let server = session::server(&state, C).await.unwrap();
+
+    schema::list_routines(&state, C, "poc").await.unwrap();
+    let before = server.introspection_count.load(Ordering::SeqCst);
+    schema::list_routines(&state, C, "poc").await.unwrap();
+    assert_eq!(
+        server.introspection_count.load(Ordering::SeqCst),
+        before,
+        "the second call should have been served from cache",
+    );
+
+    schema::refresh(&state, C, "poc").await.unwrap();
+    schema::list_routines(&state, C, "poc").await.unwrap();
+    assert!(
+        server.introspection_count.load(Ordering::SeqCst) > before,
+        "refresh did not invalidate the routine cache",
+    );
+}
+
+// ------------------------------------------ Stage 3: literals, for real
+
+/// The escaper's tests assert what we *believe* MySQL accepts. This asserts
+/// what it actually does: build a literal for each hostile string, send it
+/// through a real INSERT, read it back, and require it to be unchanged.
+///
+/// This is the check that would catch an escaping rule that is subtly wrong —
+/// the class of bug that silently corrupts an exported script.
+#[tokio::test]
+#[ignore]
+async fn generated_string_literals_round_trip_through_the_server() {
+    let state = connected().await;
+    let hostile = vec![
+        "plain",
+        "it's",
+        r"back\slash",
+        r"both ' and \",
+        "'; DROP TABLE users; --",
+        "line\nbreak",
+        "carriage\rreturn",
+        "tab\there",
+        "ctrl\u{1a}z",
+        "nul\0byte",
+        "héllo ★ 表 🔐",
+        "double \"quotes\"",
+        "percent % and underscore _",
+        "trailing space ",
+        "",
+    ];
+
+    exec::run_script(
+        &state,
+        T,
+        "DROP TEMPORARY TABLE IF EXISTS lit_probe; \
+         CREATE TEMPORARY TABLE lit_probe (i INT, v VARBINARY(255));",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    for (i, s) in hostile.iter().enumerate() {
+        let sql = format!(
+            "INSERT INTO lit_probe (i, v) VALUES ({i}, {});",
+            db_query_lib::sqlgen::quote_string(s)
+        );
+        let out = exec::run_script(&state, T, &sql, false, None)
+            .await
+            .unwrap();
+        for st in &out.statements {
+            assert!(
+                !matches!(st.outcome, Outcome::Error { .. }),
+                "literal for {s:?} was rejected: {:?}\n{sql}",
+                st.outcome
+            );
+        }
+    }
+
+    // Read back as hex so the comparison cannot be blurred by the decoder's own
+    // text handling — this is about the bytes the server stored.
+    let out = exec::run_script(
+        &state,
+        T,
+        "SELECT i, HEX(v) AS h FROM lit_probe ORDER BY i;",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let Outcome::Rows { rows, .. } = &out.statements[0].outcome else {
+        panic!("expected rows: {:?}", out.statements[0].outcome);
+    };
+    assert_eq!(rows.len(), hostile.len());
+
+    for (row, expected) in rows.iter().zip(&hostile) {
+        let CellValue::Text(hex) = &row[1] else {
+            panic!("expected hex text, got {:?}", row[1])
+        };
+        let got = hex::decode_lossy(hex);
+        assert_eq!(
+            got, *expected,
+            "round trip changed the value: {expected:?} came back as {got:?}",
+        );
+    }
+}
+
+/// Tiny hex decoder, so the assertion above compares bytes rather than trusting
+/// the same decode path the rest of the app uses.
+mod hex {
+    pub fn decode_lossy(h: &str) -> String {
+        let bytes: Vec<u8> = h
+            .as_bytes()
+            .chunks(2)
+            .filter_map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// A generated SELECT must actually run, and return no more than it asked for.
+#[tokio::test]
+#[ignore]
+async fn a_generated_select_runs_and_honours_its_limit() {
+    let state = connected().await;
+    let sql = db_query_lib::sqlgen::generate_select("poc", "big", 7).unwrap();
+    let out = exec::run_script(&state, T, &sql, false, None)
+        .await
+        .unwrap();
+    let Outcome::Rows { rows, .. } = &out.statements[0].outcome else {
+        panic!("expected rows: {:?}", out.statements[0].outcome);
+    };
+    assert_eq!(rows.len(), 7, "the generated LIMIT was not honoured");
+}
+
+/// Auto-LIMIT must leave a generated SELECT alone: it already carries an
+/// explicit LIMIT, and appending a second one is a syntax error.
+#[tokio::test]
+#[ignore]
+async fn auto_limit_does_not_touch_a_generated_select() {
+    let state = connected().await;
+    let sql = db_query_lib::sqlgen::generate_select("poc", "big", 3).unwrap();
+    let out = exec::run_script(&state, T, &sql, true, None).await.unwrap();
+    assert!(
+        out.statements[0].effective_sql.is_none(),
+        "auto-LIMIT rewrote a statement that already had one: {:?}",
+        out.statements[0].effective_sql
+    );
+    let Outcome::Rows { rows, .. } = &out.statements[0].outcome else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows.len(), 3);
+}
+
+/// The generated CALL is deliberately not runnable until its placeholders are
+/// filled in. Proving that means proving it fails — which is the design.
+#[tokio::test]
+#[ignore]
+async fn a_generated_call_becomes_runnable_once_filled_in() {
+    let state = connected().await;
+    let routines = schema::list_routines(&state, C, "poc").await.unwrap();
+    let proc = routines.iter().find(|r| r.name == "top_spenders").unwrap();
+
+    let snippet = db_query_lib::sqlgen::generate_call("poc", proc).unwrap();
+    assert!(snippet.contains("/* min_total"), "{snippet}");
+
+    // Fill the placeholders in, as a user would, and it runs.
+    let filled = snippet
+        .replace("/* min_total decimal(12,2) */", "0")
+        .replace("/* max_rows int */", "10");
+    let out = exec::run_script(&state, T, &filled, false, None)
+        .await
+        .unwrap();
+    for st in &out.statements {
+        assert!(
+            !matches!(st.outcome, Outcome::Error { .. }),
+            "filled-in call failed: {:?}\n{filled}",
+            st.outcome
+        );
+    }
+}
+
+/// A no-argument procedure's snippet needs no editing at all.
+#[tokio::test]
+#[ignore]
+async fn a_no_argument_call_runs_as_generated() {
+    let state = connected().await;
+    let routines = schema::list_routines(&state, C, "poc").await.unwrap();
+    let proc = routines.iter().find(|r| r.name == "ping_poc").unwrap();
+    let snippet = db_query_lib::sqlgen::generate_call("poc", proc).unwrap();
+    let out = exec::run_script(&state, T, &snippet, false, None)
+        .await
+        .unwrap();
+    for st in &out.statements {
+        assert!(
+            !matches!(st.outcome, Outcome::Error { .. }),
+            "{:?}\n{snippet}",
+            st.outcome
+        );
+    }
+}
+
+// ------------------------------------------------- Stage 3: export (E6)
+
+/// Read a whole table as (columns, rows) through the real executor.
+async fn fetch_all(
+    state: &AppState,
+    sql: &str,
+) -> (Vec<db_query_lib::decode::ColumnMeta>, Vec<Vec<CellValue>>) {
+    let out = exec::run_script(state, T, sql, false, None).await.unwrap();
+    match &out.statements[0].outcome {
+        Outcome::Rows { columns, rows, .. } => (columns.clone(), rows.clone()),
+        other => panic!("expected rows from {sql}: {other:?}"),
+    }
+}
+
+/// **E6.** Export a table as `CREATE TABLE` + `INSERT`s, drop it, replay the
+/// script, and compare every row against what was there before.
+///
+/// The comparison includes a **BIGINT past 2^53 and a DECIMAL**, which is where
+/// a generator that trusts the runtime type of a cell instead of its column
+/// silently corrupts data — those arrive as text precisely so JavaScript cannot
+/// round them.
+#[tokio::test]
+#[ignore]
+async fn an_exported_table_recreates_itself_exactly() {
+    let state = connected().await;
+
+    exec::run_script(
+        &state,
+        T,
+        "DROP TABLE IF EXISTS export_probe; \
+         CREATE TABLE export_probe ( \
+           id INT PRIMARY KEY, \
+           big BIGINT, \
+           money DECIMAL(20,4), \
+           label VARCHAR(190), \
+           when_ DATETIME, \
+           flag TINYINT(1), \
+           maybe VARCHAR(50) \
+         );",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Values chosen to break a naive generator: an integer JavaScript cannot
+    // hold, a decimal it would round, quotes, a backslash, unicode, and a NULL.
+    exec::run_script(
+        &state,
+        T,
+        "INSERT INTO export_probe VALUES \
+           (1, 9223372036854775807, 12345678901234.5678, 'it''s', '2026-09-05 14:30:00', 1, NULL), \
+           (2, -9007199254740993, -0.0001, 'back\\\\slash', '1999-12-31 23:59:59', 0, 'here'), \
+           (3, 0, 0.0000, 'héllo ★ 表 🔐', '2000-01-01 00:00:00', 1, '');",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let (columns, before) = fetch_all(&state, "SELECT * FROM export_probe ORDER BY id;").await;
+    assert_eq!(before.len(), 3);
+
+    // Exact DDL from the server, which is what makes this a true round trip
+    // rather than a comparison against a widened approximation.
+    let ddl = schema::table_ddl(&state, C, "poc", "export_probe")
+        .await
+        .unwrap();
+    let script = db_query_lib::export::to_inserts(
+        &columns,
+        &before,
+        &db_query_lib::export::InsertOptions {
+            table: "export_probe".into(),
+            db: Some("poc".into()),
+            create_table: true,
+            batch_size: 2,
+        },
+        Some(&ddl),
+    )
+    .unwrap();
+
+    exec::run_script(&state, T, "DROP TABLE export_probe;", false, None)
+        .await
+        .unwrap();
+
+    let out = exec::run_script(&state, T, &script, false, None)
+        .await
+        .unwrap();
+    for st in &out.statements {
+        assert!(
+            !matches!(st.outcome, Outcome::Error { .. }),
+            "exported script failed: {:?}\n--- script ---\n{script}",
+            st.outcome
+        );
+    }
+
+    let (after_cols, after) = fetch_all(&state, "SELECT * FROM export_probe ORDER BY id;").await;
+    assert_eq!(
+        after_cols.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        after, before,
+        "the exported script did not reproduce the data"
+    );
+
+    exec::run_script(&state, T, "DROP TABLE IF EXISTS export_probe;", false, None)
+        .await
+        .unwrap();
+}
+
+/// The derived `CREATE TABLE` has no real table behind it, so the only way to
+/// know it parses is to run it. `VARCHAR` without a length does not.
+#[tokio::test]
+#[ignore]
+async fn a_derived_create_table_actually_parses() {
+    let state = connected().await;
+    let (columns, rows) = fetch_all(
+        &state,
+        "SELECT u.id, u.email, u.balance, u.created_at, o.total \
+         FROM users u JOIN orders o ON o.user_id = u.id ORDER BY u.id, o.id;",
+    )
+    .await;
+    assert!(!rows.is_empty(), "fixture should produce joined rows");
+
+    let ddl = db_query_lib::export::derived_create_table(&columns, None, "derived_probe").unwrap();
+    let script = format!(
+        "DROP TABLE IF EXISTS derived_probe;\n{ddl}{}",
+        db_query_lib::export::to_inserts(
+            &columns,
+            &rows,
+            &db_query_lib::export::InsertOptions {
+                table: "derived_probe".into(),
+                db: None,
+                create_table: true,
+                batch_size: 50,
+            },
+            None,
+        )
+        .unwrap()
+    );
+
+    let out = exec::run_script(&state, T, &script, false, None)
+        .await
+        .unwrap();
+    for st in &out.statements {
+        assert!(
+            !matches!(st.outcome, Outcome::Error { .. }),
+            "derived schema did not parse: {:?}\n--- script ---\n{script}",
+            st.outcome
+        );
+    }
+
+    let (_, back) = fetch_all(&state, "SELECT COUNT(*) AS n FROM derived_probe;").await;
+    assert_eq!(back[0][0], CellValue::Int(rows.len() as i64));
+
+    exec::run_script(
+        &state,
+        T,
+        "DROP TABLE IF EXISTS derived_probe;",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+/// `SHOW CREATE TABLE` on a view answers with a different column name.
+#[tokio::test]
+#[ignore]
+async fn table_ddl_handles_a_view() {
+    let state = connected().await;
+    let ddl = schema::table_ddl(&state, C, "poc", "user_totals")
+        .await
+        .unwrap();
+    assert!(ddl.to_uppercase().contains("VIEW"), "{ddl}");
+}
+
+// ------------------------------------- Stage 3: unbounded re-run (E8)
+
+/// **E8's substance.** `big` holds 7500 rows and `MAX_ROWS` is 5000, so the
+/// buffered path *must* truncate and the streaming path *must not*. If these
+/// ever agree, one of them is broken.
+#[tokio::test]
+#[ignore]
+async fn the_rerun_export_writes_more_rows_than_the_grid_can_hold() {
+    let state = connected().await;
+    let sql = "SELECT id, label, n FROM big ORDER BY id";
+
+    // What the grid would show: capped, and flagged as capped.
+    let shown = exec::run_script(&state, T, sql, true, None).await.unwrap();
+    let Outcome::Rows {
+        rows, truncated, ..
+    } = &shown.statements[0].outcome
+    else {
+        panic!("expected rows")
+    };
+    assert_eq!(
+        rows.len(),
+        exec::MAX_ROWS,
+        "the ceiling should have applied"
+    );
+    assert!(truncated, "a capped result must say so");
+
+    // What the unbounded re-run writes: everything.
+    let dir = std::env::temp_dir().join(format!("db-query-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("big.csv");
+
+    let opts = csv_opts();
+    let header_opts = opts.clone();
+    let (written, bytes, cancelled) = exec::stream_to_file(
+        &state,
+        T,
+        sql,
+        &path,
+        move |row, buf| {
+            buf.push_str(&db_query_lib::export::csv_row(row, &opts));
+            Ok(())
+        },
+        move |row| Ok(db_query_lib::export::csv_header(row, &header_opts)),
+    )
+    .await
+    .unwrap();
+
+    assert!(!cancelled);
+    assert_eq!(written, 7500, "the streaming path must not be capped");
+    assert!(
+        written > exec::MAX_ROWS,
+        "otherwise this test proves nothing"
+    );
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(bytes as usize, body.len());
+    // 7500 data lines plus one header.
+    assert_eq!(body.lines().count(), 7501, "header plus every row");
+    assert!(
+        body.starts_with("id,label,n"),
+        "{:?}",
+        &body[..40.min(body.len())]
+    );
+    assert!(body.contains("7500,row-7500,22500"), "last row missing");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn csv_opts() -> db_query_lib::export::CsvOptions {
+    // No BOM so the assertions above can compare against plain text.
+    serde_json::from_str(
+        r#"{"delimiter":",","crlf":false,"bom":false,"headers":true,"nullAs":"","formulaGuard":false}"#,
+    )
+    .unwrap()
+}
+
+/// A failed or cancelled export must not leave a file wearing the real name.
+#[tokio::test]
+#[ignore]
+async fn a_failed_export_leaves_no_file_behind() {
+    let state = connected().await;
+    let dir = std::env::temp_dir().join(format!("db-query-export-fail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nope.csv");
+
+    let opts = csv_opts();
+    let header_opts = opts.clone();
+    let err = exec::stream_to_file(
+        &state,
+        T,
+        "SELECT * FROM no_such_table_at_all",
+        &path,
+        move |row, buf| {
+            buf.push_str(&db_query_lib::export::csv_row(row, &opts));
+            Ok(())
+        },
+        move |row| Ok(db_query_lib::export::csv_header(row, &header_opts)),
+    )
+    .await
+    .expect_err("a bad query should fail the export");
+
+    assert!(!err.is_empty());
+    assert!(
+        !path.exists(),
+        "a failed export left {} behind",
+        path.display()
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp file not cleaned up: {leftovers:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The connection must be usable immediately afterwards — a stream abandoned
+/// mid-protocol is the classic way to poison one.
+#[tokio::test]
+#[ignore]
+async fn the_connection_survives_a_streaming_export() {
+    let state = connected().await;
+    let dir = std::env::temp_dir().join(format!("db-query-export-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("small.csv");
+
+    let opts = csv_opts();
+    let header_opts = opts.clone();
+    exec::stream_to_file(
+        &state,
+        T,
+        "SELECT id FROM big LIMIT 10",
+        &path,
+        move |row, buf| {
+            buf.push_str(&db_query_lib::export::csv_row(row, &opts));
+            Ok(())
+        },
+        move |row| Ok(db_query_lib::export::csv_header(row, &header_opts)),
+    )
+    .await
+    .unwrap();
+
+    let out = exec::run_script(&state, T, "SELECT 1 AS ok;", false, None)
+        .await
+        .unwrap();
+    assert!(matches!(out.statements[0].outcome, Outcome::Rows { .. }));
+
+    std::fs::remove_dir_all(&dir).ok();
+}

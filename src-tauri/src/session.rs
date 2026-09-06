@@ -251,15 +251,6 @@ async fn open(profile: &ConnProfile, password: &str) -> Result<MySqlConnection, 
         .map_err(|e| friendly(&e))
 }
 
-/// Quote a database identifier for statements that cannot take a bind
-/// parameter (`USE`). Internal backticks are doubled; NUL is rejected outright.
-pub fn quote_ident(name: &str) -> Result<String, String> {
-    if name.contains('\0') {
-        return Err("Invalid database name.".into());
-    }
-    Ok(format!("`{}`", name.replace('`', "``")))
-}
-
 // ------------------------------------------------------------------ lookups
 
 /// A live connection by id. Clones the `Arc` out and releases the map lock
@@ -519,7 +510,7 @@ pub async fn ensure_exec(
 
 pub async fn use_database(state: &AppState, tab_id: &str, db: &str) -> Result<(), String> {
     let tab = tab(state, tab_id).await?;
-    let quoted = quote_ident(db)?;
+    let quoted = crate::sqlgen::quote_ident(db)?;
 
     let mut guard = tab.exec.lock().await;
     ensure_exec(&mut guard, &tab).await?;

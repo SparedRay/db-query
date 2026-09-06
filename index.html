@@ -47,11 +47,72 @@
 
         <section id="results-pane">
           <div id="tabs" class="tabs"></div>
-          <div id="grid" class="grid-host"></div>
-          <div id="status" class="status"></div>
+          <div id="grid" class="grid-host" tabindex="0"></div>
+          <div class="result-bar">
+            <div id="status" class="status"></div>
+            <span id="result-note" class="result-note" hidden></span>
+            <div class="result-actions">
+              <button id="btn-copy" title="Copy the selected columns (Ctrl+C)">Copy</button>
+              <button id="btn-copy-nohead" title="Copy without the header row">Copy (no headers)</button>
+              <button id="btn-export">Export…</button>
+            </div>
+          </div>
         </section>
       </main>
     </div>
+
+    <dialog id="export-dialog">
+      <form method="dialog" id="export-form">
+        <h2>Export results</h2>
+
+        <p id="export-scope-note" class="hint"></p>
+
+        <label>Format
+          <select id="export-format">
+            <option value="csv">CSV</option>
+            <option value="inserts">SQL INSERT statements</option>
+          </select>
+        </label>
+
+        <label>Rows
+          <select id="export-scope">
+            <option value="shown">The rows shown</option>
+            <option value="all">Re-run the query and export every row</option>
+          </select>
+        </label>
+
+        <fieldset id="export-csv-opts">
+          <legend>CSV</legend>
+          <div class="row">
+            <label class="narrow">Delimiter <input id="csv-delim" value="," maxlength="3" /></label>
+            <label class="toggle"><input type="checkbox" id="csv-headers" checked /> Header row</label>
+          </div>
+          <label>NULL is written as
+            <input id="csv-null" placeholder="(empty)" />
+          </label>
+          <p class="hint">CSV cannot tell NULL from an empty string. Leave this blank and they look identical in the file.</p>
+          <label class="toggle"><input type="checkbox" id="csv-crlf" checked /> CRLF line endings (Excel)</label>
+          <label class="toggle"><input type="checkbox" id="csv-bom" checked /> UTF-8 BOM (Excel reads accents correctly)</label>
+          <label class="toggle"><input type="checkbox" id="csv-guard" /> Defuse spreadsheet formulas</label>
+          <p class="hint">Prefixes <code>'</code> to fields starting <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>. This changes the exported value, so it is off by default.</p>
+        </fieldset>
+
+        <fieldset id="export-sql-opts" hidden>
+          <legend>SQL</legend>
+          <label>Table name <input id="sql-table" /></label>
+          <label class="toggle"><input type="checkbox" id="sql-create" /> Include CREATE TABLE</label>
+          <p class="hint" id="sql-create-note"></p>
+          <label class="narrow">Rows per INSERT <input id="sql-batch" type="number" value="100" min="1" /></label>
+        </fieldset>
+
+        <p id="export-error" class="error" hidden></p>
+
+        <div class="actions">
+          <button type="button" id="export-cancel">Cancel</button>
+          <button type="submit" id="export-ok">Export</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog id="conn-dialog">
       <form method="dialog" id="conn-form">

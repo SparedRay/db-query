@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::session::{friendly, server, AppState, ServerConn};
@@ -38,10 +38,60 @@ pub struct ColumnInfo {
     pub key: Option<String>,
 }
 
+/// Procedure or function.
+///
+/// An enum rather than the free-form `String` that `TableRef.kind` uses, and
+/// deliberately: this value is interpolated straight into `SHOW CREATE …` and
+/// `DROP …`. A string there would be an injection vector reachable from
+/// whatever the server returned. Two variants cannot be anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutineKind {
+    Procedure,
+    Function,
+}
+
+impl RoutineKind {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Procedure => "PROCEDURE",
+            Self::Function => "FUNCTION",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "PROCEDURE" => Some(Self::Procedure),
+            "FUNCTION" => Some(Self::Function),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineParam {
+    pub name: String,
+    /// "IN" | "OUT" | "INOUT". Functions report no mode; they are all IN.
+    pub mode: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineRef {
+    pub name: String,
+    pub kind: RoutineKind,
+    /// Return type. `Some` for functions, `None` for procedures.
+    pub returns: Option<String>,
+    pub params: Vec<RoutineParam>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DbSchema {
     pub tables: Option<Vec<TableRef>>,
     pub columns: HashMap<String, Vec<ColumnInfo>>,
+    pub routines: Option<Vec<RoutineRef>>,
 }
 
 /// Drop any cached introspection for `db`, so the next expand refetches.
@@ -166,6 +216,201 @@ pub async fn list_columns(
         .columns
         .insert(table.to_string(), columns.clone());
     Ok(columns)
+}
+
+/// Procedures and functions in one database, with their parameters.
+///
+/// Two queries rather than a join, and one `parameters` query for the whole
+/// schema rather than one per routine — a server with hundreds of routines
+/// should still cost two round trips.
+///
+/// **`ordinal_position = 0` is the function's return value, not a parameter.**
+/// It comes back with a NULL name and NULL mode, so including it would put a
+/// nameless argument at the front of every generated `SELECT fn(...)` call.
+pub async fn list_routines(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<RoutineRef>, String> {
+    let server = server(state, connection_id).await?;
+
+    if let Some(cached) = server
+        .schema_cache
+        .lock()
+        .await
+        .get(db)
+        .and_then(|s| s.routines.clone())
+    {
+        return Ok(cached);
+    }
+
+    let (routine_rows, param_rows) = {
+        let mut meta = server.meta.lock().await;
+        server.introspection_count.fetch_add(2, Ordering::SeqCst);
+        let routines = sqlx::query(
+            "SELECT routine_name AS name, routine_type AS kind, \
+                    dtd_identifier AS returns_type \
+             FROM information_schema.routines \
+             WHERE routine_schema = ? \
+             ORDER BY routine_name",
+        )
+        .bind(db)
+        .fetch_all(&mut *meta)
+        .await
+        .map_err(|e| friendly(&e))?;
+
+        let params = sqlx::query(
+            "SELECT specific_name AS routine, parameter_mode AS mode, \
+                    parameter_name AS name, dtd_identifier AS data_type \
+             FROM information_schema.parameters \
+             WHERE specific_schema = ? AND ordinal_position > 0 \
+             ORDER BY specific_name, ordinal_position",
+        )
+        .bind(db)
+        .fetch_all(&mut *meta)
+        .await
+        .map_err(|e| friendly(&e))?;
+
+        (routines, params)
+    };
+
+    let mut by_routine: HashMap<String, Vec<RoutineParam>> = HashMap::new();
+    for r in param_rows {
+        let Ok(routine) = r.try_get::<String, _>("routine") else {
+            continue;
+        };
+        by_routine.entry(routine).or_default().push(RoutineParam {
+            name: r.try_get::<String, _>("name").unwrap_or_default(),
+            // Functions report no mode. They are all IN, so say so rather than
+            // leaving a blank the caller has to interpret.
+            mode: r
+                .try_get::<Option<String>, _>("mode")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "IN".into()),
+            data_type: r.try_get::<String, _>("data_type").unwrap_or_default(),
+        });
+    }
+
+    let routines: Vec<RoutineRef> = routine_rows
+        .into_iter()
+        .filter_map(|r| {
+            let name: String = r.try_get("name").ok()?;
+            // A routine whose type we cannot read is one we could not safely
+            // generate SQL for, so it is dropped rather than guessed at.
+            let kind = RoutineKind::parse(&r.try_get::<String, _>("kind").ok()?)?;
+            let returns = match kind {
+                RoutineKind::Function => r
+                    .try_get::<Option<String>, _>("returns_type")
+                    .ok()
+                    .flatten()
+                    .filter(|t| !t.is_empty()),
+                RoutineKind::Procedure => None,
+            };
+            let params = by_routine.remove(&name).unwrap_or_default();
+            Some(RoutineRef {
+                name,
+                kind,
+                returns,
+                params,
+            })
+        })
+        .collect();
+
+    server
+        .schema_cache
+        .lock()
+        .await
+        .entry(db.to_string())
+        .or_default()
+        .routines = Some(routines.clone());
+    Ok(routines)
+}
+
+/// The server's own `CREATE TABLE` for a real table.
+///
+/// Preferred over deriving one from result metadata whenever the rows came from
+/// a table, because it is **exact**: the MySQL protocol carries no lengths,
+/// keys, defaults or nullability, so a derived schema is always a widened
+/// approximation. This is what makes an exported script recreate the original
+/// rather than something shaped like it.
+pub async fn table_ddl(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    table: &str,
+) -> Result<String, String> {
+    let server = server(state, connection_id).await?;
+    let qualified = crate::sqlgen::qualify(db, table)?;
+
+    let row = {
+        let mut meta = server.meta.lock().await;
+        server.introspection_count.fetch_add(1, Ordering::SeqCst);
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SHOW CREATE TABLE {qualified}"
+        )))
+        .fetch_one(&mut *meta)
+        .await
+        .map_err(|e| friendly(&e))?
+    };
+
+    // A view answers `SHOW CREATE TABLE` with a "Create View" column instead.
+    let ddl: Option<String> = row
+        .try_get("Create Table")
+        .or_else(|_| row.try_get("Create View"))
+        .map_err(|e| friendly(&e))?;
+
+    ddl.filter(|d| !d.trim().is_empty())
+        .map(|d| format!("{};\n", d.trim_end().trim_end_matches(';')))
+        .ok_or_else(|| format!("The server returned no definition for {qualified}."))
+}
+
+/// The re-runnable creation script for one routine.
+///
+/// `SHOW CREATE …` cannot take a bind parameter — it takes an identifier — so
+/// the name is quoted rather than bound. That is what `quote_ident` is for, and
+/// why `RoutineKind` is an enum: the only two words that can reach the keyword
+/// slot are the two spelled out in its `keyword()`.
+pub async fn routine_ddl(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    name: &str,
+    kind: RoutineKind,
+) -> Result<String, String> {
+    let server = server(state, connection_id).await?;
+    let kw = kind.keyword();
+    let qualified = crate::sqlgen::qualify(db, name)?;
+    let sql = format!("SHOW CREATE {kw} {qualified}");
+
+    let row = {
+        let mut meta = server.meta.lock().await;
+        server.introspection_count.fetch_add(1, Ordering::SeqCst);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&mut *meta)
+            .await
+            .map_err(|e| friendly(&e))?
+    };
+
+    // The body column is named after the routine kind: "Create Procedure" or
+    // "Create Function".
+    let column = match kind {
+        RoutineKind::Procedure => "Create Procedure",
+        RoutineKind::Function => "Create Function",
+    };
+
+    // NULL here is the privilege case, not a missing routine: MySQL returns the
+    // row with an empty body when the caller may not see the definition. Saying
+    // so beats handing back an empty tab.
+    let body: Option<String> = row.try_get(column).map_err(|e| friendly(&e))?;
+    let body = body.filter(|b| !b.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "The server did not return a definition for {kw} {qualified}. This usually \
+             means the account lacks the privilege to see the routine body."
+        )
+    })?;
+
+    crate::sqlgen::routine_script(db, name, kind, &body)
 }
 
 /// The lint schema for a tab's active database: lowercased table -> columns.

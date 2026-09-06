@@ -7,14 +7,14 @@
 //!   * Integers outside +-2^53 become Text. JS numbers cannot hold them, so
 //!     emitting Int would quietly mangle large IDs in the grid.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::mysql::MySqlRow;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 
 /// Largest integer JavaScript can represent exactly.
 const JS_SAFE_INT: i64 = 9_007_199_254_740_991;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TypeHint {
     Numeric,
@@ -24,7 +24,10 @@ pub enum TypeHint {
     Bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+// `Deserialize` so a result set can come back from the UI to be exported. The
+// grid is the source of truth for "what is on screen", and export must match
+// what the user is looking at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnMeta {
     pub name: String,
@@ -33,7 +36,9 @@ pub struct ColumnMeta {
     pub sql_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Untagged in both directions. Deserialization tries the variants in order,
+/// which is why `Int` precedes `Float`: `1` must not become `1.0`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CellValue {
     Null,

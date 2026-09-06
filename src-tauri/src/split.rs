@@ -52,99 +52,48 @@ fn is_dash_comment(b: &[u8], i: usize) -> bool {
     }
 }
 
-/// Does this buffer contain a `DELIMITER` directive? Only meaningful in
-/// Normal mode at the start of a line, which is the only place MySQL clients
-/// accept it.
-fn has_delimiter_directive(b: &[u8]) -> bool {
-    let mut mode = Mode::Normal;
-    let mut i = 0;
-    let mut at_line_start = true;
-    while i < b.len() {
-        let c = b[i];
-        match mode {
-            Mode::Normal => {
-                if at_line_start && !c.is_ascii_whitespace() {
-                    let rest = &b[i..];
-                    if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case(b"DELIMITER") {
-                        let after = rest.get(9);
-                        if after.is_none() || after.is_some_and(|c| c.is_ascii_whitespace()) {
-                            return true;
-                        }
-                    }
-                }
-                if !c.is_ascii_whitespace() {
-                    at_line_start = false;
-                }
-                match c {
-                    b'\n' => at_line_start = true,
-                    b'\'' => mode = Mode::Single,
-                    b'"' => mode = Mode::Double,
-                    b'`' => mode = Mode::Backtick,
-                    b'#' => mode = Mode::LineComment,
-                    b'-' if is_dash_comment(b, i) => {
-                        mode = Mode::LineComment;
-                        i += 1;
-                    }
-                    b'/' if b.get(i + 1) == Some(&b'*') => {
-                        mode = Mode::BlockComment;
-                        i += 1;
-                    }
-                    _ => {}
-                }
-            }
-            Mode::Single | Mode::Double | Mode::Backtick => {
-                let q = match mode {
-                    Mode::Single => b'\'',
-                    Mode::Double => b'"',
-                    _ => b'`',
-                };
-                // Backslash is not an escape character inside backtick-quoted
-                // identifiers; only doubling the backtick escapes it.
-                if c == b'\\' && mode != Mode::Backtick {
-                    i += 1;
-                } else if c == q {
-                    if b.get(i + 1) == Some(&q) {
-                        i += 1;
-                    } else {
-                        mode = Mode::Normal;
-                    }
-                }
-            }
-            Mode::LineComment => {
-                if c == b'\n' {
-                    mode = Mode::Normal;
-                    at_line_start = true;
-                }
-            }
-            Mode::BlockComment => {
-                // MySQL block comments do not nest: the first `*/` closes.
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Normal;
-                    i += 1;
-                }
-            }
-        }
-        i += 1;
+/// Parse a `DELIMITER <token>` directive starting at `i`.
+///
+/// Returns the new terminator and the offset just past the directive's line —
+/// the directive owns its whole line and is never part of a statement.
+///
+/// `DELIMITER` is a **client** directive: MySQL's server has never understood
+/// it. That is the whole reason this function exists rather than a "does this
+/// buffer contain one" check — see `split`.
+fn parse_delimiter_directive(b: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
+    const KW: &[u8] = b"DELIMITER";
+    let rest = b.get(i..)?;
+    if rest.len() < KW.len() || !rest[..KW.len()].eq_ignore_ascii_case(KW) {
+        return None;
     }
-    false
-}
 
-/// Trim whitespace from a span, then report whether anything executable
-/// remains. A span holding only comments is not a statement.
-fn trim_span(b: &[u8], mut start: usize, mut end: usize) -> Option<StatementSpan> {
-    while start < end && b[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    while end > start && b[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    if start >= end {
+    let mut j = i + KW.len();
+    // Must be followed by whitespace, or `DELIMITERS` would parse as one.
+    if !b.get(j).is_some_and(|c| c.is_ascii_whitespace()) {
         return None;
     }
-    if !has_code(&b[start..end]) {
+    // Spaces and tabs up to the token, but never across a newline: a bare
+    // `DELIMITER` on its own line sets nothing and is not a directive.
+    while matches!(b.get(j), Some(b' ' | b'\t' | b'\r')) {
+        j += 1;
+    }
+    let start = j;
+    while j < b.len() && !b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if start == j {
         return None;
     }
-    Some(StatementSpan { start, end })
+    let token = b[start..j].to_vec();
+
+    let mut end = j;
+    while end < b.len() && b[end] != b'\n' {
+        end += 1;
+    }
+    if end < b.len() {
+        end += 1;
+    }
+    Some((token, end))
 }
 
 /// Any non-whitespace byte outside a comment?
@@ -188,47 +137,97 @@ fn has_code(b: &[u8]) -> bool {
     false
 }
 
+/// Trim whitespace from a span, then report whether anything executable
+/// remains. A span holding only comments is not a statement.
+fn trim_span(b: &[u8], mut start: usize, mut end: usize) -> Option<StatementSpan> {
+    while start < end && b[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if start >= end {
+        return None;
+    }
+    if !has_code(&b[start..end]) {
+        return None;
+    }
+    Some(StatementSpan { start, end })
+}
+
 /// Split a buffer into executable statement spans.
+///
+/// # `DELIMITER` is honoured, not bailed out of
+///
+/// It is a **client** directive — MySQL's server has never understood it. The
+/// original design returned the whole buffer as a single span when it saw one,
+/// which meant the literal text `DELIMITER $$` was handed to the server, which
+/// rejected it with a syntax error. Every routine definition was therefore
+/// unrunnable, and the failure looked like a problem with the user's SQL.
+///
+/// So the directive is consumed here: it sets the terminator and never reaches
+/// a connection. `delimiter_detected` still reports that one was seen, because
+/// auto-LIMIT must stay off for a script that defines routines.
 pub fn split(sql: &str) -> SplitOutput {
     let b = sql.as_bytes();
-
-    if has_delimiter_directive(b) {
-        let statements = trim_span(b, 0, b.len()).map_or_else(Vec::new, |s| vec![s]);
-        return SplitOutput {
-            statements,
-            delimiter_detected: true,
-        };
-    }
 
     let mut statements = Vec::new();
     let mut mode = Mode::Normal;
     let mut seg_start = 0usize;
     let mut i = 0usize;
+    let mut delim: Vec<u8> = vec![b';'];
+    let mut delimiter_detected = false;
+    // A directive is only recognised at the start of a line, which is the only
+    // place MySQL clients accept it. Leading whitespace does not end a line
+    // start; anything else does.
+    let mut at_line_start = true;
 
     while i < b.len() {
         let c = b[i];
         match mode {
-            Mode::Normal => match c {
-                b';' => {
+            Mode::Normal => {
+                if at_line_start && !c.is_ascii_whitespace() {
+                    if let Some((next, line_end)) = parse_delimiter_directive(b, i) {
+                        if let Some(s) = trim_span(b, seg_start, i) {
+                            statements.push(s);
+                        }
+                        delim = next;
+                        delimiter_detected = true;
+                        i = line_end;
+                        seg_start = i;
+                        at_line_start = true;
+                        continue;
+                    }
+                }
+
+                // The active terminator wins over everything else, exactly as
+                // it does in the mysql client.
+                if b[i..].starts_with(&delim) {
                     if let Some(s) = trim_span(b, seg_start, i) {
                         statements.push(s);
                     }
-                    seg_start = i + 1;
+                    i += delim.len();
+                    seg_start = i;
+                    at_line_start = false;
+                    continue;
                 }
-                b'\'' => mode = Mode::Single,
-                b'"' => mode = Mode::Double,
-                b'`' => mode = Mode::Backtick,
-                b'#' => mode = Mode::LineComment,
-                b'-' if is_dash_comment(b, i) => {
-                    mode = Mode::LineComment;
-                    i += 1;
+
+                match c {
+                    b'\'' => mode = Mode::Single,
+                    b'"' => mode = Mode::Double,
+                    b'`' => mode = Mode::Backtick,
+                    b'#' => mode = Mode::LineComment,
+                    b'-' if is_dash_comment(b, i) => {
+                        mode = Mode::LineComment;
+                        i += 1;
+                    }
+                    b'/' if b.get(i + 1) == Some(&b'*') => {
+                        mode = Mode::BlockComment;
+                        i += 1;
+                    }
+                    _ => {}
                 }
-                b'/' if b.get(i + 1) == Some(&b'*') => {
-                    mode = Mode::BlockComment;
-                    i += 1;
-                }
-                _ => {}
-            },
+            }
             Mode::Single | Mode::Double | Mode::Backtick => {
                 let q = match mode {
                     Mode::Single => b'\'',
@@ -258,17 +257,21 @@ pub fn split(sql: &str) -> SplitOutput {
                 }
             }
         }
+        // A line start survives leading whitespace and is re-established by a
+        // newline, in every mode — a `DELIMITER` on the line after a comment
+        // is still a directive.
+        at_line_start = c == b'\n' || (at_line_start && c.is_ascii_whitespace());
         i += 1;
     }
 
-    // Trailing statement with no terminating semicolon.
+    // Trailing statement with no terminating delimiter.
     if let Some(s) = trim_span(b, seg_start, b.len()) {
         statements.push(s);
     }
 
     SplitOutput {
         statements,
-        delimiter_detected: false,
+        delimiter_detected,
     }
 }
 
@@ -477,6 +480,15 @@ mod tests {
             .collect()
     }
 
+    /// The statement texts a split produced, which is what these tests are
+    /// actually about — comparing offsets by hand hides the failure.
+    fn spans<'a>(sql: &'a str, out: &SplitOutput) -> Vec<&'a str> {
+        out.statements
+            .iter()
+            .map(|s| &sql[s.start..s.end])
+            .collect()
+    }
+
     #[test]
     fn splits_plain_statements() {
         assert_eq!(
@@ -606,13 +618,81 @@ mod tests {
         );
     }
 
+    /// The bug this replaced: the whole buffer used to come back as one span,
+    /// so the literal text `DELIMITER $$` was sent to MySQL, which does not
+    /// understand it. Every routine definition failed with a syntax error.
     #[test]
-    fn delimiter_directive_bails_out_to_a_single_span() {
+    fn a_delimiter_directive_is_consumed_and_never_reaches_the_server() {
         let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END $$\nDELIMITER ;";
         let out = split(sql);
-        assert!(out.delimiter_detected);
-        assert_eq!(out.statements.len(), 1);
-        assert_eq!(&sql[out.statements[0].start..out.statements[0].end], sql);
+        assert!(out.delimiter_detected, "auto-LIMIT must stay off");
+        assert_eq!(out.statements.len(), 1, "{:?}", spans(sql, &out));
+        let body = &sql[out.statements[0].start..out.statements[0].end];
+        assert_eq!(body, "CREATE PROCEDURE p() BEGIN SELECT 1; END");
+        assert!(
+            !body.to_uppercase().contains("DELIMITER"),
+            "the directive leaked into the statement: {body}"
+        );
+    }
+
+    /// The internal `;` is the entire reason `DELIMITER` exists — splitting on
+    /// it would send the server a truncated routine.
+    #[test]
+    fn the_custom_terminator_replaces_the_semicolon_rather_than_joining_it() {
+        let sql = "DELIMITER $$\nSELECT 1; SELECT 2$$\nSELECT 3$$";
+        let out = split(sql);
+        assert_eq!(spans(sql, &out), vec!["SELECT 1; SELECT 2", "SELECT 3"]);
+    }
+
+    /// Statements before the directive still split on `;`, which is what makes
+    /// a `USE …; DROP …; DELIMITER $$ CREATE …` script work as one script.
+    #[test]
+    fn statements_before_and_after_the_directive_use_their_own_terminators() {
+        let sql = "USE `poc`;\nDROP PROCEDURE IF EXISTS p;\nDELIMITER $$\n\
+                   CREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 9;";
+        let out = split(sql);
+        assert_eq!(
+            spans(sql, &out),
+            vec![
+                "USE `poc`;".trim_end_matches(';'),
+                "DROP PROCEDURE IF EXISTS p",
+                "CREATE PROCEDURE p() BEGIN SELECT 1; END",
+                "SELECT 9",
+            ],
+        );
+    }
+
+    /// Restoring `;` mid-script must actually restore it.
+    #[test]
+    fn the_delimiter_can_be_switched_back() {
+        let sql = "DELIMITER $$\nSELECT 1$$\nDELIMITER ;\nSELECT 2; SELECT 3;";
+        let out = split(sql);
+        assert_eq!(spans(sql, &out), vec!["SELECT 1", "SELECT 2", "SELECT 3"]);
+    }
+
+    #[test]
+    fn a_multi_character_delimiter_works() {
+        let sql = "DELIMITER //\nSELECT 1//\nSELECT 2//";
+        assert_eq!(spans(sql, &split(sql)), vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    /// `DELIMITERS` is a perfectly good identifier, and a bare `DELIMITER` with
+    /// nothing after it sets nothing.
+    #[test]
+    fn a_directive_needs_a_token_and_a_word_boundary() {
+        let out = split("DELIMITERS x FROM t");
+        assert!(!out.delimiter_detected, "DELIMITERS is not the directive");
+        let out = split("DELIMITER\nSELECT 1");
+        assert!(!out.delimiter_detected, "no token means no directive");
+    }
+
+    /// Offsets stay byte-exact across a directive — the editor highlights
+    /// statements using these, and multibyte text is where that breaks.
+    #[test]
+    fn offsets_survive_a_directive_with_multibyte_text() {
+        let sql = "SELECT 'héllo';\nDELIMITER $$\nSELECT '★ 表'$$";
+        let out = split(sql);
+        assert_eq!(spans(sql, &out), vec!["SELECT 'héllo'", "SELECT '★ 表'"]);
     }
 
     #[test]

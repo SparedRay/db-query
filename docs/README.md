@@ -9,6 +9,9 @@ decisions that were corrected along the way.
 | 0 | [POC — lightweight MySQL client](stage-0-poc.md) | 🔒 **Frozen** — complete and verified |
 | 1 | [Script tabs & file open/save](stage-1-tabs-and-files.md) | 🔒 **Frozen** — complete and verified |
 | 2 | [Connections](stage-2-connections.md) | 🔒 **Frozen** — complete; C3w (Windows) carried forward |
+| 3 | [Schema actions & result export](stage-3-explore-and-export.md) | 🔒 **Frozen** — built; E1-E8 click-through never run, carried to Stage 4 |
+| 4 | [Testability](stage-4-testability.md) | 🔒 **Frozen** — 192 UI tests on both engines; E1-E8 answered; CI + Windows carried to Stage 5 |
+| 5 | [Packaging & distribution](stage-5-packaging.md) | 🚧 **Active** — Linux + Windows installers, built by GitHub Actions, self-updating on Windows |
 
 ## Rules
 

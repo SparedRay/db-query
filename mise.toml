@@ -24,11 +24,23 @@ run = [
 ]
 
 [tasks.test]
-description = "Offline tests (no database or keychain needed)"
+description = "Offline tests: Rust unit + fixture. See test-ui for the frontend."
 run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --lib",
   "cargo test --manifest-path src-tauri/Cargo.toml --test sample_files",
 ]
+
+[tasks.test-ui]
+description = "Frontend tests: the real UI in a real browser, stubbed backend"
+run = "npx playwright test --project=chromium"
+
+[tasks.test-ui-webkit]
+description = "The same suite on WebKit — the engine Tauri actually ships on Linux/macOS"
+run = "npx playwright test --project=webkit"
+
+[tasks.test-ui-all]
+description = "Both engines"
+run = "npx playwright test"
 
 [tasks.test-live]
 description = "Tests needing the MySQL fixture (see dev/README.md) and a keychain"

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use sqlx::mysql::MySqlRow;
 use sqlx::Executor;
 
 use crate::decode::{columns_of, decode_cell, CellValue, ColumnMeta};
@@ -84,6 +85,104 @@ pub struct ScriptResult {
     /// The safety-net timeout fired. Distinct from `cancelled`, which means
     /// the user pressed the button.
     pub timed_out: bool,
+}
+
+/// Stream a single row-returning statement straight to a file, unbounded.
+///
+/// This is the only path in the app that is **not** capped by [`MAX_ROWS`], and
+/// it exists precisely because that cap makes "export what is shown" a partial
+/// answer for a truncated result. Rows are written as they arrive and never all
+/// held at once, so exporting a table larger than memory works.
+///
+/// Runs on the tab's own exec connection under the same `running` flag as
+/// `run_script`, so the existing cancel button and `KILL QUERY` machinery apply
+/// unchanged — an export of ten million rows must be stoppable.
+pub async fn stream_to_file(
+    state: &AppState,
+    tab_id: &str,
+    sql: &str,
+    path: &std::path::Path,
+    mut write_row: impl FnMut(&MySqlRow, &mut String) -> Result<(), String>,
+    header: impl FnOnce(&MySqlRow) -> Result<String, String>,
+) -> Result<(usize, u64, bool), String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
+    let mut guard = tab.exec.lock().await;
+    session::ensure_exec(&mut guard, &tab).await?;
+    let conn = guard
+        .as_mut()
+        .expect("ensure_exec guarantees a live connection");
+
+    tab.cancel_requested.store(false, Ordering::SeqCst);
+    tab.running.store(true, Ordering::SeqCst);
+
+    // Write to a sibling temp file and rename at the end, so an interrupted or
+    // cancelled export never leaves a half-written file wearing the real name.
+    let tmp = path.with_extension(format!(
+        "{}.part",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("out")
+    ));
+
+    let result = async {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("Cannot create {}: {e}", tmp.display()))?;
+        let mut written = 0usize;
+        let mut bytes = 0u64;
+        let mut cancelled = false;
+        let mut buf = String::new();
+        // Consumed on the first row, which is the only place the column
+        // metadata exists — a stream has none before its first row arrives.
+        let mut header = Some(header);
+
+        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
+        while let Some(row) = stream.next().await {
+            if tab.cancel_requested.load(Ordering::SeqCst) {
+                cancelled = true;
+                break;
+            }
+            let row = row.map_err(|e| session::friendly(&e))?;
+            if let Some(h) = header.take() {
+                buf.push_str(&h(&row)?);
+            }
+            write_row(&row, &mut buf)?;
+            written += 1;
+
+            // Flush in blocks rather than per row: one syscall per row is what
+            // makes a large export slow.
+            if buf.len() >= 1 << 20 {
+                file.write_all(buf.as_bytes())
+                    .map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+                bytes += buf.len() as u64;
+                buf.clear();
+            }
+        }
+        drop(stream);
+
+        file.write_all(buf.as_bytes())
+            .map_err(|e| format!("Cannot write {}: {e}", tmp.display()))?;
+        bytes += buf.len() as u64;
+        file.sync_all()
+            .map_err(|e| format!("Cannot flush {}: {e}", tmp.display()))?;
+        Ok::<_, String>((written, bytes, cancelled))
+    }
+    .await;
+
+    tab.running.store(false, Ordering::SeqCst);
+
+    match result {
+        Ok((written, bytes, cancelled)) => {
+            std::fs::rename(&tmp, path)
+                .map_err(|e| format!("Cannot finish writing {}: {e}", path.display()))?;
+            Ok((written, bytes, cancelled))
+        }
+        Err(e) => {
+            // A failed export leaves nothing behind wearing the real name.
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Await a query, optionally KILLing it after `timeout_secs`.

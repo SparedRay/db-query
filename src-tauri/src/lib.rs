@@ -2,6 +2,7 @@
 
 pub mod decode;
 pub mod exec;
+pub mod export;
 pub mod files;
 pub mod lint;
 pub mod profiles;
@@ -9,13 +10,15 @@ pub mod schema;
 pub mod secrets;
 pub mod session;
 pub mod split;
+pub mod sqlgen;
 
 use tauri::State;
 
+use decode::CellValue;
 use exec::ScriptResult;
 use files::{FileTypeSpec, OpenedFile, SaveOutcome, SavedFile};
 use lint::Diagnostic;
-use schema::{ColumnInfo, TableRef};
+use schema::{ColumnInfo, RoutineKind, RoutineRef, TableRef};
 use secrets::Secret;
 use session::{AppState, ConnInfo, ConnProfile, ConnectionStatus, ProfileView, TabStatus};
 use split::SplitOutput;
@@ -292,6 +295,310 @@ async fn refresh_schema(
     schema::refresh(&state, &connection_id, &db).await
 }
 
+#[tauri::command]
+async fn list_routines(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+) -> Result<Vec<RoutineRef>, String> {
+    schema::list_routines(&state, &connection_id, &db).await
+}
+
+/// The re-runnable creation script for a routine. Text only — like everything
+/// in Stage 3, it lands in an editor tab and is never executed here.
+#[tauri::command]
+async fn routine_ddl(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+    name: String,
+    kind: RoutineKind,
+) -> Result<String, String> {
+    schema::routine_ddl(&state, &connection_id, &db, &name, kind).await
+}
+
+// ------------------------------------------------------------- generated SQL
+//
+// Every command here returns **text for the user to read**. None of them
+// executes anything: that is the rule Stage 3 is built on, and half of what
+// they produce is `DROP`.
+
+/// Numbers the UI would otherwise have to hardcode a second time.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppDefaults {
+    /// Rows a generated `SELECT` asks for.
+    browse_limit: u32,
+    /// The safety ceiling the executor applies per statement. A different
+    /// concept from the browse limit, shown so the UI can explain truncation.
+    max_rows: u32,
+}
+
+#[tauri::command]
+fn app_defaults() -> AppDefaults {
+    AppDefaults {
+        browse_limit: sqlgen::DEFAULT_BROWSE_LIMIT,
+        max_rows: exec::MAX_ROWS as u32,
+    }
+}
+
+#[tauri::command]
+fn generate_select(db: String, table: String, limit: u32) -> Result<String, String> {
+    sqlgen::generate_select(&db, &table, limit)
+}
+
+#[tauri::command]
+fn generate_drop(target: sqlgen::DropTarget) -> Result<String, String> {
+    sqlgen::generate_drop(&target)
+}
+
+#[tauri::command]
+async fn generate_call(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+    name: String,
+) -> Result<String, String> {
+    // Resolved from the cached routine list rather than taken from the caller:
+    // the parameter list is what makes the snippet useful, and the frontend
+    // should not be the thing that remembers it.
+    let routines = schema::list_routines(&state, &connection_id, &db).await?;
+    let routine = routines
+        .into_iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| format!("No routine named {name} in {db}."))?;
+    sqlgen::generate_call(&db, &routine)
+}
+
+// ------------------------------------------------------------------- export
+
+/// Ask for a destination, returning `None` when the user cancels.
+///
+/// File I/O stays in Rust, as it has since Stage 1 — `tauri-plugin-fs` exists to
+/// hand the filesystem to JavaScript, and we have never needed that.
+async fn pick_export_path(
+    app: &tauri::AppHandle,
+    suggested_name: &str,
+    label: &str,
+    extensions: &[&str],
+) -> Result<Option<std::path::PathBuf>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(suggested_name)
+        .add_filter(label, extensions)
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let picked = rx
+        .await
+        .map_err(|_| "The file dialog closed unexpectedly.".to_string())?;
+    let Some(f) = picked else { return Ok(None) };
+    f.into_path()
+        .map(Some)
+        .map_err(|e| format!("Unsupported file path: {e}"))
+}
+
+#[tauri::command]
+async fn export_csv(
+    app: tauri::AppHandle,
+    result: export::ResultSet,
+    options: export::CsvOptions,
+    suggested_name: String,
+) -> Result<Option<export::ExportOutcome>, String> {
+    let export::ResultSet {
+        columns,
+        rows,
+        truncated,
+    } = result;
+    let Some(path) = pick_export_path(&app, &suggested_name, "CSV", &["csv"]).await? else {
+        return Ok(None);
+    };
+    let body = export::to_csv(&columns, &rows, &options);
+    let bytes_written = export::write(&path, &body)?;
+
+    let mut warnings = Vec::new();
+    if let Some(w) = export::binary_column_warning(&columns) {
+        warnings.push(w);
+    }
+    // CSV has no way to spell NULL. Whichever way the collapse goes, say it.
+    if options.null_as.is_empty() && rows.iter().flatten().any(|c| matches!(c, CellValue::Null)) {
+        warnings.push("NULLs were written as empty fields; CSV cannot tell the two apart.".into());
+    }
+
+    Ok(Some(export::ExportOutcome {
+        path: path.display().to_string(),
+        rows_written: rows.len(),
+        truncated_source: truncated,
+        bytes_written,
+        warnings,
+    }))
+}
+
+/// Export rows as an `INSERT` script.
+///
+/// When `source` names a real table, its `CREATE TABLE` comes from the server
+/// and is exact. Otherwise it is derived from the result's column metadata and
+/// says so in the file, because the protocol carries no lengths or keys.
+#[tauri::command]
+async fn export_inserts(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    result: export::ResultSet,
+    options: export::InsertOptions,
+    source: Option<SourceTable>,
+    suggested_name: String,
+) -> Result<Option<export::ExportOutcome>, String> {
+    let export::ResultSet {
+        columns,
+        rows,
+        truncated,
+    } = result;
+    let mut warnings = Vec::new();
+
+    let create_sql = if options.create_table {
+        match &source {
+            Some(src) => {
+                Some(schema::table_ddl(&state, &src.connection_id, &src.db, &src.table).await?)
+            }
+            None => {
+                warnings.push(
+                    "These rows did not come from a single table, so the CREATE TABLE was \
+                     derived from the result's columns: types are widened and there are no \
+                     keys or defaults."
+                        .into(),
+                );
+                Some(export::derived_create_table(
+                    &columns,
+                    options.db.as_deref(),
+                    &options.table,
+                )?)
+            }
+        }
+    } else {
+        None
+    };
+
+    // Generate before opening the dialog: a refusal (a binary column, say) must
+    // not arrive after the user has already chosen a filename.
+    let body = export::to_inserts(&columns, &rows, &options, create_sql.as_deref())?;
+
+    let Some(path) = pick_export_path(&app, &suggested_name, "SQL script", &["sql"]).await? else {
+        return Ok(None);
+    };
+    let bytes_written = export::write(&path, &body)?;
+
+    Ok(Some(export::ExportOutcome {
+        path: path.display().to_string(),
+        rows_written: rows.len(),
+        truncated_source: truncated,
+        bytes_written,
+        warnings,
+    }))
+}
+
+/// Re-run a statement with no row ceiling and stream the result to a file.
+///
+/// The honest answer to "export a truncated result": the rows on screen are
+/// capped by `MAX_ROWS`, and this goes back to the server for all of them. Only
+/// offered when the statement can be re-run standalone — see
+/// `export::rerunnable`, which refuses rather than guessing.
+#[tauri::command]
+async fn export_rerun(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    tab_id: String,
+    sql: String,
+    format: export::ExportFormat,
+    options: export::ExportOptions,
+    suggested_name: String,
+) -> Result<Option<export::ExportOutcome>, String> {
+    // Checked before the dialog: a refusal must not arrive after the user has
+    // already chosen a filename.
+    let statement = export::rerunnable(&sql)?;
+
+    let (label, ext) = match format {
+        export::ExportFormat::Csv => ("CSV", "csv"),
+        export::ExportFormat::Inserts => ("SQL script", "sql"),
+    };
+    let Some(path) = pick_export_path(&app, &suggested_name, label, &[ext]).await? else {
+        return Ok(None);
+    };
+
+    let (rows_written, bytes_written, cancelled) = match format {
+        export::ExportFormat::Csv => {
+            let o = options.csv.clone();
+            let h = options.csv.clone();
+            exec::stream_to_file(
+                &state,
+                &tab_id,
+                &statement,
+                &path,
+                move |row, buf| {
+                    buf.push_str(&export::csv_row(row, &o));
+                    Ok(())
+                },
+                move |row| Ok(export::csv_header(row, &h)),
+            )
+            .await?
+        }
+        export::ExportFormat::Inserts => {
+            let o = options.inserts.clone();
+            let h = options.inserts.clone();
+            exec::stream_to_file(
+                &state,
+                &tab_id,
+                &statement,
+                &path,
+                move |row, buf| export::insert_row(row, &o, buf),
+                move |row| export::insert_header(row, &h),
+            )
+            .await?
+        }
+    };
+
+    let mut warnings = Vec::new();
+    if cancelled {
+        warnings.push(format!(
+            "Cancelled after {rows_written} rows. The file holds what had been read by then."
+        ));
+    }
+
+    Ok(Some(export::ExportOutcome {
+        path: path.display().to_string(),
+        rows_written,
+        // This path went back to the server for everything, so by construction
+        // it is not working from a truncated set.
+        truncated_source: false,
+        bytes_written,
+        warnings,
+    }))
+}
+
+/// The table a result set came from, when it came from one.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceTable {
+    connection_id: String,
+    db: String,
+    table: String,
+}
+
+/// Text for the clipboard. Returns the string rather than writing it, so the
+/// frontend owns the one clipboard call and we do not need a second mechanism.
+#[tauri::command]
+fn clipboard_text(result: export::ResultSet, options: export::CsvOptions) -> String {
+    let export::ResultSet { columns, rows, .. } = result;
+    // No BOM and no CRLF: this is going into another program's buffer, not a
+    // file Excel will open cold.
+    let opts = export::CsvOptions {
+        bom: false,
+        crlf: false,
+        ..options
+    };
+    export::to_csv(&columns, &rows, &opts)
+}
+
 // ------------------------------------------------------------------- stateless
 
 /// The frontend never parses SQL. When it needs statement boundaries it asks
@@ -452,6 +759,16 @@ pub fn run() {
             list_tables,
             list_columns,
             refresh_schema,
+            list_routines,
+            routine_ddl,
+            app_defaults,
+            generate_select,
+            generate_drop,
+            generate_call,
+            export_csv,
+            export_inserts,
+            clipboard_text,
+            export_rerun,
             split_sql,
             statement_at_cursor,
             supported_file_types,

@@ -73,6 +73,11 @@ WITH RECURSIVE seq(i) AS (
 SELECT i, CONCAT('row-', i), i * 3 FROM seq;
 
 -- M3/M4: a second table so joins, aliases and autocomplete have something real.
+--
+-- `orders` is dropped first because it holds the foreign key into `users`.
+-- Without this the seed only works on a fresh container and fails on every
+-- re-run — which is exactly what `mise run db-up` does against an existing one.
+DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS users;
 CREATE TABLE users (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -100,3 +105,42 @@ CREATE OR REPLACE VIEW user_totals AS
   SELECT u.id, u.email, COALESCE(SUM(o.total), 0) AS spent
   FROM users u LEFT JOIN orders o ON o.user_id = u.id
   GROUP BY u.id, u.email;
+
+-- Stage 3 (E3, E4): a procedure and a function, so routine introspection and
+-- the examine round trip have something real to work against.
+--
+-- `DELIMITER` is a client directive, not SQL — the mysql CLI understands it
+-- when this file is piped in, which is how db-up seeds.
+DROP PROCEDURE IF EXISTS top_spenders;
+DELIMITER $$
+CREATE PROCEDURE top_spenders(IN min_total DECIMAL(12,2), IN max_rows INT)
+BEGIN
+  SELECT u.id, u.email, SUM(o.total) AS spent
+  FROM users u JOIN orders o ON o.user_id = u.id
+  GROUP BY u.id, u.email
+  HAVING spent >= min_total
+  ORDER BY spent DESC
+  LIMIT max_rows;
+END$$
+DELIMITER ;
+
+DROP FUNCTION IF EXISTS order_count;
+DELIMITER $$
+CREATE FUNCTION order_count(uid INT) RETURNS INT
+DETERMINISTIC READS SQL DATA
+BEGIN
+  DECLARE n INT;
+  SELECT COUNT(*) INTO n FROM orders WHERE user_id = uid;
+  RETURN n;
+END$$
+DELIMITER ;
+
+-- A no-argument procedure: the CALL snippet generator must not emit a stray
+-- placeholder, and an empty parameter list is a distinct code path.
+DROP PROCEDURE IF EXISTS ping_poc;
+DELIMITER $$
+CREATE PROCEDURE ping_poc()
+BEGIN
+  SELECT 'pong' AS reply;
+END$$
+DELIMITER ;

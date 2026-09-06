@@ -9,6 +9,7 @@
 // cache and any query still running on it.
 
 import { api, type ProfileView, type ConnInfo } from "./api";
+import { contextMenu } from "./menu";
 import { choose } from "./dialog";
 
 export interface ConnectionEntry {
@@ -248,66 +249,14 @@ export class ConnectionManager {
   }
 
   private contextMenu(e: MouseEvent, entry: ConnectionEntry) {
-    document.querySelector(".ctx-menu")?.remove();
-    const menu = document.createElement("div");
-    menu.className = "ctx-menu";
-    menu.style.left = `${e.clientX}px`;
-    menu.style.top = `${e.clientY}px`;
-
-    const items: Array<[string, () => void, boolean?]> = entry.connected
-      ? [
-          ["Disconnect", () => void this.disconnect(entry)],
-          ["Edit…", () => this.openEditor(entry)],
-          ["Duplicate", () => this.duplicate(entry)],
-          ["Delete", () => void this.confirmRemove(entry), true],
-        ]
-      : [
-          ["Connect", () => void this.connect(entry)],
-          ["Edit…", () => this.openEditor(entry)],
-          ["Duplicate", () => this.duplicate(entry)],
-          ["Delete", () => void this.confirmRemove(entry), true],
-        ];
-
-    for (const [label, run, danger] of items) {
-      const b = document.createElement("button");
-      b.textContent = label;
-      if (danger) b.className = "danger";
-      b.onclick = () => {
-        close();
-        run();
-      };
-      menu.append(b);
-    }
-
-    document.body.append(menu);
-
-    // Keep it on screen when opened near an edge — measurable only once
-    // attached, which is why this runs after the append.
-    const box = menu.getBoundingClientRect();
-    if (box.bottom > window.innerHeight) {
-      menu.style.top = `${Math.max(4, window.innerHeight - box.height - 4)}px`;
-    }
-    if (box.right > window.innerWidth) {
-      menu.style.left = `${Math.max(4, window.innerWidth - box.width - 4)}px`;
-    }
-
-    // Dismiss on a mousedown OUTSIDE the menu. Without the containment check
-    // the menu is torn down on mousedown and the button never receives its
-    // click, which makes every item silently unclickable.
-    const dismiss = (ev: MouseEvent) => {
-      if (menu.contains(ev.target as Node)) return;
-      close();
-    };
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") close();
-    };
-    const close = () => {
-      menu.remove();
-      document.removeEventListener("mousedown", dismiss, true);
-      document.removeEventListener("keydown", onKey);
-    };
-    document.addEventListener("mousedown", dismiss, true);
-    document.addEventListener("keydown", onKey);
+    contextMenu(e, [
+      entry.connected
+        ? { label: "Disconnect", run: () => void this.disconnect(entry) }
+        : { label: "Connect", run: () => void this.connect(entry) },
+      { label: "Edit…", run: () => this.openEditor(entry) },
+      { label: "Duplicate", run: () => this.duplicate(entry) },
+      { label: "Delete", run: () => void this.confirmRemove(entry), danger: true },
+    ]);
   }
 
   private duplicate(entry: ConnectionEntry) {
