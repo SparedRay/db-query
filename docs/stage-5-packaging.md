@@ -328,24 +328,50 @@ notes rather than being glossed.
 ### Phase 1 — Make the bundle releasable
 - [ ] **Final bundle identifier**; migration if it changes (§4.2)
 - [x] **A real icon; `tauri icon` to generate `icon.ico`** — done, §4.3
-- [ ] Explicit per-platform `bundle.targets`: `deb` on Linux, `nsis` on Windows — not `"all"`
+- [x] Explicit per-platform `bundle.targets`: `["deb"]` in `tauri.conf.json`, `["nsis"]` in `tauri.windows.conf.json` (auto-merged by the CLI per platform). A plain `tauri build` now emits the 4 MB `.deb` and nothing else.
 - [ ] A display `productName` (`db-query` is a directory name, not a title)
 - [ ] Version single-sourced between `Cargo.toml`, `package.json` and `tauri.conf.json`
 - [ ] Fill in the `.deb` description and maintainer — currently `(none)` and `db-query`
 - [ ] A `Categories=` value in the desktop entry, currently empty, so it files under Development
 
 ### Phase 2 — CI (closes T7, T8)
-- [ ] `ci.yml`: `ubuntu-latest` + `windows-latest` on every push
-- [ ] Linux: apt deps, `mise run check`, `test`, `test-ui-all` (both engines)
-- [ ] Windows: `cargo test`, `tsc`, UI suite on Chromium
-- [ ] **The Windows job settles C3w/E0**: keychain round trip against Credential Manager
-- [ ] Playwright traces and the HTML report as artefacts on failure
-- [ ] Cache `~/.cargo` and `target/` per platform
+
+> **Written, not yet verified.** `.github/workflows/ci.yml` exists and parses,
+> and every command in it passes locally. No workflow has ever *run*, because
+> there is no remote. **T7 and T8 stay open until a green run exists** — a
+> workflow file is a hypothesis, not evidence.
+
+- [x] `ci.yml`: `ubuntu-latest` + `windows-latest`, on push to `main`, on tags, and on pull requests
+- [x] Linux: apt deps, the four `check` commands, both Rust suites, **the live MySQL suite against a `mysql:8` service container** seeded from `dev/seed.sql`, then the UI suite on both engines
+- [x] Windows: the same `check` and Rust suites, plus the UI suite on Chromium — the engine WebView2 actually is
+- [x] **The Windows job settles C3w/E0**: `cargo test --test keychain -- --ignored` against Credential Manager. A failure there is a *result*, not an accident
+- [x] Playwright report and traces as artefacts on failure, kept 14 days
+- [x] `Swatinem/rust-cache` per platform, npm cache, and the Playwright browser cache
+- [ ] **A green run on both platforms** ← the actual milestone
+
+Toolchain versions are repeated in the workflow rather than driven by `mise`,
+because mise on the Windows runner is the less-travelled path and a broken
+toolchain step would hide real failures. **That is a drift risk**: bumping
+`mise.toml` means bumping `ci.yml`. Noted in the workflow header.
 
 ### Phase 3 — Release workflow
-- [ ] `release.yml`: tag-triggered, `tauri-apps/tauri-action`, draft release
-- [ ] Linux job → `.deb`; Windows job → NSIS `-setup.exe`
-- [ ] Release notes template: unsigned build, SmartScreen click-through, what the updater does
+
+> **Written, not yet verified**, for the same reason as Phase 2.
+
+- [x] `release.yml`: tag-triggered (`v*`) plus manual dispatch, `tauri-apps/tauri-action`, **draft** release so notes can be edited before anyone sees them
+- [x] Linux job → `.deb`; Windows job → NSIS `-setup.exe`
+- [x] Release-notes template: install steps for both platforms, and a plain statement that the build is unsigned with the SmartScreen click-through spelled out
+- [x] Updater signing env vars wired but unset — harmless until `plugins.updater` exists, required the moment it does
+- [ ] **A tag that actually produces two downloadable installers**
+
+The Linux release job pins **`ubuntu-22.04`, not `ubuntu-latest`** — glibc 2.35
+rather than 2.39, so the `.deb` installs on 22.04-era machines as well as this
+one. Building on 24.04 would silently narrow that. If the image is retired, the
+fix is one line and the cost is compatibility.
+
+**Release does not gate on CI.** A tag triggers both workflows in parallel; a
+red CI run means pull the draft, it does not stop the build. Gating would mean
+building everything twice.
 
 ### Phase 4 — Updater (Windows)
 - [ ] `tauri signer generate`; public key into `tauri.conf.json`

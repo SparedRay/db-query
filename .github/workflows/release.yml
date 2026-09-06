@@ -1,0 +1,105 @@
+# Push a tag, get installers.
+#
+#   npm version 0.1.1 --no-git-tag-version   # keep the three manifests in step
+#   git tag v0.1.1 && git push origin v0.1.1
+#
+# Produces a DRAFT release so the notes can be edited before anyone sees it.
+# Publish it from the GitHub UI when you are happy.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on 22.04 deliberately: its glibc is 2.35, so the .deb also
+          # runs on 22.04-era distributions. Building on 24.04 would produce a
+          # package that requires glibc 2.39 and refuses to install on older
+          # machines. If this runner image is ever retired, moving to
+          # ubuntu-latest is a one-line change that narrows compatibility.
+          - platform: ubuntu-22.04
+            name: Linux (.deb)
+          - platform: windows-latest
+            name: Windows (setup.exe)
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: System libraries (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file pkg-config patchelf \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty until Stage 5 Phase 4 generates the keypair with
+          # `tauri signer generate`. The build only consults them once
+          # `plugins.updater` exists in tauri.conf.json, so an unset secret is
+          # harmless today and required the moment the updater is switched on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: db-query ${{ github.event.inputs.tag || github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          # Which formats each platform emits is decided by tauri.conf.json
+          # (deb) and tauri.windows.conf.json (nsis), not repeated here.
+          releaseBody: |
+            ## Install
+
+            **Windows** — download `db-query_*_x64-setup.exe` and run it.
+            Installs for the current user, so there is no Administrator prompt,
+            and it appears in the Start Menu.
+
+            **Linux (Debian/Ubuntu/Pop!_OS)** — download the `.deb` and:
+
+            ```
+            sudo apt install ./db-query_*_amd64.deb
+            ```
+
+            ### These builds are not code-signed
+
+            Windows SmartScreen will say *"Windows protected your PC"* the first
+            time. **More info → Run anyway.** Once, on first install.
+
+            This is a deliberate trade: a code-signing certificate costs several
+            hundred dollars a year and requires identity verification, which is
+            hard to justify for an open-source tool at this stage. The source
+            for every release is in this repository, and the workflow that built
+            it is `.github/workflows/release.yml`.

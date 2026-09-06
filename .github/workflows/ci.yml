@@ -1,0 +1,178 @@
+# Every push and pull request, on both platforms we ship to.
+#
+# Toolchain versions are pinned in mise.toml for local work; they are repeated
+# here rather than driven by mise, because mise on the Windows runner is the
+# less-travelled path and a broken toolchain step would hide real failures.
+# If you bump mise.toml, bump this too.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Tags too, so a release build never happens without the full suite having
+    # run against exactly that commit. Note it runs *alongside* release.yml
+    # rather than gating it — a red CI run on a tag means pull the draft
+    # release, it does not stop it being built.
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux — check, unit, live MySQL, UI (both engines)
+    runs-on: ubuntu-latest
+
+    # The live suite talks to a real server. The credentials match dev/seed.sql
+    # and the podman fixture in dev/README.md, so the same tests run unchanged
+    # here and on a developer machine.
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: devpassword
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -pdevpassword --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri links webkit2gtk natively, so even the pure-Rust tests cannot
+      # compile without these. Mirrors the apt step in README.md.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file pkg-config patchelf \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      # --- the same four commands as `mise run check` ---
+      - name: Build
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # --- `mise run test` ---
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Sample-file fixtures
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
+
+      # --- the live suite: the half of `mise run test-live` that can run here ---
+      # The keychain half cannot: a Linux runner has no D-Bus secret service.
+      # It runs on Windows instead, which is what finally answers E0/C3w.
+      - name: Seed the fixture
+        run: mysql -h 127.0.0.1 -P 3306 -uroot -pdevpassword < dev/seed.sql
+      - name: Live MySQL tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test live_mysql -- --ignored --test-threads=1
+
+      # --- `mise run test-ui-all` ---
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install browsers
+        run: npx playwright install --with-deps chromium webkit
+      - name: UI tests — Chromium and WebKit
+        run: npx playwright test
+
+      - name: Keep the evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-linux
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+
+  windows:
+    name: Windows — check, unit, keychain (E0/C3w), UI
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Build
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Sample-file fixtures
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
+
+      # E0 / C3w, carried since Stage 2 and unanswerable until now: does the
+      # keychain layer actually work against Windows Credential Manager?
+      # A failure here is a result, not an accident — it is the thing we came for.
+      - name: Keychain — Windows Credential Manager
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test keychain -- --ignored
+
+      # Chromium only. Tauri renders through WebView2 on Windows, which is
+      # Chromium; Playwright's WebKit is not the engine that ships here.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install browsers
+        run: npx playwright install --with-deps chromium
+      - name: UI tests — Chromium
+        run: npx playwright test --project=chromium
+
+      - name: Keep the evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-windows
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
