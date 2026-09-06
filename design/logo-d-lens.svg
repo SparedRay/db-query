@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="db-query">
+  <title>db-query — a database read through a lens</title>
+  <rect width="512" height="512" rx="112" fill="#16181d"/>
+  <path d="M112 168 v122 a108 40 0 0 0 216 0 V168 Z" fill="#2a3140"/>
+  <path d="M112 229 a108 40 0 0 0 216 0" fill="none" stroke="#16181d" stroke-width="12"/>
+  <ellipse cx="220" cy="168" rx="108" ry="40" fill="#3b82f6"/>
+  <g stroke="#16181d" stroke-width="26" fill="none">
+    <circle cx="330" cy="304" r="96"/>
+    <path d="M396 372 L436 412" stroke-linecap="round"/>
+  </g>
+  <circle cx="330" cy="304" r="96" fill="none" stroke="#7dd3fc" stroke-width="26"/>
+  <path d="M396 372 L436 412" stroke="#7dd3fc" stroke-width="26" stroke-linecap="round"/>
+</svg>

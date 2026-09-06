@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="db-query">
+  <title>db-query — the plain stacked-disk database mark</title>
+  <rect width="512" height="512" rx="112" fill="#16181d"/>
+  <path d="M136 168 v152 a120 44 0 0 0 240 0 V168 Z" fill="#2a3140"/>
+  <path d="M136 232 a120 44 0 0 0 240 0" fill="none" stroke="#16181d" stroke-width="12"/>
+  <path d="M136 288 a120 44 0 0 0 240 0" fill="none" stroke="#16181d" stroke-width="12"/>
+  <ellipse cx="256" cy="168" rx="120" ry="44" fill="#3b82f6"/>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="db-query">
+  <title>db-query — a database whose top disk carries a prompt chevron</title>
+  <rect width="512" height="512" rx="112" fill="#16181d"/>
+  <path d="M132 200 v128 a124 46 0 0 0 248 0 V200 Z" fill="#2a3140"/>
+  <path d="M132 264 a124 46 0 0 0 248 0" fill="none" stroke="#16181d" stroke-width="12"/>
+  <ellipse cx="256" cy="200" rx="124" ry="46" fill="#3b82f6"/>
+  <path d="M222 172 L272 200 L222 228" fill="none" stroke="#16181d" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
