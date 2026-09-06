@@ -230,9 +230,28 @@ config line plus a licence file, so this is not a door that closes.
 A public repo with no `LICENSE` is **"all rights reserved"** by default, which
 is the opposite of open-sourcing it. This must land before or with the push.
 
-**MIT is the recommendation**: the dependency tree is overwhelmingly MIT /
-Apache-2.0, so MIT adds no friction and no incompatibility. Apache-2.0 is the
-alternative if an explicit patent grant is wanted; it is longer but no harder.
+**Chosen: MIT** (2026-09-06), over AGPL-3.0. The reasoning is worth recording,
+because the question asked was narrower than the answer:
+
+- **Attribution was never the gap.** Every candidate — MIT included — requires
+  anyone redistributing the code to keep the copyright notice. Nobody may strip
+  the authorship off it under any of them.
+- **No open source licence prevents commercialisation.** GPL, AGPL and MIT all
+  explicitly permit selling. What copyleft controls is whether a fork may be
+  *closed*, not whether it may be *sold*.
+- **AGPL-3.0 was the alternative** and was verified compatible with this
+  dependency tree (permissive crates fold into copyleft; MPL-2.0 permits it;
+  the LGPL webview is dynamically linked — with the constraint that Apache-2.0
+  is GPL **v3**-compatible and not v2). It was declined in favour of reach.
+
+Two consequences accepted deliberately: someone may fork this, close it and
+sell it, owing only a copyright line; and accepting outside contributions later
+makes relicensing hard without a CLA, since contributors hold copyright in
+their patches. Copyright in existing work is retained either way, so *future*
+versions can be licensed differently — never retroactively.
+
+`license = "MIT"` is declared in `src-tauri/Cargo.toml` and `package.json`, so
+licence tooling reads it rather than guessing.
 
 On the AI-assisted point specifically, keeping the two questions apart is what
 keeps this honest:
@@ -302,8 +321,8 @@ notes rather than being glossed.
 
 ### Phase 0 — Publish
 - [ ] Re-scan history for secrets immediately before the push
-- [ ] Choose the licence (MIT recommended); add `LICENSE`
-- [ ] README: what the licence audit covers, and the honest note on AI-assisted code
+- [x] Choose the licence — **MIT**, chosen 2026-09-06 over AGPL-3.0; reach over control, and no open licence prevents commercialisation anyway. `LICENSE` added.
+- [x] README: what the licence audit covers, its two stated limits, and the honest note on AI-assisted code
 - [ ] Create the public repo; push `main`
 
 ### Phase 1 — Make the bundle releasable

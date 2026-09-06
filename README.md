@@ -86,3 +86,46 @@ MySQL **8.0+**. TLS verifies the CA chain and hostname by default; the
 connection form has an "allow invalid certificates" toggle for internal servers
 with self-signed certs, which drops to encrypted-but-unverified — never to
 plaintext.
+
+## Licence
+
+[MIT](LICENSE) — use it, change it, ship it, sell it. Keep the copyright notice.
+
+### What has actually been checked
+
+Dependency licensing was **measured, not assumed** — resolved from each crate's
+vendored source rather than from memory. The full audit, with method and
+counts, is in
+[§2 of the Stage 5 tracker](docs/stage-5-packaging.md#2-licence-audit--measured-2026-09-05).
+The short version:
+
+- **No GPL, LGPL or AGPL anywhere in the Rust tree.** This is a consequence of
+  one early decision: `sqlx` speaks the MySQL protocol in pure Rust, so nothing
+  here binds `libmysqlclient`, which is GPL-2.0.
+- **One MPL-2.0 crate reaches the binary** (`option-ext`, via `dirs`). The other
+  four are proc-macro dependencies that run at build time and are not linked.
+- **The Linux webview (WebKitGTK, LGPL-2.1) is dynamically linked** as a system
+  library — the `.deb` declares it as a dependency and ships none of it.
+
+Two limits, stated because an audit that overstates itself is worse than none:
+
+- **It is Linux-only.** ~108 crates could not be read on the audit machine
+  because they belong to other targets. Re-running it per platform in CI is a
+  tracked task.
+- **`Cargo.lock` is the union of every platform's dependencies**, so counting it
+  overstates what ships. Only `cargo tree --target … -e normal` distinguishes
+  "in the lockfile" from "in the binary".
+
+### On AI-assisted code
+
+This project was written with heavy AI assistance, and that is a different
+question from the one above — worth keeping separate rather than letting a
+dependency audit imply it was answered.
+
+What the audit establishes is that no dependency imposes terms we are not
+honouring. What it cannot establish is the copyright status of AI-generated
+output, which is genuinely unsettled and varies by jurisdiction. The code here
+is original to this project rather than copied from another codebase, and it is
+offered under MIT on that basis. If you need stronger provenance guarantees than
+that, this is a POC and you should assume nothing beyond what this paragraph
+says.

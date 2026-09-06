@@ -2,7 +2,8 @@
 name = "db-query"
 version = "0.1.0"
 description = "Lightweight MySQL client"
-authors = ["db-query"]
+authors = ["SparedRay"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.82"
 
