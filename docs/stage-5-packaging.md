@@ -445,6 +445,43 @@ project, links it, and passes all 158 unit tests. That much of E0 is answered.
 The keychain test runs *after* the fixtures, so C3w — Credential Manager — is
 still unanswered, and is what the next run reaches first.
 
+### Windows: the OS rewrote the clipboard — 2026-09-07
+
+**91 of 96 passed.** Windows built, linked, passed all 158 unit tests, passed
+the fixtures, and got through the entire UI suite except five clipboard tests:
+
+```
+expect(text.trim().split("\n")).toEqual(["1", "2"])
+  received: ["1\r", "2"]
+```
+
+**Windows stores clipboard text as CRLF and hands it back that way**, so the
+bytes read back are not the bytes the app wrote — the OS rewrote them in
+transit. Nothing in this project is at fault, and the behaviour is *correct*:
+pasting into Excel or Notepad on Windows wants CRLF.
+
+The tell was in what passed. `copies the whole result with headers` was green
+while five others were red, and the only difference is that it asserts with
+`toContain` on single lines. Every failing test splits on `\n`. Line endings
+were the only thing that could separate those two groups.
+
+Confirmed by reproducing it on Linux rather than reasoning about it: the stub's
+`tsv()` was switched to emit `\r\n`, and **the same five tests failed in the
+same order** — the Linux clipboard is byte-transparent, so CRLF in means CRLF
+out. Then, with the fix forced on, all seven passed.
+
+Fixed in `copied()`, the one helper every clipboard test reads through:
+
+```ts
+const CLIPBOARD_REWRITES_NEWLINES = process.platform === "win32";
+```
+
+**Gated rather than unconditional, deliberately.** Everywhere else the clipboard
+is byte-transparent, so the exact-LF assertions stay meaningful there — if our
+own code ever started emitting CRLF, Linux CI would still catch it. Normalising
+on every platform would have bought a green Windows run by blinding the suite
+that can actually see the difference.
+
 ### Phase 3 — Release workflow
 
 > **Written, not yet verified**, for the same reason as Phase 2.

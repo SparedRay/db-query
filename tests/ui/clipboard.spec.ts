@@ -24,11 +24,25 @@ import { installBackend, rowsResult } from "./harness";
  * what Tauri uses on Linux, so "did the copy succeed there" is worth more than
  * "can the test harness read it back".
  */
+/**
+ * Windows stores clipboard text as CRLF and hands it back that way, so on that
+ * platform the bytes read here are **not** the bytes the app wrote — the OS
+ * rewrote them in transit. That is Windows' convention and the right behaviour
+ * (pasting into Excel or Notepad wants CRLF), so the app should not fight it
+ * and neither should these tests.
+ *
+ * Gated rather than unconditional on purpose: everywhere else the clipboard is
+ * byte-transparent, so the exact-LF assertions below stay meaningful there. If
+ * our own code ever started emitting CRLF, Linux CI would still catch it.
+ */
+const CLIPBOARD_REWRITES_NEWLINES = process.platform === "win32";
+
 async function copied(page: Page, browserName: string): Promise<string | null> {
   // Asserted everywhere: the copy reported success rather than an error.
   await expect(page.locator("#result-note")).toContainText(/^Copied /);
   if (browserName !== "chromium") return null;
-  return page.evaluate(() => navigator.clipboard.readText());
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  return CLIPBOARD_REWRITES_NEWLINES ? text.replace(/\r\n/g, "\n") : text;
 }
 
 const CONNECTED = {
