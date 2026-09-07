@@ -354,6 +354,54 @@ because mise on the Windows runner is the less-travelled path and a broken
 toolchain step would hide real failures. **That is a drift risk**: bumping
 `mise.toml` means bumping `ci.yml`. Noted in the workflow header.
 
+### The first CI run failed on both platforms — 2026-09-07
+
+Both jobs died at the same line, before a single test ran:
+
+```
+error: proc macro panicked
+  --> src/lib.rs:780  .run(tauri::generate_context!())
+  = help: message: The `frontendDist` configuration is set to `"../dist"`
+                   but this path doesn't exist
+```
+
+**`generate_context!()` reads `tauri.conf.json` at compile time and hard-fails
+if `frontendDist` is missing.** `dist/` is gitignored, so a fresh checkout has
+none — and nothing in the cargo steps creates it. `npm run build` is wired as
+Tauri's `beforeBuildCommand`, which `tauri build` runs and a plain `cargo build`
+or `cargo test` does not.
+
+Fixed by building the frontend before any cargo step in both jobs. It costs
+nothing: `npm run build` is `tsc --noEmit && vite build`, so it replaces the
+separate typecheck step rather than adding one.
+
+**Why it was not caught, which is the part worth keeping.** Every command in the
+workflow *was* run locally before pushing, and every one passed. They passed
+because this working tree has had a `dist/` since the first `tauri build` days
+earlier — a side effect of unrelated work, invisible because it is gitignored.
+**Verifying a command in a dirty tree does not verify it in CI**; the only
+faithful model of a runner is a clean checkout.
+
+So there is now a dry run, and it is cheap:
+
+```bash
+git clone --no-hardlinks . /tmp/ci-dry && cd /tmp/ci-dry
+npm ci && npm run build && cargo build --manifest-path src-tauri/Cargo.toml
+```
+
+Anything that only exists because of local history fails there, in two minutes,
+instead of on a runner.
+
+Three further landmines were fixed pre-emptively by reading the workflow as if
+it were a clean machine, rather than waiting for three more red runs:
+
+- **`mysql-client` added to the apt step.** The seed step shells out to `mysql`;
+  whether a runner image happens to ship it is not something to depend on.
+- **`--with-deps` dropped from the Windows browser install.** It installs Linux
+  OS packages and has no job on Windows.
+- **The Windows Playwright cache path** uses forward slashes, so no backslash
+  reaches YAML.
+
 ### Phase 3 — Release workflow
 
 > **Written, not yet verified**, for the same reason as Phase 2.

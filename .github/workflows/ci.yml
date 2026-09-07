@@ -55,7 +55,8 @@ jobs:
           sudo apt-get install -y \
             build-essential curl wget file pkg-config patchelf \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
-            libayatana-appindicator3-dev libssl-dev
+            libayatana-appindicator3-dev libssl-dev \
+            mysql-client
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,15 +71,23 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # --- the same four commands as `mise run check` ---
+      # MUST come before any cargo step. `generate_context!()` reads
+      # tauri.conf.json at compile time and hard-fails if `frontendDist`
+      # (../dist) is missing — and dist/ is gitignored, so a fresh checkout has
+      # none. Locally this is invisible: `tauri build` runs it as
+      # `beforeBuildCommand`, but a plain `cargo build` or `cargo test` does
+      # not. This is what broke the first CI run on both platforms.
+      # `npm run build` is `tsc --noEmit && vite build`, so it typechecks too.
+      - name: Build frontend (also typechecks)
+        run: npm run build
+
+      # --- the rest of `mise run check` ---
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - name: Typecheck
-        run: npx tsc --noEmit
 
       # --- `mise run test` ---
       - name: Rust unit tests
@@ -135,14 +144,16 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # See the Linux job: dist/ must exist before cargo compiles anything.
+      - name: Build frontend (also typechecks)
+        run: npm run build
+
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - name: Typecheck
-        run: npx tsc --noEmit
 
       - name: Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
@@ -160,10 +171,11 @@ jobs:
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\ms-playwright
+          path: ~/AppData/Local/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install browsers
-        run: npx playwright install --with-deps chromium
+        # No --with-deps: it installs Linux OS packages and has no job here.
+        run: npx playwright install chromium
       - name: UI tests — Chromium
         run: npx playwright test --project=chromium
 
