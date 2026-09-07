@@ -403,3 +403,50 @@ dialog .row .narrow { width: 84px; flex: 0 0 auto; }
   border: 2px solid transparent; padding: 0;
 }
 .swatch.selected { border-color: var(--fg); }
+
+/* --- cell value viewer (right-click a cell -> Open in full view) --- */
+dialog.viewer {
+  /* Big enough to read a JSON document in, and never taller than the window:
+     the body scrolls, the dialog does not grow past the screen. This is the
+     same min-height:0 discipline the main layout needed. */
+  width: min(760px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+dialog.viewer h2 { margin: 0 0 4px; font-size: 14px; }
+dialog.viewer .viewer-meta {
+  margin: 0 0 10px; font-size: 11.5px; color: var(--fg-dim);
+}
+dialog.viewer .viewer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: 12px/1.55 var(--mono);
+  color: var(--fg);
+  /* Long single-line values must wrap rather than force a horizontal scroll
+     across the whole document. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+dialog.viewer .viewer-body.is-null { color: var(--null); font-style: italic; }
+dialog.viewer menu {
+  /* Explicit: the base `dialog menu` rule is flex-end, and this row wants its
+     buttons at the start with the note pushed to the right. */
+  display: flex; justify-content: flex-start; align-items: center; gap: 8px;
+  margin: 12px 0 0; padding: 0; flex: 0 0 auto;
+}
+dialog.viewer menu button { padding: 5px 12px; font-size: 12.5px; }
+dialog.viewer menu button.primary {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+dialog.viewer .viewer-note {
+  margin-left: auto; font-size: 11.5px; color: var(--fg-dim);
+}

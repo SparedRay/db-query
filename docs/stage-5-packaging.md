@@ -556,6 +556,37 @@ still refused by the SQL-INSERT export. That inconsistency is real, is narrower
 than the bug just fixed, and changing export semantics belongs in its own change
 rather than riding along in this one.
 
+### Cell value viewer — 2026-09-07
+
+Right-click any cell -> **Open in full view**: a modal holding the whole value,
+scrollable, with JSON formatting.
+
+Asked for because of JSON columns, and it earns its place well beyond them —
+**the grid ellipsises every cell**, so before this a long value was on screen
+and unreachable. There was no gesture that would show you the rest of it.
+
+Decisions worth recording:
+
+- **JSON opens formatted, with `Raw` one click away.** Formatting is the reason
+  to open the thing. `Raw` shows the bytes exactly as stored, so nobody has to
+  wonder whether the display is lying about what is in the database.
+- **A JSON *document* means an object or an array.** `JSON.parse` accepts `123`
+  and `true` quite happily, so detecting "is JSON" naively would put a Format
+  button on every integer column in the schema.
+- **Copy copies what is on screen** — formatted if that is what you are looking
+  at. Copying something other than what is displayed is a small lie the user
+  cannot see.
+- **Right-click does not disturb the selection.** Inspecting one value must not
+  throw away a row-and-column selection someone just built in order to copy it.
+- **NULL says so.** The viewer distinguishes a real SQL NULL from the
+  four-character string, the same distinction the grid makes.
+- Same `min-height: 0` discipline as the layout fix above: the dialog is capped
+  at `86vh` and the *body* scrolls, so it can never grow past the window.
+
+Ten tests in `tests/ui/cell-view.spec.ts`, including that the viewer **runs
+nothing** — this project's standing rule — and that a 4000-character value
+really does scroll rather than stretching the dialog off screen.
+
 ### Phase 3 — Release workflow
 
 > **Written, not yet verified**, for the same reason as Phase 2.

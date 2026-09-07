@@ -5,6 +5,8 @@
 // need is "render the visible window of a flat row list".
 
 import type { CellValue, ColumnMeta, ScriptResult, StatementResult } from "./api";
+import { showValue } from "./dialog";
+import { contextMenu } from "./menu";
 
 const ROW_H = 22;
 const OVERSCAN = 12;
@@ -290,6 +292,7 @@ export class ResultView {
         const td = document.createElement("td");
         td.dataset.col = String(c);
         td.onclick = (e) => this.clickCell(e, i, c);
+        td.oncontextmenu = (e) => this.cellMenu(e, i, c);
         const v = row[c];
         if (v === null) {
           td.className = "null";
@@ -316,6 +319,25 @@ export class ResultView {
     // Rows are recreated on every scroll, so the highlight has to be reapplied
     // rather than set once when the column was clicked.
     this.paintSelection();
+  }
+
+  /**
+   * Right-click a cell.
+   *
+   * Acts on the cell under the pointer and deliberately leaves the selection
+   * alone: right-clicking to inspect one value should not throw away a
+   * selection someone just built up in order to copy it.
+   */
+  private cellMenu(e: MouseEvent, row: number, col: number) {
+    const v = this.rows[row]?.[col];
+    if (v === undefined) return;
+    const name = this.cols[col]?.name ?? `column ${col + 1}`;
+    contextMenu(e, [
+      {
+        label: "Open in full view",
+        run: () => showValue(`${name} \u00b7 row ${row + 1}`, cellText(v)),
+      },
+    ]);
   }
 
   /**
@@ -640,6 +662,18 @@ function spacer(height: number, cols: number): HTMLElement {
   td.style.border = "none";
   tr.append(td);
   return tr;
+}
+
+/**
+ * A cell as text, or `null` for a real SQL NULL.
+ *
+ * Matches what the grid paints, so the viewer never shows something the table
+ * disagrees with.
+ */
+function cellText(v: CellValue): string | null {
+  if (v === null) return null;
+  if (typeof v === "boolean") return v ? "1" : "0";
+  return String(v);
 }
 
 function el(tag: string, cls: string, text?: string): HTMLElement {
