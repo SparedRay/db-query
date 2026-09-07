@@ -1,10 +1,21 @@
 # Push a tag, get installers.
 #
 #   npm version 0.1.1 --no-git-tag-version   # keep the three manifests in step
-#   git tag v0.1.1 && git push origin v0.1.1
+#   git commit -am "Release 0.1.1"
+#   git tag v0.1.1 && git push origin main v0.1.1
 #
 # Produces a DRAFT release so the notes can be edited before anyone sees it.
 # Publish it from the GitHub UI when you are happy.
+#
+# **To test this workflow without releasing anything**: run it manually from the
+# Actions tab and leave the tag input EMPTY. It builds both installers from the
+# current branch and uploads them as artefacts, publishing nothing. Use that
+# rather than cutting a throwaway tag — the tag is the thing you cannot undo
+# cleanly once anyone has fetched it.
+#
+# Note the manual run needs a tag that ALREADY EXISTS. This workflow does not
+# create tags: a release must be reproducible from a commit someone can check
+# out, and a tag invented by CI is not.
 
 name: Release
 
@@ -14,8 +25,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.1)"
-        required: true
+        description: "Existing tag to release (e.g. v0.1.1). LEAVE EMPTY for a dry run: builds both installers from this branch and publishes nothing."
+        required: false
 
 permissions:
   contents: write
@@ -40,9 +51,51 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
+      # Before checkout, because checkout is what fails on a missing tag — with
+      # a bare "the process '/usr/bin/git' failed with exit code 1" and nothing
+      # to act on. This says what is actually wrong.
+      - name: Check the tag exists
+        if: github.event.inputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ github.event.inputs.tag }}'
+          gh api "repos/${{ github.repository }}/git/ref/tags/$tag" >/dev/null 2>&1 && exit 0
+          echo "::error::Tag '$tag' does not exist in this repository. Create it first:"
+          echo "::error::  git tag $tag && git push origin $tag"
+          echo "::error::Or re-run this workflow with the tag input empty for a dry run."
+          exit 1
+
+      # Is this a real release, or a dry run?
+      #
+      # A tag push is always a release. A manual run is a release only if it
+      # names a tag; with the input empty it builds the current branch and
+      # publishes nothing. That matters because until now the only way to test
+      # this workflow was to cut a real release — which is how it first shipped
+      # broken.
+      - name: Decide what this run is
+        id: mode
+        shell: bash
+        run: |
+          tag='${{ github.event.inputs.tag }}'
+          if [ -z "$tag" ] && [ '${{ github.event_name }}' = 'push' ]; then
+            tag='${{ github.ref_name }}'
+          fi
+          if [ -n "$tag" ]; then
+            echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Release build for $tag"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Dry run: installers are uploaded as artefacts, nothing is published"
+          fi
+
+      # An empty `ref` means "whatever triggered this run", which is right for
+      # both a tag push and a dry run from a branch.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag }}
 
       - name: System libraries (Linux)
         if: matrix.platform == 'ubuntu-22.04'
@@ -65,6 +118,7 @@ jobs:
       - run: npm ci
 
       - uses: tauri-apps/tauri-action@v0
+        if: steps.mode.outputs.publish == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Empty until Stage 5 Phase 4 generates the keypair with
@@ -74,8 +128,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: db-query ${{ github.event.inputs.tag || github.ref_name }}
+          tagName: ${{ steps.mode.outputs.tag }}
+          releaseName: db-query ${{ steps.mode.outputs.tag }}
           releaseDraft: true
           prerelease: false
           # Which formats each platform emits is decided by tauri.conf.json
@@ -103,3 +157,18 @@ jobs:
             hard to justify for an open-source tool at this stage. The source
             for every release is in this repository, and the workflow that built
             it is `.github/workflows/release.yml`.
+
+      # --- dry run: build the same installers, publish nothing ---
+      - name: Build installers (dry run)
+        if: steps.mode.outputs.publish != 'true'
+        run: npm run tauri build
+
+      - name: Upload installers (dry run)
+        if: steps.mode.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/nsis/*-setup.exe
