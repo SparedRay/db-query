@@ -129,9 +129,23 @@ pub fn decode_cell(row: &MySqlRow, idx: usize) -> CellValue {
         "DECIMAL" | "NEWDECIMAL" | "DECIMAL UNSIGNED" => decimal_text(row, idx),
         "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" | "YEAR" => temporal_text(row, idx),
         "JSON" => text_fallback(row, idx),
+        // MySQL BIT is an unsigned integer of N bits. Rendering the raw bytes
+        // as text gives replacement characters; BIT(1) as a boolean flag is
+        // common enough (every Hibernate schema) that "170" beats "\u{fffd}".
+        "BIT" => match raw_bytes(row, idx) {
+            Some(b) if !b.is_empty() && b.len() <= 8 => {
+                CellValue::Int(b.iter().fold(0u64, |acc, &x| (acc << 8) | x as u64) as i64)
+            }
+            _ => text_fallback(row, idx),
+        },
         "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "GEOMETRY" => {
             match row.try_get::<Vec<u8>, _>(idx) {
-                Ok(b) => CellValue::Text(format!("<binary, {} bytes>", b.len())),
+                // Text first: a string column with a *binary collation* is
+                // reported under exactly these type names. See `bytes_as_text`.
+                Ok(b) => match bytes_as_text(&b) {
+                    Some(s) => CellValue::Text(s),
+                    None => CellValue::Text(format!("<binary, {} bytes>", b.len())),
+                },
                 Err(_) => CellValue::Text("<binary>".into()),
             }
         }
@@ -163,12 +177,48 @@ fn temporal_text(row: &MySqlRow, idx: usize) -> CellValue {
     text_fallback(row, idx)
 }
 
+/// The bytes behind a cell, whatever sqlx thinks its type is.
+///
+/// `try_get_unchecked` skips the **type-compatibility check** that `try_get`
+/// performs before it decodes anything. That check is what makes a readable
+/// JSON or BIT column come back as an error rather than as its contents.
+fn raw_bytes(row: &MySqlRow, idx: usize) -> Option<Vec<u8>> {
+    row.try_get_unchecked::<Vec<u8>, _>(idx).ok()
+}
+
+/// Are these bytes really text, or really binary?
+///
+/// The type name cannot answer it. MySQL reports a string column with a
+/// **binary collation** — `utf8mb4_bin`, and every `... BINARY` column — under
+/// the same names as a BLOB, so `VARBINARY` covers both a password hash and a
+/// perfectly readable case-sensitive name. The *bytes* can answer it: valid
+/// UTF-8 with no control characters is text by any reasonable reading, and
+/// showing it beats printing `<binary, 16 bytes>` over legible words.
+fn bytes_as_text(b: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(b).ok()?;
+    // A NUL or a stray control byte means a blob that happens to decode, not
+    // text. Tab, newline and carriage return are ordinary text.
+    if s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return None;
+    }
+    Some(s.to_owned())
+}
+
 /// Last resort: string, then raw bytes as lossy UTF-8, then a placeholder.
 fn text_fallback(row: &MySqlRow, idx: usize) -> CellValue {
     if let Ok(s) = row.try_get::<String, _>(idx) {
         return CellValue::Text(s);
     }
     if let Ok(b) = row.try_get::<Vec<u8>, _>(idx) {
+        return CellValue::Text(String::from_utf8_lossy(&b).into_owned());
+    }
+    // The one that actually rescues JSON. sqlx's typed accessors check type
+    // *compatibility* and bail before decoding anything, so both attempts above
+    // fail on a value that is perfectly readable — a JSON column came out as
+    // `<undecodable>` for exactly this reason. Raw bytes face no such gate.
+    if let Some(b) = raw_bytes(row, idx) {
         return CellValue::Text(String::from_utf8_lossy(&b).into_owned());
     }
     CellValue::Text("<undecodable>".into())

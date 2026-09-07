@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { commandNames, connect, installBackend, openDatabase, rowsResult } from "./harness";
+import {
+  commandNames,
+  connect,
+  installBackend,
+  openDatabase,
+  rowsResult,
+  schemaBackend,
+} from "./harness";
 
 /**
  * Every bug in this file was shipped, found by hand, and fixed before a stage
@@ -421,4 +428,76 @@ test("a corrupt profile file surfaces its warning", async ({ page }) => {
   });
   await page.goto("/");
   await expect(page.locator("#grid")).toContainText(/could not be read/);
+});
+
+// ------------------------------------------------- layout: it has to fit
+
+/**
+ * Found on the first real database, reported as "I cannot scroll the schema or
+ * the results".
+ *
+ * `#app` is a grid with `height: 100vh` but no declared rows, and an implicit
+ * row is `auto` — it sizes to its tallest child. A schema with more tables than
+ * fit therefore made the row taller than the window: the sidebar grew to 3112px
+ * in a 720px viewport, the results grid was pushed to y=3083, and `overflow:
+ * auto` never engaged anywhere because nothing was ever constrained.
+ *
+ * Not a Windows bug, and not a scrollbar bug. It reproduces on Linux the moment
+ * the tree is bigger than the window — which the four-table fixture never was.
+ * That is why 192 passing tests missed it: every one of them used a schema that
+ * fit on screen.
+ */
+const MANY_TABLES = Array.from({ length: 120 }, (_, i) => ({
+  name: `table_${String(i).padStart(3, "0")}`,
+  kind: "BASE TABLE",
+}));
+
+/** Nothing may extend past the bottom of the window. */
+async function fits(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const box = (sel: string) =>
+      document.querySelector(sel)!.getBoundingClientRect().bottom;
+    const el = document.querySelector(".tree") as HTMLElement;
+    const grid = document.querySelector("#grid") as HTMLElement;
+    return {
+      vh: window.innerHeight,
+      docScrollH: document.documentElement.scrollHeight,
+      sidebarBottom: box("#sidebar"),
+      gridBottom: box("#grid"),
+      treeScrollable: el.scrollHeight > el.clientHeight,
+      gridScrollable: grid.scrollHeight > grid.clientHeight,
+    };
+  });
+}
+
+test("a schema too big for the window scrolls instead of growing the page", async ({ page }) => {
+  await connect(page, { ...schemaBackend, list_tables: () => MANY_TABLES });
+  await openDatabase(page);
+  await expect(page.locator(".node.table")).toHaveCount(120);
+
+  const m = await fits(page);
+  expect(m.sidebarBottom).toBeLessThanOrEqual(m.vh + 1);
+  expect(m.docScrollH).toBeLessThanOrEqual(m.vh + 1);
+  // The point of all of it: the tree can actually be scrolled.
+  expect(m.treeScrollable).toBe(true);
+});
+
+test("a result too big for the window scrolls, and stays on screen", async ({ page }) => {
+  await connect(page, {
+    ...schemaBackend,
+    list_tables: () => MANY_TABLES,
+    run_script: () =>
+      rowsResult(
+        [{ name: "id" }, { name: "v" }],
+        Array.from({ length: 500 }, (_, i) => [String(i), `row ${i}`]),
+      ),
+  });
+  await openDatabase(page);
+  await page.click("#btn-run-all");
+  await expect(page.locator("table.rs")).toBeVisible();
+
+  const m = await fits(page);
+  expect(m.gridBottom).toBeLessThanOrEqual(m.vh + 1);
+  expect(m.docScrollH).toBeLessThanOrEqual(m.vh + 1);
+  expect(m.gridScrollable).toBe(true);
 });

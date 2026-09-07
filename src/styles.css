@@ -29,10 +29,25 @@ body {
 #app {
   display: grid;
   grid-template-columns: 48px var(--sidebar-w, 260px) 5px 1fr;
+  /* The row must be pinned, not implicit. An implicit row is `auto`, which
+     sizes to its tallest child — so a schema with more tables than fit made the
+     row taller than the window, pushed the results grid below the fold, and
+     left nothing scrollable anywhere. `minmax(0, 1fr)` is `1fr` that is also
+     allowed to be *smaller* than its content, which is the half that matters. */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
 }
 
-#sidebar { display: flex; flex-direction: column; min-width: 0; background: var(--bg-raised); }
+/* min-height: 0 on every link in the chain, or the one that lacks it grows.
+   Flex and grid items default to min-height: auto — "never smaller than my
+   content" — which silently defeats `overflow: auto` further down. */
+#sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-raised);
+}
 
 #main {
   display: grid;
@@ -175,7 +190,7 @@ input.num {
 .ctx-menu .ctx-heading + button { margin-top: 0; }
 
 /* --- schema tree --- */
-.tree { flex: 1; overflow: auto; padding: 4px 0; }
+.tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
 .node { display: flex; align-items: center; gap: 5px; padding: 3px 10px; cursor: pointer; white-space: nowrap; font-size: 12.5px; }
 .node:hover { background: #23272f; }
 .node .twisty { width: 12px; color: var(--fg-dim); flex: 0 0 auto; font-size: 10px; }

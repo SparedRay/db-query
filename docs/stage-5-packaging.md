@@ -482,6 +482,80 @@ own code ever started emitting CRLF, Linux CI would still catch it. Normalising
 on every platform would have bought a green Windows run by blinding the suite
 that can actually see the difference.
 
+### First run against a real database — two bugs, 2026-09-07
+
+Both had survived 192 UI tests, 158 unit tests and 57 live tests, for the same
+underlying reason: **every fixture was small and tidy.**
+
+#### 1. Nothing scrolled
+
+Reported as a Windows scrollbar problem. It is neither Windows nor scrollbars —
+it reproduces on Linux the moment the schema is bigger than the window.
+
+`#app` is a grid with `height: 100vh` and **no declared rows**. An implicit row
+is `auto`, which sizes to its tallest child, so a tree with more tables than fit
+made the row taller than the window. Measured with 120 tables in a 720px
+viewport:
+
+| | Before | After |
+|---|---|---|
+| Sidebar height | **3112px** | 720px |
+| Results grid bottom edge | y=3083 | y=691 |
+| Tree scrollable | **no** | yes |
+
+`overflow: auto` never engaged anywhere, because nothing was ever constrained —
+the page simply grew and took the results pane below the fold with it.
+
+Three lines: `grid-template-rows: minmax(0, 1fr)` on `#app`, and `min-height: 0`
+on `#sidebar` and `.tree`. `minmax(0, 1fr)` is `1fr` that is also permitted to be
+*smaller* than its content, and that second half is the one that matters. Flex
+and grid items default to `min-height: auto` — "never smaller than my content" —
+which silently defeats an `overflow: auto` further down the tree.
+
+**Why the suite missed it: every test used the four-table fixture, which fits on
+screen.** The tests were not wrong about behaviour; they never presented the
+condition. The two new tests use 120 tables and 500 rows and assert that nothing
+extends past the bottom of the window.
+
+#### 2. A type name does not tell you what a column holds
+
+Reported as "a lot of undecodable columns that are basically varchars". Rather
+than ask for a dump, the faster path was to build a table of awkward types
+against the local fixture and run the real decoder over it. Three separate bugs
+fell out at once:
+
+| Column | Was | Now |
+|---|---|---|
+| `VARCHAR(64) COLLATE utf8mb4_bin` | `<binary, 16 bytes>` | `héllo bincoll` |
+| `JSON` | `<undecodable>` | `{"k": "v"}` |
+| `BIT(8)` | `<undecodable>` | `170` |
+
+- **The binary-collation case is the one the user hit.** MySQL reports a string
+  column with a binary collation — `utf8mb4_bin`, and every `... BINARY` column
+  — under the same type names as a BLOB. So `VARBINARY` covers both a password
+  hash and a readable case-sensitive name, and the type alone cannot separate
+  them. The bytes can: valid UTF-8 with no control characters is text.
+- **JSON and BIT** failed because sqlx's typed accessors check type
+  *compatibility* and bail **before decoding anything**, so both `String` and
+  `Vec<u8>` were refused on a perfectly readable value. `try_get_unchecked`
+  skips that gate.
+
+The guard against over-correcting is a test of its own: genuinely binary columns
+must **stay** binary. A fix that rendered every blob as mojibake would have
+passed the first test and been worse than the bug.
+
+`dev/seed.sql` gained an `awkward_types` table, so CI covers this from now on —
+and a `SET NAMES utf8mb4`, without which the container's client announces latin1
+and double-encodes every accented character in the file before a test sees it.
+That one cost a wrong diagnosis: the first probe showed mojibake in *every* text
+column, which looked like an app bug and was the fixture's.
+
+**Still open, deliberately.** `export.rs` decides what is binary from the column
+*type*, so a binary-collation column now renders as text in the grid but is
+still refused by the SQL-INSERT export. That inconsistency is real, is narrower
+than the bug just fixed, and changing export semantics belongs in its own change
+rather than riding along in this one.
+
 ### Phase 3 — Release workflow
 
 > **Written, not yet verified**, for the same reason as Phase 2.

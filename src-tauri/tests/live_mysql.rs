@@ -167,6 +167,65 @@ async fn m2_null_is_json_null_and_distinct_from_the_string_null() {
     assert_eq!(as_json(&rows[2][0]), serde_json::Value::Null); // a real NULL
 }
 
+/// Found by the first build ever pointed at a real database.
+///
+/// A type name does not tell you what a column holds. MySQL reports a string
+/// column with a **binary collation** under the same names as a BLOB, so
+/// readable words came back as `<binary, 16 bytes>`; and sqlx's typed
+/// accessors check type *compatibility* before decoding anything, so JSON and
+/// BIT came back as `<undecodable>`.
+#[tokio::test]
+#[ignore]
+async fn awkward_column_types_decode_as_what_they_actually_hold() {
+    let state = connected().await;
+    let r = exec::run_script(
+        &state,
+        T,
+        "SELECT v_utf8mb4, v_latin1, v_binary_coll, c_char, t_text, e_enum, s_set, \
+         j_json, b_bit FROM awkward_types WHERE id = 1",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = &rows_of(&r.statements[0].outcome)[0];
+
+    // Text stays text, whatever charset it is stored in.
+    assert_eq!(as_json(&row[0]), serde_json::json!("héllo wörld"));
+    assert_eq!(as_json(&row[1]), serde_json::json!("héllo latin1"));
+    // The regression: utf8mb4_bin is reported as VARBINARY and is still text.
+    assert_eq!(as_json(&row[2]), serde_json::json!("héllo bincoll"));
+    assert_eq!(as_json(&row[3]), serde_json::json!("ábc"));
+    assert_eq!(as_json(&row[4]), serde_json::json!("latin1 text é"));
+    assert_eq!(as_json(&row[5]), serde_json::json!("alpha"));
+    assert_eq!(as_json(&row[6]), serde_json::json!("x,y"));
+    // Was "<undecodable>".
+    assert_eq!(as_json(&row[7]), serde_json::json!("{\"k\": \"v\"}"));
+    // BIT is an unsigned integer of N bits: b'10101010' is 170.
+    assert_eq!(as_json(&row[8]), serde_json::json!(170));
+}
+
+/// The other half of the same fix: genuinely binary columns must **stay**
+/// binary. A fix that turned every blob into mojibake would pass the test
+/// above and be worse than the bug.
+#[tokio::test]
+#[ignore]
+async fn genuinely_binary_columns_are_still_reported_as_binary() {
+    let state = connected().await;
+    let r = exec::run_script(
+        &state,
+        T,
+        "SELECT vb_varbinary, bl_blob FROM awkward_types WHERE id = 1",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = &rows_of(&r.statements[0].outcome)[0];
+    assert_eq!(as_json(&row[0]), serde_json::json!("<binary, 3 bytes>"));
+    assert_eq!(as_json(&row[1]), serde_json::json!("<binary, 4 bytes>"));
+}
+
 #[tokio::test]
 #[ignore]
 async fn m2_bigint_beyond_2_53_survives_as_text() {

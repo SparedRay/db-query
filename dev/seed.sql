@@ -1,6 +1,11 @@
 -- Fixture for the M1-M5 milestone checks. Every table here exists to make one
 -- specific claim in the tracker falsifiable.
 
+-- The client charset must be explicit. Without it the container's mysql client
+-- announces latin1, the server transcodes on the way in, and every accented
+-- character in this file is double-encoded before a test ever sees it.
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS poc CHARACTER SET utf8mb4;
 USE poc;
 
@@ -144,3 +149,32 @@ BEGIN
   SELECT 'pong' AS reply;
 END$$
 DELIMITER ;
+
+-- Columns whose *type name* lies about what they hold. Every one of these was
+-- decoded wrongly by the first build to meet a real database:
+--   * a string column with a binary collation is reported as VARBINARY, and
+--     came out as "<binary, 16 bytes>" over perfectly readable words;
+--   * JSON and BIT came out as "<undecodable>", because sqlx's typed accessors
+--     reject an incompatible type before decoding anything at all.
+-- The two genuinely binary columns are here to keep the fix honest: they must
+-- still be reported as binary rather than as mojibake.
+DROP TABLE IF EXISTS awkward_types;
+CREATE TABLE awkward_types (
+  id            INT PRIMARY KEY,
+  v_utf8mb4     VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
+  v_latin1      VARCHAR(64) CHARACTER SET latin1  COLLATE latin1_swedish_ci,
+  v_binary_coll VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin,
+  c_char        CHAR(8)     CHARACTER SET latin1,
+  t_text        TEXT        CHARACTER SET latin1,
+  e_enum        ENUM('alpha','beta'),
+  s_set         SET('x','y'),
+  j_json        JSON,
+  b_bit         BIT(8),
+  vb_varbinary  VARBINARY(32),
+  bl_blob       BLOB
+) ENGINE=InnoDB;
+
+INSERT INTO awkward_types VALUES (
+  1, 'héllo wörld', 'héllo latin1', 'héllo bincoll', 'ábc', 'latin1 text é',
+  'alpha', 'x,y', '{"k": "v"}', b'10101010', 0x00FF10, 0xDEADBEEF
+);
