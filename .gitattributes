@@ -1,0 +1,11 @@
+# Test fixtures are byte-exact by design.
+#
+# tests/sample_files.rs asserts the exact line endings and encoding it finds on
+# disk, so git must not rewrite them. Windows checkouts default to
+# core.autocrlf=true, which turned report.sql's LF into CRLF and made a correct
+# detector look wrong on the Windows runner.
+#
+# `-text` disables end-of-line conversion in BOTH directions, which is what
+# these files need: report.sql must stay LF *and* crlf.sql must stay CRLF.
+# `text eol=lf` would fix the first by breaking the second.
+dev/samples/* -text
