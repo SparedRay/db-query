@@ -402,6 +402,49 @@ it were a clean machine, rather than waiting for three more red runs:
 - **The Windows Playwright cache path** uses forward slashes, so no backslash
   reaches YAML.
 
+### Windows: git rewrote a test fixture — 2026-09-07
+
+Linux went green. Windows got through build, clippy, fmt and all 158 unit tests,
+then failed one fixture test:
+
+```
+plain_sql_sample_opens_as_utf8_lf   left: "crlf"   right: "lf"
+```
+
+**The detector was right and the file was wrong.** Windows checkouts default to
+`core.autocrlf=true`, which rewrites LF to CRLF on the way to disk. Measured
+rather than assumed, by cloning with that setting on Linux:
+
+| Fixture | Stored in git | After an autocrlf checkout |
+|---|---|---|
+| `report.sql` | 0 CR — LF | **10 CR — CRLF** |
+| `crlf.sql` | 3 CR — CRLF | 3 CR — unchanged |
+| `latin1.sql` | 0 CR | 0 CR |
+
+Which explains why exactly one test failed: `crlf.sql` was already CRLF, so git
+had nothing to convert, and only the LF fixture was corrupted.
+
+Fixed with `.gitattributes`:
+
+```
+dev/samples/* -text
+```
+
+**`-text` rather than `text eol=lf`**, and the distinction is the whole point:
+`-text` disables conversion in *both* directions, which is what a directory
+holding one deliberately-LF file and one deliberately-CRLF file requires.
+`text eol=lf` would have fixed `report.sql` by breaking `crlf.sql`.
+
+Verified by falsification rather than by inspection: the mangled fixtures were
+copied into a built checkout and reproduced the Windows failure exactly on
+Linux — same test, same `left: "crlf"` — then the fixed fixtures turned it
+green. A fix that has not been shown to fail without itself is a guess.
+
+**What this run already established**, before the failure: Windows compiles this
+project, links it, and passes all 158 unit tests. That much of E0 is answered.
+The keychain test runs *after* the fixtures, so C3w — Credential Manager — is
+still unanswered, and is what the next run reaches first.
+
 ### Phase 3 — Release workflow
 
 > **Written, not yet verified**, for the same reason as Phase 2.
