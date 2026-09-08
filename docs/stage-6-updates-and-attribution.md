@@ -279,6 +279,34 @@ behaviour, so it was updated rather than worked around — and a test now assert
 the serialised name `"session"`, because the frontend matches on that string and
 renaming it silently would put every `SET` back to "0 rows affected".
 
+### Examining a view's definition — 2026-09-08
+
+> *"the right click to see definition should also work with views same way we
+> do with procedures"*
+
+A view's definition is the only place its query lives, and the tree could show
+its name and its columns but never what it selects.
+
+**Almost all of this already existed.** `schema::table_ddl` has run
+`SHOW CREATE TABLE` since Stage 3 — and already unwraps the `Create View`
+column, with a live test (`table_ddl_handles_a_view`) proving it. It was reached
+only from the export path and **was never registered as a command**, so no menu
+could call it. The work was one `#[tauri::command]`, one `api.ts` wrapper and one
+menu entry.
+
+- **One command for tables and views, not two.** `SHOW CREATE TABLE` is what
+  MySQL answers a view with; it simply names the column differently, and Rust
+  already handles both. Splitting it would mean the caller had to know which it
+  was holding.
+- **Tables got the entry too.** It is the same command either way, the tree
+  builds both kinds of node from `buildTableNode`, and `SHOW CREATE TABLE` is
+  the exact answer to keys, defaults and collation that the tree cannot show.
+  Restricting it to views would have needed *extra* code to take it away.
+- Like every other generated-SQL action, it opens a tab and **runs nothing**;
+  both tests assert that.
+
+---
+
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
 - [ ] Re-run the audit on the Windows tree — the ~24 `windows-*` crates Stage 5 §2 could not read

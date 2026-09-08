@@ -212,6 +212,36 @@ test("E4 — a function is examined as a FUNCTION", async ({ page }) => {
 });
 
 /**
+ * Views had no way to show their own query at all — the one thing a view *is*
+ * lived only on the server. The definition entry now sits on tables too: it is
+ * the same `SHOW CREATE TABLE` either way, and MySQL simply answers a view with
+ * a "Create View" column instead.
+ */
+test("E4 — a view's definition is examinable, like a routine's", async ({ page }) => {
+  await connect(page);
+  await openDatabase(page);
+  await openGroup(page, "Views");
+  await page.locator('.node.table:has-text("user_totals")').click({ button: "right" });
+  await page.locator('.ctx-menu button:has-text("Examine")').click();
+
+  const ddl = (await calls(page)).find((c) => c.cmd === "table_ddl");
+  expect(ddl?.args).toMatchObject({ db: "poc", table: "user_totals" });
+  expect(await editorText(page)).toContain("user_totals");
+  await assertNothingRan(page);
+});
+
+test("E4 — a table's definition is examinable too", async ({ page }) => {
+  await connect(page);
+  await openDatabase(page);
+  await page.locator('.node.table:has-text("orders")').click({ button: "right" });
+  await page.locator('.ctx-menu button:has-text("Examine")').click();
+
+  const ddl = (await calls(page)).find((c) => c.cmd === "table_ddl");
+  expect(ddl?.args).toMatchObject({ db: "poc", table: "orders" });
+  await assertNothingRan(page);
+});
+
+/**
  * Routines append to the tab in progress rather than opening a new one —
  * calling a procedure is usually a step inside a script. Recorded in Stage 3 as
  * a deliberate inconsistency with tables, so it is pinned here.

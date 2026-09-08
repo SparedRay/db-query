@@ -318,6 +318,23 @@ async fn routine_ddl(
     schema::routine_ddl(&state, &connection_id, &db, &name, kind).await
 }
 
+/// The server's own `CREATE` for a table or a view. Text only, like
+/// [`routine_ddl`].
+///
+/// One command for both because `SHOW CREATE TABLE` is what MySQL answers a
+/// view with too — it simply names the column "Create View". Splitting them in
+/// the UI would mean the caller had to know which it was holding, and the tree
+/// already does; splitting them here would buy nothing.
+#[tauri::command]
+async fn table_ddl(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+    table: String,
+) -> Result<String, String> {
+    schema::table_ddl(&state, &connection_id, &db, &table).await
+}
+
 // ------------------------------------------------------------- generated SQL
 //
 // Every command here returns **text for the user to read**. None of them
@@ -826,6 +843,7 @@ pub fn run() {
             refresh_schema,
             list_routines,
             routine_ddl,
+            table_ddl,
             app_defaults,
             generate_select,
             generate_drop,

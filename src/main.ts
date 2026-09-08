@@ -804,6 +804,14 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
       { label: `Select first ${browseLimit} rows`, run: browse },
       { label: "Insert name at cursor", run: () => insertAtCursor(view, t.name) },
       {
+        // A view's definition is the only place its query lives, so this is
+        // what "what does this actually select?" costs. Tables get the same
+        // entry: it is the same command, and `SHOW CREATE TABLE` is the exact
+        // answer to keys, defaults and collation that the tree cannot show.
+        label: "Examine definition\u2026",
+        run: () => void showGenerated(t.name, () => api.tableDdl(connId, db, t.name)),
+      },
+      {
         label: isView ? "Drop view…" : "Drop table…",
         danger: true,
         run: () =>

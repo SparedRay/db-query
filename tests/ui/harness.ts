@@ -263,6 +263,8 @@ export const schemaBackend: Backend = {
     `SELECT *\nFROM \`${a.db}\`.\`${a.table}\`\nLIMIT ${a.limit};\n`,
   generate_drop: (a) => `-- generated\nDROP <${JSON.stringify(a.target)}>;\n`,
   generate_call: (a) => `-- PROCEDURE\nCALL \`${a.db}\`.\`${a.name}\`();\n`,
+  table_ddl: (a) =>
+    `CREATE TABLE \`${a.table}\` (\n  \`id\` int NOT NULL\n);\n`,
   routine_ddl: (a) =>
     `USE \`${a.db}\`;\nDROP ${String(a.kind).toUpperCase()} IF EXISTS \`${a.name}\`;\nDELIMITER $$\nCREATE ...END$$\nDELIMITER ;\n`,
 };

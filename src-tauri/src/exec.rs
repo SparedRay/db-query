@@ -518,8 +518,6 @@ mod tests {
         assert_eq!(j, serde_json::json!("session"));
     }
 
-    use super::*;
-
     #[test]
     fn classifies_row_returning_statements_separately_from_select() {
         assert_eq!(classify("SELECT 1"), StatementKind::Select);

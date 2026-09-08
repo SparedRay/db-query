@@ -319,6 +319,14 @@ export const api = {
   /** The re-runnable creation script for a routine. Text only — never executed. */
   routineDdl: (connectionId: string, db: string, name: string, kind: RoutineKind) =>
     invoke<string>("routine_ddl", { connectionId, db, name, kind }),
+  /**
+   * The server's own `CREATE` for a table or a view. Text only — never executed.
+   *
+   * Views go through the same command as tables: `SHOW CREATE TABLE` is what
+   * MySQL answers a view with, and Rust unwraps whichever column comes back.
+   */
+  tableDdl: (connectionId: string, db: string, table: string) =>
+    invoke<string>("table_ddl", { connectionId, db, table }),
 
   // --- self-update. `updateCheck` is safe to call unattended; `updateInstall`
   // must only ever follow an explicit yes from the user.
