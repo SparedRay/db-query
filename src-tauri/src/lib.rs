@@ -11,6 +11,7 @@ pub mod secrets;
 pub mod session;
 pub mod split;
 pub mod sqlgen;
+pub mod update;
 
 use tauri::State;
 
@@ -735,9 +736,73 @@ async fn save_file_dialog(
     }
 }
 
+/// Ask the update endpoint whether there is anything newer.
+///
+/// Errors are *returned*, never thrown away: a check that fails silently is
+/// indistinguishable from a check that found nothing, and the difference
+/// matters when someone is waiting for a fix.
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<update::UpdateStatus, String> {
+    let current = app.package_info().version.to_string();
+    if !update::supported() {
+        return Ok(update::UpdateStatus::Unsupported {
+            reason: update::UNSUPPORTED_REASON.into(),
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        return match updater.check().await.map_err(|e| e.to_string())? {
+            Some(u) => Ok(update::UpdateStatus::Available {
+                current,
+                version: u.version.clone(),
+                notes: u.body.clone(),
+                date: u.date.map(|d| d.to_string()),
+            }),
+            None => Ok(update::UpdateStatus::UpToDate { current }),
+        };
+    }
+    #[cfg(not(target_os = "windows"))]
+    Ok(update::UpdateStatus::UpToDate { current })
+}
+
+/// Download and apply the update. **Only ever called after the user agreed.**
+///
+/// Re-checks rather than holding the handle from `update_check` across the
+/// dialog. One extra request buys no cross-command state to keep in sync and
+/// no chance of applying a stale result; and if a newer release appeared while
+/// the dialog was open, installing *that* is the right answer anyway.
+///
+/// Windows exits the app to run the installer, so this may never return.
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    if !update::supported() {
+        return Err(update::UNSUPPORTED_REASON.into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = app.updater().map_err(|e| e.to_string())?;
+        let Some(u) = updater.check().await.map_err(|e| e.to_string())? else {
+            return Err("There is no update to install.".into());
+        };
+        u.download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err(update::UNSUPPORTED_REASON.into())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             connect,
@@ -776,6 +841,8 @@ pub fn run() {
             read_file,
             save_file,
             save_file_dialog,
+            update_check,
+            update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

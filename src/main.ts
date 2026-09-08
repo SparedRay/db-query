@@ -13,8 +13,10 @@ import {
   type ExportFormat,
   type ExportOutcome,
   type SourceTable,
+  type UpdateStatus,
 } from "./api";
 import { copyText } from "./clipboard";
+import { choose } from "./dialog";
 import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
@@ -52,6 +54,7 @@ const els = {
   btnCopy: $<HTMLButtonElement>("btn-copy"),
   btnCopyNoHead: $<HTMLButtonElement>("btn-copy-nohead"),
   btnExport: $<HTMLButtonElement>("btn-export"),
+  btnUpdate: $<HTMLButtonElement>("btn-update"),
   exportDialog: $<HTMLDialogElement>("export-dialog"),
   exportForm: $<HTMLFormElement>("export-form"),
   exportFormat: $<HTMLSelectElement>("export-format"),
@@ -1340,6 +1343,67 @@ void api.appDefaults().then((d) => {
 // Saved connections appear in the rail immediately, disconnected. Nothing is
 // contacted until the user clicks one.
 void conns.loadSaved();
+
+// --- self-update -----------------------------------------------------------
+
+/**
+ * Ask once at boot whether there is anything newer, and *only* show a button.
+ *
+ * Checking is automatic; installing is not, and the two are deliberately
+ * different in kind. Nothing is downloaded, nothing is applied, and nothing
+ * interrupts: the app that greets you with a modal before you have opened it is
+ * the one everybody learns to dismiss without reading.
+ *
+ * A failed check stays quiet. Being offline is the ordinary case, and it is not
+ * news — the button simply does not appear.
+ */
+async function checkForUpdate() {
+  let status;
+  try {
+    status = await api.updateCheck();
+  } catch {
+    return;
+  }
+  if (status.type !== "available") return;
+
+  els.btnUpdate.hidden = false;
+  els.btnUpdate.textContent = `Update to ${status.version}`;
+  els.btnUpdate.title = `You are running ${status.current}.`;
+  els.btnUpdate.onclick = () => void offerUpdate(status);
+}
+
+/** Ask, then install only on a yes. Declining leaves the button where it was. */
+async function offerUpdate(status: Extract<UpdateStatus, { type: "available" }>) {
+  const notes = status.notes?.trim();
+  const answer = await choose(
+    `Update to ${status.version}?`,
+    `You are running ${status.current}.` +
+      (status.date ? ` ${status.version} was released ${status.date.slice(0, 10)}.` : "") +
+      (notes ? `\n\n${notes}` : "") +
+      "\n\nThe app will close while it installs, then reopen. " +
+      "Unsaved scripts are not saved for you.",
+    [
+      { value: "install", label: "Download and install", primary: true },
+      { value: "later", label: "Not now" },
+    ],
+  );
+  if (answer !== "install") return;
+
+  els.btnUpdate.disabled = true;
+  els.btnUpdate.textContent = "Downloading\u2026";
+  try {
+    // On Windows this hands over to the installer and may never return.
+    await api.updateInstall();
+  } catch (err) {
+    els.btnUpdate.disabled = false;
+    els.btnUpdate.textContent = `Update to ${status.version}`;
+    await choose("The update could not be installed", String(err), [
+      { value: "ok", label: "Close", primary: true },
+    ]);
+  }
+}
+
+void checkForUpdate();
 
 // Dropping a file onto the window opens it. Tauri intercepts drag-and-drop at
 // the webview level, so the HTML5 drop events never fire — this is the only

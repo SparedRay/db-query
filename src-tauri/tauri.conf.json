@@ -36,5 +36,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk5NTdENDJFMDA5RkIwN0UKUldSK3NKOEFMdFJYbVY3eFJCZUsxeFJrdzNybmMxaTZKNG1SM3lhOGZWY0lLckRvTVE5Y3BvMUoK",
+      "endpoints": [
+        "https://github.com/SparedRay/db-query/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -59,6 +59,9 @@ function tsv(args: Record<string, unknown>): string {
 export const baseBackend: Backend = {
   clipboard_text: (args) => tsv(args),
   app_defaults: () => ({ browseLimit: 1000, maxRows: 5000 }),
+  // Every boot checks for an update. Stubbed as "nothing new" so no other test
+  // has to think about it, and overridden by the ones that do.
+  update_check: () => ({ type: "upToDate", current: "0.0.0-test" }),
   list_profiles: () => ({ profiles: [], warning: null }),
   open_tab: () => null,
   close_tab: () => null,

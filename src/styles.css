@@ -369,7 +369,14 @@ table.rs tr td.sel, table.rs tr:hover td.sel { background: rgba(59,130,246,.20);
 /* --- ask dialogs (unsaved changes, on-disk conflict) --- */
 dialog.ask { min-width: 380px; max-width: 480px; }
 dialog.ask h2 { margin: 0 0 10px; font-size: 14px; }
-dialog.ask p { margin: 0; font-size: 12.5px; color: var(--fg-dim); line-height: 1.55; }
+dialog.ask p {
+  margin: 0; font-size: 12.5px; color: var(--fg-dim); line-height: 1.55;
+  /* These messages are built with \n\n between paragraphs and set as
+     textContent — never innerHTML, because they carry file names, connection
+     names and server errors we do not control. Without pre-line the breaks
+     collapse and release notes run into the warning that follows them. */
+  white-space: pre-line;
+}
 dialog.ask menu button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 dialog.ask menu button.danger { border-color: var(--danger); color: #fca5a5; }
 
@@ -450,3 +457,13 @@ dialog.viewer menu button.primary {
 dialog.viewer .viewer-note {
   margin-left: auto; font-size: 11.5px; color: var(--fg-dim);
 }
+
+/* The update button: present only when there is an update, and never a modal
+   that interrupts. Tinted so it reads as news rather than as another control. */
+.mini.update {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}
+.mini.update:disabled { opacity: .7; cursor: default; }

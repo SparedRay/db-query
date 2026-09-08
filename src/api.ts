@@ -9,6 +9,24 @@ import { invoke } from "@tauri-apps/api/core";
  * means the config file cannot leak one even by accident. It also holds nothing
  * derived — see `ProfileView` for why that separation matters.
  */
+/**
+ * What an update check found. Mirrors Rust's `UpdateStatus`.
+ *
+ * `unsupported` is not an error: the Linux build ships as a `.deb`, which the
+ * updater cannot replace in place, and saying so up front beats failing after
+ * a download.
+ */
+export type UpdateStatus =
+  | { type: "unsupported"; reason: string }
+  | { type: "upToDate"; current: string }
+  | {
+      type: "available";
+      current: string;
+      version: string;
+      notes: string | null;
+      date: string | null;
+    };
+
 export interface ConnProfile {
   id: string;
   name: string;
@@ -297,6 +315,11 @@ export const api = {
   /** The re-runnable creation script for a routine. Text only — never executed. */
   routineDdl: (connectionId: string, db: string, name: string, kind: RoutineKind) =>
     invoke<string>("routine_ddl", { connectionId, db, name, kind }),
+
+  // --- self-update. `updateCheck` is safe to call unattended; `updateInstall`
+  // must only ever follow an explicit yes from the user.
+  updateCheck: () => invoke<UpdateStatus>("update_check"),
+  updateInstall: () => invoke<void>("update_install"),
 
   // --- generated SQL. Every one of these returns text for the user to read
   // and run themselves; nothing here executes anything.

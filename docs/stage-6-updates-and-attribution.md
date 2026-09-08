@@ -48,14 +48,47 @@ Two of the items below are not polish:
 - [ ] Remove the stray local `1.0.0` tag — it is not on the remote and means nothing
 - [ ] Decide the versioning story: `npm version` currently leaves `Cargo.toml` and `tauri.conf.json` untouched, so three files can disagree about what a release is
 
-### Phase 2 — Updater
-- [ ] `tauri signer generate`; public key into `tauri.conf.json`
-- [ ] `TAURI_SIGNING_PRIVATE_KEY` (+ password) as repo secrets, never in the tree
-- [ ] `tauri-plugin-updater`; endpoint served from GitHub Releases; `includeUpdaterJson` in the release workflow
-- [ ] **Verify the plugin's licence from its own source and add it to the audit** — the standing rule since Stage 0
-- [ ] In-app: **ask before updating**, through `dialog.ts`. `window.confirm` is unavailable, and "the user decides when something runs" is this project's rule
-- [ ] **The `.deb` must not offer updates it cannot apply** — the Linux updater supports AppImage only, and we ship a `.deb` deliberately (Stage 5 §4.4). Detect and disable, rather than failing at download time
-- [ ] Tests: offered, declined, accepted; **and a manifest signed with the wrong key is rejected**
+### Phase 2 — Updater — built 2026-09-08
+- [x] `tauri signer generate`; public key in `tauri.conf.json`. **The private key is at `~/.tauri/db-query-updater.key`, mode 600, outside the repository** — it was never written into the tree and never printed
+- [ ] **`TAURI_SIGNING_PRIVATE_KEY` as a repo secret** ← *the one step that is not mine to do*
+- [x] `tauri-plugin-updater`; endpoint at the release's `latest.json`; `includeUpdaterJson: true` in the release workflow
+- [x] **Plugin licence verified from source**: `tauri-plugin-updater` is `Apache-2.0 OR MIT`. Adding it took the tree from 572 to 595 crates and introduced no copyleft — the only hit, `r-efi`, is `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (disjunctive, so MIT) and `cargo tree -i` shows it reaching **neither** the Linux nor the Windows binary
+- [x] In-app: **asks before installing**, through `dialog.ts`
+- [x] **The `.deb` does not offer what it cannot apply** — `update::supported()` is false off Windows and the refusal names the alternative
+- [x] Tests: 4 Rust, 11 UI on both engines — offered, declined, **dismissed with Escape**, accepted, a failed install, an unsupported build, and a failed check
+- [ ] **A wrong-key manifest is rejected** — asserted at the UI layer (a failing install reports why); the real signature check is Tauri's and needs a live release to exercise. U4.
+
+#### Decisions worth recording
+
+- **Checking is automatic; installing never is.** The boot check downloads
+  nothing and interrupts nothing — it only reveals a button. An app that greets
+  you with a modal before you have opened it teaches you to dismiss modals
+  without reading them.
+- **A failed check is silent.** Being offline is the ordinary case, not news.
+- **`update_install` re-checks rather than holding the handle** from
+  `update_check` across the dialog. One extra request, against no cross-command
+  state to keep in sync and no chance of applying a stale result — and if a
+  newer release appeared while the dialog was open, installing *that* is right.
+- **The dialog states the consequence**: the app closes, and unsaved scripts are
+  not saved for anyone. Tested, because that is the sentence people skip.
+- **`installMode: passive`** — a progress bar, no wizard. The user already said
+  yes in our dialog; the installer asking again is the same question twice.
+- **A presentation bug this caught:** the messages are built with `\n\n`
+  between paragraphs and set as `textContent` (never `innerHTML` — release notes
+  come from the server). Without `white-space: pre-line` the breaks collapsed
+  and the notes ran into the warning. Found by screenshotting it rather than by
+  reading the assertions, which all passed.
+
+#### Two operational facts, neither obvious
+
+1. **The Windows release job will fail until the secret exists.** A Linux build
+   succeeds without it — verified — because `.deb` is not an updater target, so
+   nothing is signed. NSIS *is* one. Add the secret, then use the workflow's
+   **dry run** (Actions → Release → empty tag) to prove signing works on both
+   platforms before cutting a tag.
+2. **The updater only sees *published* releases.** The endpoint is
+   `releases/latest/download/latest.json`, and a draft is not `latest`. The flow
+   is draft → review the notes → publish → installs can see it.
 
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
