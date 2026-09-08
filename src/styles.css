@@ -1,17 +1,81 @@
+/* --- theme tokens -----------------------------------------------------------
+   Dark lives on `:root` so the app is styled even if no script runs. Light is
+   an override keyed on `data-theme`, which `theme.ts` always sets explicitly —
+   it resolves "system" itself and watches for changes, so the CSS needs no
+   media query and the palette is written once per theme rather than twice.
+
+   Every colour in this file is a token. That is not tidiness: a literal is a
+   colour that cannot follow the theme, and one of them is enough to make light
+   mode look broken. */
 :root {
   --bg: #16181d;
   --bg-raised: #1d2027;
   --bg-input: #12141a;
+  --bg-rail: #101216;
+  --bg-tabs: #14161b;
+  --bg-hover: #23272f;
+  --bg-row-hover: #1b1e25;
+  --btn-bg: #262a33;
+  --btn-bg-hover: #30353f;
+  --chip-bg: #22262e;
   --border: #2b2f38;
+  --border-dashed: #3a4150;
+  --border-dashed-hover: #5b6270;
   --fg: #d7dae0;
+  --fg-strong: #ffffff;
   --fg-dim: #868c99;
   --accent: #3b82f6;
+  /* Text on an accent fill. Stays white in both themes — the fill is the same
+     blue either way, so this is not the same role as --fg-strong. */
+  --on-accent: #ffffff;
+  --sel-header-bg: #2b3a55;
+  --sel-cell-bg: rgba(59,130,246,.20);
   --danger: #ef4444;
+  --danger-fg: #fca5a5;
   --warn: #f59e0b;
+  --warn-fg: #fcd34d;
   --numeric: #7dd3fc;
   --null: #6b7280;
+  --shadow: rgba(0,0,0,.45);
+  --backdrop: rgba(0,0,0,.55);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-raised: #f5f6f8;
+  --bg-input: #ffffff;
+  --bg-rail: #e9ebef;
+  --bg-tabs: #eef0f4;
+  --bg-hover: #e7e9ee;
+  --bg-row-hover: #f3f5f8;
+  --btn-bg: #eef0f4;
+  --btn-bg-hover: #dfe3ea;
+  --chip-bg: #eef0f4;
+  --border: #d2d7df;
+  --border-dashed: #c3c9d3;
+  --border-dashed-hover: #98a0ad;
+  --fg: #1b1f27;
+  /* Inverted role: emphasis is *darker* than --fg on a light ground, where in
+     the dark theme it is lighter. Mapping it to white would erase the text. */
+  --fg-strong: #05070a;
+  --fg-dim: #5b6270;
+  --accent: #2563eb;
+  --on-accent: #ffffff;
+  --sel-header-bg: #c9dafc;
+  --sel-cell-bg: rgba(37,99,235,.16);
+  --danger: #dc2626;
+  --danger-fg: #b3261e;
+  --warn: #b45309;
+  --warn-fg: #92400e;
+  /* Sky blue is unreadable on white; numerics need a darker blue to stay
+     distinguishable from ordinary text without shouting. */
+  --numeric: #0b6ea8;
+  --null: #8b909b;
+  --shadow: rgba(15,23,42,.14);
+  --backdrop: rgba(15,23,42,.35);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -86,7 +150,7 @@ body {
 #conn-label { font-size: 12px; color: var(--fg-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 button.mini {
-  background: #262a33;
+  background: var(--btn-bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -94,9 +158,9 @@ button.mini {
   font-size: 12px;
   cursor: pointer;
 }
-button.mini:hover:not(:disabled) { background: #30353f; }
+button.mini:hover:not(:disabled) { background: var(--btn-bg-hover); }
 button.mini:disabled { opacity: .45; cursor: default; }
-button.mini.danger { border-color: var(--danger); color: #fca5a5; }
+button.mini.danger { border-color: var(--danger); color: var(--danger-fg); }
 kbd { font: 10px var(--mono); color: var(--fg-dim); margin-left: 4px; }
 
 input.num {
@@ -105,9 +169,9 @@ input.num {
 }
 
 /* CodeMirror lint: advisory, so keep it quiet — underlines, not blocks. */
-.cm-lintRange-error { background: none; border-bottom: 2px dotted #ef4444; }
-.cm-lintRange-warning { background: none; border-bottom: 2px dotted #f59e0b; }
-.cm-lintRange-info { background: none; border-bottom: 1px dotted #6b7280; }
+.cm-lintRange-error { background: none; border-bottom: 2px dotted var(--danger); }
+.cm-lintRange-warning { background: none; border-bottom: 2px dotted var(--warn); }
+.cm-lintRange-info { background: none; border-bottom: 1px dotted var(--null); }
 .cm-tooltip.cm-tooltip-lint {
   background: var(--bg-raised); border: 1px solid var(--border);
   color: var(--fg); font: 12px system-ui, sans-serif; border-radius: 4px;
@@ -127,11 +191,26 @@ input.num {
 .toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-dim); cursor: pointer; }
 
 /* --- connection rail --- */
+/* The rail is rebuilt wholesale on every connection change (replaceChildren),
+   so anything that must survive that lives beside it, not inside it. */
+.railbar {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--bg-rail); border-right: 1px solid var(--border);
+}
 .rail {
+  flex: 1; min-height: 0;
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 8px 0; background: #101216; border-right: 1px solid var(--border);
+  padding: 8px 0;
   overflow-y: auto; overflow-x: hidden; scrollbar-width: none;
 }
+.rail-theme {
+  flex: 0 0 auto; margin: 4px auto 8px; width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--fg-dim);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.rail-theme:hover { color: var(--fg); background: var(--btn-bg); }
 .rail::-webkit-scrollbar { display: none; }
 
 .rail-item {
@@ -139,14 +218,14 @@ input.num {
   width: 32px; height: 32px; border-radius: 9px;
   border: 1px solid transparent; cursor: pointer;
   font: 600 11px/1 system-ui, sans-serif; letter-spacing: .3px;
-  background: var(--conn-colour); color: #fff;
+  background: var(--conn-colour); color: var(--on-accent);
   display: flex; align-items: center; justify-content: center;
   transition: border-radius .12s ease;
 }
 .rail-item:hover { border-radius: 11px; }
 /* Not connected reads as drained rather than absent — it is still yours. */
-.rail-item.offline { background: transparent; color: var(--fg-dim); border: 1px dashed #3a4150; }
-.rail-item.offline:hover { color: var(--fg); border-color: #5b6270; }
+.rail-item.offline { background: transparent; color: var(--fg-dim); border: 1px dashed var(--border-dashed); }
+.rail-item.offline:hover { color: var(--fg); border-color: var(--border-dashed-hover); }
 /* The active connection gets a bar, the way editors mark an active item. */
 .rail-item.active::before {
   content: ""; position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
@@ -157,29 +236,29 @@ input.num {
 .rail-item.adhoc::after {
   content: ""; position: absolute; right: -1px; bottom: -1px;
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--warn); border: 2px solid #101216;
+  background: var(--warn); border: 2px solid var(--bg-rail);
 }
 
 .rail-add {
   flex: 0 0 auto; width: 32px; height: 32px; border-radius: 9px;
-  background: none; border: 1px dashed #3a4150; color: var(--fg-dim);
+  background: none; border: 1px dashed var(--border-dashed); color: var(--fg-dim);
   font-size: 16px; line-height: 1; cursor: pointer;
 }
-.rail-add:hover { color: var(--fg); border-color: #5b6270; }
+.rail-add:hover { color: var(--fg); border-color: var(--border-dashed-hover); }
 
 /* --- context menu --- */
 .ctx-menu {
   position: fixed; z-index: 100; min-width: 150px; padding: 4px;
   background: var(--bg-raised); border: 1px solid var(--border);
-  border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  border-radius: 6px; box-shadow: 0 8px 24px var(--shadow);
   display: flex; flex-direction: column;
 }
 .ctx-menu button {
   background: none; border: none; color: var(--fg); text-align: left;
   padding: 5px 10px; border-radius: 4px; font-size: 12.5px; cursor: pointer;
 }
-.ctx-menu button:hover:not(:disabled) { background: #2c313b; }
-.ctx-menu button.danger { color: #fca5a5; }
+.ctx-menu button:hover:not(:disabled) { background: var(--btn-bg-hover); }
+.ctx-menu button.danger { color: var(--danger-fg); }
 .ctx-menu button:disabled { color: var(--fg-dim); cursor: default; }
 /* A label, not a control: it names what the items below act on. */
 .ctx-heading {
@@ -192,12 +271,21 @@ input.num {
 /* --- schema tree --- */
 .tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
 .node { display: flex; align-items: center; gap: 5px; padding: 3px 10px; cursor: pointer; white-space: nowrap; font-size: 12.5px; }
-.node:hover { background: #23272f; }
+.node:hover { background: var(--bg-hover); }
 .node .twisty { width: 12px; color: var(--fg-dim); flex: 0 0 auto; font-size: 10px; }
 .node .icon { color: var(--fg-dim); flex: 0 0 auto; }
-.node.db-active > .label { font-weight: 600; color: #fff; }
+.node.db-active > .label { font-weight: 600; color: var(--fg-strong); }
 .node .meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; padding-left: 8px; }
-.node.loading .twisty { opacity: .5; }
+/* Loading a node's children replaces its caret with a spinner. The state was
+   always set; only `opacity: .5` marked it, which nobody can see — a schema
+   that takes two seconds to expand looked like a click that did nothing. */
+.node.loading .twisty { color: transparent; position: relative; }
+.node.loading .twisty::after {
+  content: ""; position: absolute; inset: 0; margin: auto;
+  width: 9px; height: 9px;
+  border: 1.5px solid var(--border-dashed); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .6s linear infinite;
+}
 .children { margin-left: 14px; }
 
 /* Groups make the table/view/routine separation structural rather than a
@@ -215,7 +303,7 @@ input.num {
 .script-tabs {
   display: flex; align-items: stretch; gap: 1px;
   flex: 0 0 auto; overflow-x: auto; overflow-y: hidden;
-  background: #14161b; border-bottom: 1px solid var(--border);
+  background: var(--bg-tabs); border-bottom: 1px solid var(--border);
   scrollbar-width: none;
 }
 .script-tabs::-webkit-scrollbar { display: none; }
@@ -227,7 +315,7 @@ input.num {
   cursor: pointer; white-space: nowrap; max-width: 220px;
   border-top: 2px solid transparent;
 }
-.stab:hover { background: #23272f; }
+.stab:hover { background: var(--bg-hover); }
 .stab.active {
   background: var(--bg); color: var(--fg);
   /* Matches the rail icon for this connection — see TabHooks.colourFor. */
@@ -246,8 +334,8 @@ input.num {
 .stab-mark::before { content: "\00d7"; }
 .stab.dirty .stab-mark::before { content: "\2022"; color: var(--conn-colour, var(--accent)); font-size: 14px; }
 .stab.dirty:hover .stab-mark::before { content: "\00d7"; color: var(--fg); font-size: 12px; }
-.stab-mark:hover { background: #3a4150; }
-.stab-mark:hover::before { color: #fff; }
+.stab-mark:hover { background: var(--btn-bg-hover); }
+.stab-mark:hover::before { color: var(--fg-strong); }
 
 .stab-add {
   background: none; border: none; color: var(--fg-dim);
@@ -270,7 +358,7 @@ input.num {
 }
 .tab.active { background: var(--bg); color: var(--fg); }
 .tab .badge { margin-left: 6px; font-size: 10.5px; color: var(--fg-dim); }
-.tab.errored { color: #fca5a5; border-color: var(--danger); }
+.tab.errored { color: var(--danger-fg); border-color: var(--danger); }
 .tab.truncated .badge::after { content: " ⚠"; color: var(--warn); }
 
 .grid-host { flex: 1; min-height: 0; overflow: auto; position: relative; }
@@ -287,7 +375,7 @@ table.rs th {
 table.rs th .resize { position: absolute; right: 0; top: 0; height: 100%; width: 5px; cursor: col-resize; }
 table.rs td.numeric { text-align: right; color: var(--numeric); }
 table.rs td.null { color: var(--null); font-style: italic; }
-table.rs tr:hover td { background: #1b1e25; }
+table.rs tr:hover td { background: var(--bg-row-hover); }
 
 .result-bar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
@@ -298,15 +386,15 @@ table.rs tr:hover td { background: #1b1e25; }
 .result-note {
   flex: 0 1 auto; min-width: 0; font-size: 11.5px; color: var(--fg-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  padding: 2px 8px; border-radius: 4px; background: #23272f;
+  padding: 2px 8px; border-radius: 4px; background: var(--chip-bg);
 }
 .result-actions { display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
 .result-actions button {
   padding: 3px 9px; border-radius: 4px; border: 1px solid var(--border);
-  background: #262a33; color: var(--fg); cursor: pointer; font-size: 11.5px;
+  background: var(--btn-bg); color: var(--fg); cursor: pointer; font-size: 11.5px;
 }
 .result-actions button:disabled { opacity: .45; cursor: default; }
-.result-actions button:hover:not(:disabled) { background: #2c313b; }
+.result-actions button:hover:not(:disabled) { background: var(--btn-bg-hover); }
 
 .status {
   flex: 0 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -329,12 +417,12 @@ table.rs th.rownum-h {
   border-right: 1px solid var(--border); cursor: pointer; padding: 0 6px;
 }
 table.rs th.rownum-h::after { content: "\25f0"; opacity: .45; font-size: 11px; }
-table.rs th.rownum:hover { color: var(--fg); background: #23272f; }
+table.rs th.rownum:hover { color: var(--fg); background: var(--bg-hover); }
 
 /* Selection. These must outrank `table.rs tr:hover td`, which is otherwise more
    specific and would erase the highlight the moment the pointer crossed it. */
-table.rs th.sel, table.rs th.rownum.sel { background: #2b3a55; color: #fff; }
-table.rs tr td.sel, table.rs tr:hover td.sel { background: rgba(59,130,246,.20); }
+table.rs th.sel, table.rs th.rownum.sel { background: var(--sel-header-bg); color: var(--fg-strong); }
+table.rs tr td.sel, table.rs tr:hover td.sel { background: var(--sel-cell-bg); }
 
 /* --- export dialog --- */
 #export-dialog { min-width: 420px; max-width: 520px; }
@@ -350,21 +438,21 @@ table.rs tr td.sel, table.rs tr:hover td.sel { background: rgba(59,130,246,.20);
 #export-dialog .hint {
   margin: -4px 0 10px; font-size: 11px; color: var(--fg-dim); line-height: 1.5;
 }
-#export-dialog .hint code { font-family: var(--mono); background: #23272f; padding: 0 3px; border-radius: 3px; }
+#export-dialog .hint code { font-family: var(--mono); background: var(--chip-bg); padding: 0 3px; border-radius: 3px; }
 #export-dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 #export-dialog .actions button {
   padding: 5px 14px; border-radius: 4px; border: 1px solid var(--border);
-  background: #262a33; color: var(--fg); cursor: pointer; font-size: 12px;
+  background: var(--btn-bg); color: var(--fg); cursor: pointer; font-size: 12px;
 }
-#export-dialog .actions button[type="submit"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+#export-dialog .actions button[type="submit"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 #export-scope-note { margin: -6px 0 12px; }
-.chip { padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: #22262e; cursor: default; }
-.chip.warn { border-color: var(--warn); color: #fcd34d; cursor: help; }
-.chip.err { border-color: var(--danger); color: #fca5a5; }
+.chip { padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: var(--chip-bg); cursor: default; }
+.chip.warn { border-color: var(--warn); color: var(--warn-fg); cursor: help; }
+.chip.err { border-color: var(--danger); color: var(--danger-fg); }
 
-.err-box { padding: 14px; color: #fca5a5; font: 12px var(--mono); white-space: pre-wrap; }
+.err-box { padding: 14px; color: var(--danger-fg); font: 12px var(--mono); white-space: pre-wrap; }
 .empty { padding: 14px; color: var(--fg-dim); }
-.error { color: #fca5a5; font-size: 12px; }
+.error { color: var(--danger-fg); font-size: 12px; }
 
 /* --- ask dialogs (unsaved changes, on-disk conflict) --- */
 dialog.ask { min-width: 380px; max-width: 480px; }
@@ -377,15 +465,15 @@ dialog.ask p {
      collapse and release notes run into the warning that follows them. */
   white-space: pre-line;
 }
-dialog.ask menu button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-dialog.ask menu button.danger { border-color: var(--danger); color: #fca5a5; }
+dialog.ask menu button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+dialog.ask menu button.danger { border-color: var(--danger); color: var(--danger-fg); }
 
 /* --- connection dialog --- */
 dialog {
   background: var(--bg-raised); color: var(--fg);
   border: 1px solid var(--border); border-radius: 8px; padding: 18px; min-width: 340px;
 }
-dialog::backdrop { background: rgba(0,0,0,.55); }
+dialog::backdrop { background: var(--backdrop); }
 dialog h2 { margin: 0 0 14px; font-size: 15px; }
 dialog label { display: block; margin-bottom: 9px; font-size: 12px; color: var(--fg-dim); }
 dialog label.toggle { flex-direction: row; }
@@ -397,9 +485,9 @@ dialog input[type="text"], dialog input[type="password"], dialog input[type="num
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0 0; padding: 0; }
 dialog menu button {
   padding: 5px 14px; border-radius: 4px; border: 1px solid var(--border);
-  background: #262a33; color: var(--fg); cursor: pointer; font-size: 12px;
+  background: var(--btn-bg); color: var(--fg); cursor: pointer; font-size: 12px;
 }
-dialog menu button#conn-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+dialog menu button#conn-ok { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 dialog .row { display: flex; gap: 8px; }
 dialog .row .grow { flex: 1; }
 dialog .row .narrow { width: 84px; flex: 0 0 auto; }
@@ -452,7 +540,7 @@ dialog.viewer menu {
 }
 dialog.viewer menu button { padding: 5px 12px; font-size: 12.5px; }
 dialog.viewer menu button.primary {
-  background: var(--accent); border-color: var(--accent); color: #fff;
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
 }
 dialog.viewer .viewer-note {
   margin-left: auto; font-size: 11.5px; color: var(--fg-dim);
@@ -463,7 +551,35 @@ dialog.viewer .viewer-note {
 .mini.update {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   white-space: nowrap;
 }
 .mini.update:disabled { opacity: .7; cursor: default; }
+
+/* --- busy indicators ------------------------------------------------------
+   One spinner, used wherever something is being waited for. Anything that can
+   take longer than an eyeblink says so, or it reads as a dead control. */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.spinner {
+  display: inline-block; flex: 0 0 auto;
+  width: 10px; height: 10px;
+  border: 1.5px solid var(--border-dashed); border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+
+/* On the rail it is a ring around the whole disc rather than a dot beside it:
+   the disc is the thing you clicked, so it is the thing that should look busy. */
+.rail-item .spinner {
+  position: absolute; inset: -4px;
+  width: auto; height: auto;
+  border-width: 2px; border-color: transparent; border-top-color: var(--accent);
+  animation-duration: .7s;
+}
+.rail-item.connecting { cursor: progress; }
+
+/* Respect a system preference for less motion: still busy, just not spinning. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .node.loading .twisty::after { animation-duration: 2.4s; }
+}

@@ -90,6 +90,62 @@ Two of the items below are not polish:
    `releases/latest/download/latest.json`, and a draft is not `latest`. The flow
    is draft → review the notes → publish → installs can see it.
 
+### Phase 5 — Quality of life — built 2026-09-08
+
+Asked for after living with the app on Windows: a light theme, and honest
+feedback while waiting.
+
+#### Light mode
+
+- [x] **Every colour in `styles.css` is now a token.** The refactor *was* the
+  feature: 57 hardcoded literals against 12 variables, and a single literal is
+  a colour that cannot follow the theme. The palette is now 29 tokens per
+  theme, with the literals confined to the two definition blocks.
+- [x] Two roles that were both `#fff` had to be separated. `--on-accent` is
+  text on an accent fill and stays white in both themes; `--fg-strong` is
+  emphasis, and **inverts** — mapping it to white in light mode would have
+  erased the text it was emphasising.
+- [x] **`data-theme` is always a resolved value**, "light" or "dark", never
+  "system". `theme.ts` resolves the system preference itself and watches for
+  changes, so the stylesheet needs one override block instead of a media query
+  plus a duplicated palette. Dark lives on bare `:root`, so the app is still
+  styled if no script runs.
+- [x] **The editor follows the tokens**, not its own colours. The exception is
+  CodeMirror's `dark` *facet*, which is not CSS — extensions read it, and lint
+  tooltips pick their styling from it — so the theme sits in a compartment and
+  the flag is swapped on change.
+- [x] Preference cycles system → light → dark, persists in `localStorage`
+  (read and written defensively; storage throws outright in some embeddings).
+- [x] The toggle lives **beside** the rail, not in it: the rail is rebuilt with
+  `replaceChildren` on every connection change, which would delete it.
+
+#### Loaders
+
+> *"If we click on a saved connection it seems like nothing is happening."*
+
+- [x] **Connecting spins on the disc you clicked**, and a second click while one
+  is in flight is ignored — otherwise a dead-looking button opens two
+  connections to the same server.
+- [x] **Expanding a database or a table spins.** The `loading` class was
+  *already being set*; it was styled `opacity: .5` on a caret, which nobody can
+  see. The state existed and the feedback did not.
+- [x] **The database spinner covers the `USE` round trip too.** Clicking a
+  database is two requests, and the first was invisible work the user was still
+  waiting through.
+- [x] One `.spinner`, honouring `prefers-reduced-motion`.
+
+#### A test that would have proved nothing
+
+The first version of the tree tests asserted the `loading` class — which was
+already set before the fix, so they passed against the bug. They now assert
+what is actually **painted**: the caret's `::after`, its `animationName` and
+its width. Both fail against the old stylesheet and pass against the new, and
+the `USE`-coverage test was checked the same way against the old `main.ts`.
+
+Asserting the state a feature sets, rather than the effect a user sees, is the
+same mistake the clipboard tests made in Stage 4 — six green tests while copying
+destroyed the results.
+
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
 - [ ] Re-run the audit on the Windows tree — the ~24 `windows-*` crates Stage 5 §2 could not read

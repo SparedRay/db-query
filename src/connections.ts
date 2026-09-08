@@ -17,6 +17,8 @@ export interface ConnectionEntry {
   /** Persisted in connections.json, as opposed to a one-off connection. */
   saved: boolean;
   connected: boolean;
+  /** An attempt is in flight. Drives the rail spinner; never persisted. */
+  connecting?: boolean;
   serverVersion: string | null;
   /** Populated on connect; drives the schema tree. */
   databases: string[];
@@ -122,6 +124,12 @@ export class ConnectionManager {
     entry: ConnectionEntry,
     open: () => Promise<ConnInfo>,
   ): Promise<{ ok: boolean; error?: string }> {
+    // Opening a connection is the slowest thing this app does — DNS, TCP, TLS,
+    // then MySQL's own handshake. Clicking a saved connection used to give no
+    // sign of life until it either appeared or failed, which reads as a broken
+    // button rather than as work in progress.
+    entry.connecting = true;
+    this.render();
     try {
       const info = await open();
       entry.connected = true;
@@ -135,6 +143,9 @@ export class ConnectionManager {
       return { ok: true };
     } catch (err) {
       return { ok: false, error: String(err) };
+    } finally {
+      entry.connecting = false;
+      this.render();
     }
   }
 
@@ -216,6 +227,7 @@ export class ConnectionManager {
         "rail-item" +
         (entry.profile.id === this.activeId ? " active" : "") +
         (entry.connected ? " live" : " offline") +
+        (entry.connecting ? " connecting" : "") +
         (entry.saved ? "" : " adhoc");
       el.style.setProperty("--conn-colour", entry.profile.colour);
       el.textContent = initials(entry.profile.name);
@@ -228,7 +240,15 @@ export class ConnectionManager {
             : "Not connected") +
         (entry.saved ? "" : "\n(not saved — this connection is one-off)");
 
+      if (entry.connecting) {
+        el.setAttribute("aria-busy", "true");
+        el.append(Object.assign(document.createElement("span"), { className: "spinner" }));
+      }
+
       el.onclick = () => {
+        // A second click while the first is still in flight would open a
+        // second connection to the same server.
+        if (entry.connecting) return;
         if (entry.connected) this.activate(entry.profile.id);
         else void this.connect(entry);
       };

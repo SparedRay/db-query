@@ -16,19 +16,33 @@ import { Compartment } from "@codemirror/state";
 const schemaCompartment = new Compartment();
 const lintCompartment = new Compartment();
 
-const theme = EditorView.theme(
-  {
-    "&": { height: "100%", backgroundColor: "#16181d", color: "#d7dae0" },
-    ".cm-content": { caretColor: "#d7dae0" },
-    ".cm-gutters": { backgroundColor: "#1d2027", color: "#5b6270", border: "none" },
-    ".cm-activeLine": { backgroundColor: "#1b1e25" },
-    ".cm-activeLineGutter": { backgroundColor: "#22262e" },
-    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-      backgroundColor: "#2c4a7c",
-    },
+/**
+ * The editor follows the app's theme tokens rather than carrying its own
+ * colours, so switching themes needs no work here.
+ *
+ * The `dark` flag is the exception: it is a CodeMirror *facet*, not CSS, and
+ * extensions consult it — lint tooltips in particular pick their own styling
+ * from it. So the theme lives in a compartment and the flag is swapped when the
+ * theme changes; the rules themselves are identical.
+ */
+const themeRules = {
+  "&": { height: "100%", backgroundColor: "var(--bg)", color: "var(--fg)" },
+  ".cm-content": { caretColor: "var(--fg)" },
+  ".cm-gutters": {
+    backgroundColor: "var(--bg-raised)",
+    color: "var(--fg-dim)",
+    border: "none",
   },
-  { dark: true },
-);
+  ".cm-activeLine": { backgroundColor: "var(--bg-row-hover)" },
+  ".cm-activeLineGutter": { backgroundColor: "var(--chip-bg)" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+    backgroundColor: "var(--sel-header-bg)",
+  },
+} as const;
+
+const darkTheme = EditorView.theme(themeRules, { dark: true });
+const lightTheme = EditorView.theme(themeRules, { dark: false });
+const themeCompartment = new Compartment();
 
 export interface EditorHooks {
   onRunStatement: () => void;
@@ -79,7 +93,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     keymap.of([...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
     schemaCompartment.of(sql({ dialect: MySQL, upperCaseKeywords: true })),
     lintCompartment.of([]),
-    theme,
+    themeCompartment.of(darkTheme),
     EditorView.lineWrapping,
     EditorView.updateListener.of((u) => {
       if (u.docChanged) hooks.onDocChanged?.();
@@ -163,4 +177,18 @@ export function insertAtCursor(view: EditorView, text: string) {
     selection: { anchor: from + text.length },
   });
   view.focus();
+}
+
+/**
+ * Tell CodeMirror which way the theme went.
+ *
+ * Only the `dark` facet actually changes — the colours are tokens and follow on
+ * their own — but that facet decides how tooltips and panels are drawn, and a
+ * light-mode lint tooltip drawn dark is the sort of thing nobody reports and
+ * everybody notices.
+ */
+export function setEditorTheme(view: EditorView, dark: boolean) {
+  view.dispatch({
+    effects: themeCompartment.reconfigure(dark ? darkTheme : lightTheme),
+  });
 }

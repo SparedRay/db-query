@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose } from "./dialog";
+import { createTheme } from "./theme";
 import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
@@ -28,7 +29,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, selectedText,
-  setLinting, setSchema,
+  setEditorTheme, setLinting, setSchema,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -55,6 +56,7 @@ const els = {
   btnCopyNoHead: $<HTMLButtonElement>("btn-copy-nohead"),
   btnExport: $<HTMLButtonElement>("btn-export"),
   btnUpdate: $<HTMLButtonElement>("btn-update"),
+  btnTheme: $<HTMLButtonElement>("btn-theme"),
   exportDialog: $<HTMLDialogElement>("export-dialog"),
   exportForm: $<HTMLFormElement>("export-form"),
   exportFormat: $<HTMLSelectElement>("export-format"),
@@ -593,6 +595,11 @@ function buildDbNode(connId: string, db: string): HTMLElement {
   n.onclick = async () => {
     // Clicking a database both expands it and makes it the active schema, so
     // unqualified table names in the editor resolve against it.
+    // The spinner covers the whole gesture, not just the child fetch: clicking
+    // a database is *two* round trips — USE first, then the listing — and the
+    // first one is invisible work the user is still waiting through.
+    n.classList.add("loading");
+    try {
     const tab = activeTab();
     if (tab.activeDb !== db) {
       try {
@@ -611,6 +618,9 @@ function buildDbNode(connId: string, db: string): HTMLElement {
     twisty.textContent = children.hidden ? "▸" : "▾";
     if (!children.hidden && !children.dataset.loaded) {
       await loadDbChildren(connId, db, children, n);
+    }
+    } finally {
+      n.classList.remove("loading");
     }
   };
 
@@ -1339,6 +1349,12 @@ files = createFileUx({
 void api.appDefaults().then((d) => {
   browseLimit = d.browseLimit;
 });
+
+// Theme before anything else is drawn, so there is no flash of the wrong one.
+// CodeMirror is told separately: its `dark` facet is not a CSS variable and
+// decides how lint tooltips are drawn.
+const theme = createTheme(els.btnTheme, (dark) => setEditorTheme(view, dark));
+theme.apply();
 
 // Saved connections appear in the rail immediately, disconnected. Nothing is
 // contacted until the user clicks one.
