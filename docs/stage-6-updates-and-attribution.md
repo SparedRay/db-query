@@ -198,6 +198,44 @@ Fonts are now set in the stylesheet rather than in the CodeMirror theme, where a
 plain rule beats the generated theme class and what is written is what is
 painted.
 
+### Copy without headers by default — 2026-09-08
+
+Plain copy now carries **no** headers. Headers are the deliberate act:
+
+| Gesture | Result |
+|---|---|
+| `Ctrl+C`, the **Copy** button, right-click → **Copy** | data only |
+| `Ctrl+Shift+C`, **Copy with headers**, right-click → **Copy with headers** | header row first |
+
+Pasting into another query, a spreadsheet column or a chat message is the common
+case, and a stray header row there is something you have to notice and delete.
+The reverse — needing headers and not getting them — is visible immediately and
+one click away.
+
+The copy actions were also added to the cell context menu. They act on the
+**selection**, like the toolbar buttons, not on the cell under the pointer —
+which is why right-click still leaves the selection alone.
+
+`onCopy` is a **constructor** argument of `ResultView`, not a `show()` option:
+`setMessage` resets the per-result hooks, and a copy that silently stopped
+working after a message is precisely the bug this project shipped once already.
+
+### Settings showed nothing when run from source — 2026-09-08
+
+Reported after trying the built app. Not reproducible from here: loaded with no
+backend stub at all — the page exactly as `tauri dev` serves it — the dialog has
+its 3 fieldsets, 9 controls and 6 font options, and the cog's handler is bound.
+
+So the markup and the script are not at fault, which leaves the engine or a
+stale process. **The engine is the half worth acting on**: the dialog used
+`display: flex` on the `<dialog>` element itself, and *"Playwright's WebKit is
+not WebKitGTK"* is a lesson this project has already paid for once.
+
+Both dialogs now cap and scroll their **body** instead, with no layout mode on
+the `<dialog>` at all — simpler, and it cannot depend on how one engine treats
+flex on a dialog. Kept regardless of whether it turns out to be the cause: the
+construct bought nothing that a `max-height` on the body does not.
+
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
 - [ ] Re-run the audit on the Windows tree — the ~24 `windows-*` crates Stage 5 §2 could not read

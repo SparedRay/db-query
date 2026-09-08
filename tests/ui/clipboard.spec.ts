@@ -77,7 +77,7 @@ async function connectAndRun(page: import("@playwright/test").Page, result: unkn
   await expect(page.locator("table.rs")).toBeVisible();
 }
 
-test("copies the whole result with headers", async ({ page, browserName }) => {
+test("Copy with headers includes the header row", async ({ page, browserName }) => {
   await connectAndRun(
     page,
     rowsResult(
@@ -89,7 +89,7 @@ test("copies the whole result with headers", async ({ page, browserName }) => {
     ),
   );
 
-  await page.click("#btn-copy");
+  await page.click("#btn-copy-head");
   const text = await copied(page, browserName);
   if (text === null) return;
 
@@ -98,13 +98,13 @@ test("copies the whole result with headers", async ({ page, browserName }) => {
   expect(text).toContain("2\tgrace@example.com");
 });
 
-test("copies without headers when asked", async ({ page, browserName }) => {
+test("plain Copy carries no headers \u2014 the default", async ({ page, browserName }) => {
   await connectAndRun(
     page,
     rowsResult([{ name: "id", sqlType: "INT" }], [[1], [2]]),
   );
 
-  await page.click("#btn-copy-nohead");
+  await page.click("#btn-copy");
   const text = await copied(page, browserName);
   if (text === null) return;
   expect(text).not.toContain("id");
@@ -129,7 +129,7 @@ test("copies only the selected rows", async ({ page, browserName }) => {
   await page.click('tr[data-row="3"] .rownum', { modifiers: ["Control"] });
   await expect(page.locator("#btn-copy")).toHaveText(/2 rows/);
 
-  await page.click("#btn-copy");
+  await page.click("#btn-copy-head");
   const text = await copied(page, browserName);
   if (text === null) return;
   const lines = text.trim().split("\n");
@@ -147,7 +147,7 @@ test("shift-click selects a contiguous range of rows", async ({ page, browserNam
   await page.click('tr[data-row="3"] .rownum', { modifiers: ["Shift"] });
   await expect(page.locator("#btn-copy")).toHaveText(/3 rows/);
 
-  await page.click("#btn-copy-nohead");
+  await page.click("#btn-copy");
   const text = await copied(page, browserName);
   if (text === null) return;
   expect(text.trim().split("\n")).toEqual(["2", "3", "4"]);
@@ -171,7 +171,7 @@ test("copies the block where selected rows and columns cross", async ({ page, br
   await page.click('tr[data-row="1"] td[data-col="2"]', { modifiers: ["Shift"] });
   await expect(page.locator("#btn-copy")).toHaveText(/2 rows × 2 columns/);
 
-  await page.click("#btn-copy-nohead");
+  await page.click("#btn-copy");
   const text = await copied(page, browserName);
   if (text === null) return;
   expect(text.trim().split("\n")).toEqual(["b1\tc1", "b2\tc2"]);
@@ -184,7 +184,7 @@ test("a NULL copies as an empty field, not the word NULL", async ({ page, browse
     rowsResult([{ name: "v" }], [[null], ["NULL"]]),
   );
 
-  await page.click("#btn-copy-nohead");
+  await page.click("#btn-copy");
   const text = await copied(page, browserName);
   if (text === null) return;
   // Row 1 is a real NULL, row 2 is the four-character string. Only the trailing
@@ -215,6 +215,60 @@ test("copying does not destroy the result it copied", async ({ page }) => {
   await expect(page.locator("#btn-copy")).toBeEnabled();
 
   // And it can be done again, which was the practical symptom.
-  await page.click("#btn-copy-nohead");
+  await page.click("#btn-copy");
   await expect(page.locator("table.rs")).toBeVisible();
+});
+
+// ------------------------------------------------- headers are opt-in
+
+/**
+ * Plain copy carries no headers.
+ *
+ * Pasting into another query, a spreadsheet column or a chat message is the
+ * common case, and a stray header row there is something you have to notice
+ * and delete. Headers are the deliberate act, so they get the modifier and the
+ * second button.
+ */
+test("Ctrl+C copies without headers; Ctrl+Shift+C copies with them", async ({
+  page,
+  browserName,
+}) => {
+  await connectAndRun(
+    page,
+    rowsResult([{ name: "id", sqlType: "INT" }, { name: "label" }], [[1, "one"]]),
+  );
+
+  await page.locator("#grid").click();
+  await page.keyboard.press("Control+c");
+  const plain = await copied(page, browserName);
+  if (plain !== null) {
+    expect(plain).not.toContain("label");
+    expect(plain.trim()).toBe("1\tone");
+  }
+
+  await page.keyboard.press("Control+Shift+c");
+  const withHeaders = await copied(page, browserName);
+  if (withHeaders !== null) {
+    expect(withHeaders.trim().split("\n")).toEqual(["id\tlabel", "1\tone"]);
+  }
+});
+
+/** The same pair, reachable without the keyboard. */
+test("the cell menu offers both copies", async ({ page, browserName }) => {
+  await connectAndRun(
+    page,
+    rowsResult([{ name: "id", sqlType: "INT" }, { name: "label" }], [[1, "one"]]),
+  );
+
+  await page.locator('td[data-col="0"]').click({ button: "right" });
+  await page.locator(".ctx-menu button", { hasText: /^Copy$/ }).click();
+  const plain = await copied(page, browserName);
+  if (plain !== null) expect(plain.trim()).toBe("1\tone");
+
+  await page.locator('td[data-col="0"]').click({ button: "right" });
+  await page.locator(".ctx-menu button", { hasText: "Copy with headers" }).click();
+  const withHeaders = await copied(page, browserName);
+  if (withHeaders !== null) {
+    expect(withHeaders.trim().split("\n")).toEqual(["id\tlabel", "1\tone"]);
+  }
 });

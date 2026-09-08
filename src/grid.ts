@@ -88,6 +88,8 @@ export class ResultView {
     grid: HTMLElement,
     status: HTMLElement,
     private onChanged: () => void = () => {},
+    /** Copy the current selection. `headers` is the deliberate variant. */
+    private onCopy: (headers: boolean) => void = () => {},
   ) {
     this.tabsEl = tabs;
     this.gridEl = grid;
@@ -337,6 +339,11 @@ export class ResultView {
         label: "Open in full view",
         run: () => showValue(`${name} \u00b7 row ${row + 1}`, cellText(v)),
       },
+      // These act on the *selection*, not on the cell under the pointer — the
+      // same thing the toolbar buttons do, and why right-click leaves the
+      // selection alone.
+      { label: "Copy", run: () => this.onCopy(false) },
+      { label: "Copy with headers", run: () => this.onCopy(true) },
     ]);
   }
 

@@ -292,6 +292,7 @@ test("Ctrl+A in the grid selects everything and Ctrl+C copies it", async ({ page
   await expect(page.locator("#result-note")).toContainText(/^Copied /);
   if (browserName !== "chromium") return;
   const text = await page.evaluate(() => navigator.clipboard.readText());
-  expect(text).toContain("a\tb");
+  // Plain Ctrl+C: the data, and no header row. See clipboard.spec.ts.
   expect(text).toContain("1\t2");
+  expect(text).not.toContain("a\tb");
 });

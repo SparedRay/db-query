@@ -54,7 +54,7 @@ const els = {
   connRemember: $<HTMLInputElement>("conn-remember"),
   resultNote: $<HTMLElement>("result-note"),
   btnCopy: $<HTMLButtonElement>("btn-copy"),
-  btnCopyNoHead: $<HTMLButtonElement>("btn-copy-nohead"),
+  btnCopyHead: $<HTMLButtonElement>("btn-copy-head"),
   btnExport: $<HTMLButtonElement>("btn-export"),
   btnUpdate: $<HTMLButtonElement>("btn-update"),
   btnSettings: $<HTMLButtonElement>("btn-settings"),
@@ -100,7 +100,16 @@ const els = {
 
 // `refreshExportBar` is a hoisted function declaration, so it can be handed
 // over here even though it is defined further down.
-const results = new ResultView($("tabs"), $("grid"), $("status"), () => refreshExportBar());
+const results = new ResultView(
+  $("tabs"),
+  $("grid"),
+  $("status"),
+  () => refreshExportBar(),
+  // Passed to the constructor, not through `show()`: `setMessage` resets the
+  // per-result hooks, and a copy that silently stopped working after a message
+  // is exactly the class of bug this project has already shipped once.
+  (headers) => void copySelection(headers),
+);
 
 let view!: EditorView;
 let tabs!: TabManager;
@@ -921,13 +930,16 @@ function refreshExportBar() {
   const data = results.selectedData();
   const has = data !== null;
   els.btnCopy.disabled = !has;
-  els.btnCopyNoHead.disabled = !has;
+  els.btnCopyHead.disabled = !has;
   els.btnExport.disabled = !has;
   const what = describeSelection();
   els.btnCopy.textContent = what ? `Copy ${what}` : "Copy";
   els.btnCopy.title = what
-    ? `Copy the selected ${what} (Ctrl+C)`
-    : "Copy every row and column (Ctrl+C)";
+    ? `Copy the selected ${what}, without headers (Ctrl+C)`
+    : "Copy every row and column, without headers (Ctrl+C)";
+  els.btnCopyHead.title = what
+    ? `Copy the selected ${what} with headers (Ctrl+Shift+C)`
+    : "Copy every row and column with headers (Ctrl+Shift+C)";
 }
 
 async function copySelection(headers: boolean) {
@@ -954,8 +966,11 @@ async function copySelection(headers: boolean) {
   }
 }
 
-els.btnCopy.onclick = () => void copySelection(true);
-els.btnCopyNoHead.onclick = () => void copySelection(false);
+// Plain copy carries no headers. Pasting into another query, a spreadsheet
+// column or a chat message is the common case, and a stray header row there is
+// something you have to notice and delete. Headers are the deliberate act.
+els.btnCopy.onclick = () => void copySelection(false);
+els.btnCopyHead.onclick = () => void copySelection(true);
 els.btnExport.onclick = () => openExportDialog();
 
 function openExportDialog() {
@@ -1110,7 +1125,8 @@ $("grid").addEventListener("keydown", (e) => {
   if (!(ev.ctrlKey || ev.metaKey)) return;
   if (ev.key === "c" || ev.key === "C") {
     ev.preventDefault();
-    void copySelection(!ev.shiftKey);
+    // Ctrl+C plain, Ctrl+Shift+C with headers.
+    void copySelection(ev.shiftKey);
   } else if (ev.key === "a" || ev.key === "A") {
     ev.preventDefault();
     results.selectAll();

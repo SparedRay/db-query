@@ -34,7 +34,7 @@ test("copy and export are disabled when there is nothing to export", async ({ pa
   await page.goto("/");
 
   await expect(page.locator("#btn-copy")).toBeDisabled();
-  await expect(page.locator("#btn-copy-nohead")).toBeDisabled();
+  await expect(page.locator("#btn-copy-head")).toBeDisabled();
   await expect(page.locator("#btn-export")).toBeDisabled();
 });
 
