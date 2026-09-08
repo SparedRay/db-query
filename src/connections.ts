@@ -26,7 +26,12 @@ export interface ConnectionEntry {
 
 export interface ConnectionHooks {
   onActivate: (entry: ConnectionEntry) => void;
-  onConnected: (entry: ConnectionEntry, info: ConnInfo) => void;
+  /**
+   * Awaited before the connection becomes the visible workspace, because
+   * restoring its remembered tabs has to finish first — `setActiveConnection`
+   * creates an empty tab for a workspace it finds empty, and would race it.
+   */
+  onConnected: (entry: ConnectionEntry, info: ConnInfo) => void | Promise<void>;
   /** About to disconnect or delete — return false to abort (unsaved tabs). */
   canDrop?: (entry: ConnectionEntry) => Promise<boolean>;
   onDisconnected: (entry: ConnectionEntry) => void;
@@ -138,7 +143,7 @@ export class ConnectionManager {
       // Only now does it join the rail. A failed attempt must leave no trace —
       // otherwise every typo becomes a dead icon the user has to clean up.
       this.upsert(entry);
-      this.hooks.onConnected(entry, info);
+      await this.hooks.onConnected(entry, info);
       this.activate(entry.profile.id);
       return { ok: true };
     } catch (err) {

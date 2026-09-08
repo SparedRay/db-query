@@ -63,6 +63,10 @@ export const baseBackend: Backend = {
   // has to think about it, and overridden by the ones that do.
   update_check: () => ({ type: "upToDate", current: "0.0.0-test" }),
   list_profiles: () => ({ profiles: [], warning: null }),
+  // Every boot reads the session file. Stubbed as "nothing remembered" so no
+  // other test has to think about it, and overridden by the ones that do.
+  load_session: () => ({ session: { version: 1, connections: [] }, warning: null }),
+  save_session: () => null,
   open_tab: () => null,
   close_tab: () => null,
   lint_sql: () => [],
@@ -101,6 +105,20 @@ export async function installBackend(page: Page, backend: Backend = {}) {
     ([names]: [string[]]) => {
       const calls: Array<{ cmd: string; args: unknown }> = [];
       (window as unknown as Record<string, unknown>).__CALLS__ = calls;
+
+      // Registered Tauri event listeners, so a test can fire one.
+      const listeners: Array<{ event: string; handler: (e: unknown) => unknown }> = [];
+      // Dispatch without awaiting the handler. A close-requested handler that
+      // opens a dialog does not settle until someone answers it — awaiting here
+      // would deadlock the very test that wants to see the dialog.
+      (window as unknown as Record<string, unknown>).__FIRE__ = (
+        event: string,
+        payload: unknown,
+      ) => {
+        for (const l of listeners) {
+          if (l.event === event) void l.handler({ event, id: 0, payload });
+        }
+      };
       (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         // The shape `@tauri-apps/api/mocks` installs. Without it,
         // `getCurrentWebview()` throws during boot and — because it is a
@@ -115,7 +133,16 @@ export async function installBackend(page: Page, backend: Backend = {}) {
         invoke: async (cmd: string, args: Record<string, unknown>) => {
           calls.push({ cmd, args });
           if (!names.includes(cmd)) {
-            // Plugin channels (`plugin:event|listen`) are expected and inert.
+            // `listen` is the one plugin channel worth modelling: window events
+            // are how quitting reaches the app, and the close handler is where
+            // unsaved work is decided. Everything else is inert.
+            if (cmd === "plugin:event|listen") {
+              listeners.push({
+                event: String(args.event),
+                handler: args.handler as (e: unknown) => unknown,
+              });
+              return 0;
+            }
             if (cmd.startsWith("plugin:")) return 0;
             throw new Error(`unstubbed command: ${cmd}`);
           }
@@ -298,4 +325,18 @@ export async function editorText(page: Page): Promise<string> {
 /** Every command name the UI has invoked so far. */
 export async function commandNames(page: Page): Promise<string[]> {
   return (await calls(page)).map((c) => c.cmd);
+}
+
+/**
+ * Fire a Tauri window event the way the runtime would.
+ *
+ * `tauri://close-requested` is the one that matters: the app's handler decides
+ * whether quitting proceeds, and it is the last chance to write anything down.
+ */
+export async function fireEvent(page: Page, event: string, payload: unknown = null) {
+  await page.evaluate(
+    ([event, payload]) =>
+      (window as unknown as { __FIRE__: (e: string, p: unknown) => void }).__FIRE__(event, payload),
+    [event, payload] as [string, unknown],
+  );
 }

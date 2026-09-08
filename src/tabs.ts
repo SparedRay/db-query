@@ -64,6 +64,28 @@ export interface ScriptTab {
   untitledNumber: number | null;
 }
 
+/**
+ * One tab as `restore` wants it: already resolved, with the file read and the
+ * baseline decided. Everything ambiguous — a missing file, a changed file — is
+ * settled by the caller, so this stays a plain description of a tab that is
+ * about to exist.
+ */
+export interface RestoredTab {
+  title: string;
+  filePath: string | null;
+  dialect: string;
+  encoding: string;
+  lineEnding: string;
+  mtimeMs: number | null;
+  /** The buffer. */
+  contents: string;
+  /** What the buffer is compared against; equal to `contents` when clean. */
+  baseline: string;
+  cursor: number;
+  activeDb: string | null;
+  untitledNumber: number | null;
+}
+
 export interface TabHooks {
   /** A different tab became active. */
   onActivate: (tab: ScriptTab) => void;
@@ -304,6 +326,82 @@ export class TabManager {
   activateIndex(n: number) {
     const tab = this.visible()[n];
     if (tab) this.activate(tab.id);
+  }
+
+  /**
+   * Rebuild a connection's tabs from a stored session.
+   *
+   * **Deliberately does not activate anything.** This runs from `onConnected`,
+   * which fires before the connection becomes the visible workspace — calling
+   * `activate` here would swap the editor to a tab that `visible()` does not
+   * yet include, and render the wrong strip. Instead it records which tab
+   * should come to the front, and `setActiveConnection` picks it up a moment
+   * later through the same path it uses for any other workspace switch.
+   *
+   * Ids are minted fresh. Nothing outside the session file refers to the old
+   * ones, the backend session is new regardless, and reusing them would collide
+   * with `idSeq`, which counts from zero every launch.
+   */
+  restore(connectionId: string, specs: RestoredTab[], activeIndex: number): ScriptTab[] {
+    const made: ScriptTab[] = [];
+    for (const spec of specs) {
+      const state = createEditorState(spec.contents, spec.cursor);
+      const tab: ScriptTab = {
+        id: `t${++idSeq}`,
+        connectionId,
+        title: spec.title,
+        filePath: spec.filePath,
+        dialect: spec.dialect,
+        encoding: spec.encoding,
+        lineEnding: spec.lineEnding,
+        mtimeMs: spec.mtimeMs,
+        // The whole point of restoring a dirty tab: the baseline is what was on
+        // disk, so `isDirty` still answers the question it always answered.
+        baseline: createEditorState(spec.baseline).doc,
+        state,
+        result: null,
+        error: null,
+        activeResultIndex: 0,
+        colWidths: new Map(),
+        colSelection: emptySelection(),
+        sourceTable: null,
+        scrollTop: 0,
+        busy: false,
+        activeDb: spec.activeDb,
+        serverConnId: 0,
+        untitledNumber: spec.untitledNumber,
+      };
+      this.tabs.push(tab);
+      this.hooks.onCreated(tab);
+      made.push(tab);
+    }
+
+    const front = made[activeIndex] ?? made[0];
+    if (front) this.lastActive.set(connectionId, front.id);
+    return made;
+  }
+
+  /**
+   * Which tab is in front for a connection, on screen or not.
+   *
+   * The session file has to record where each workspace was left, not just the
+   * one currently visible — every other connection's tabs are still live in
+   * memory and are still going to be written down.
+   */
+  frontOf(connectionId: string): ScriptTab | null {
+    const mine = this.forConnection(connectionId);
+    if (mine.length === 0) return null;
+    const id =
+      this.activeConnectionId === connectionId
+        ? this.activeId
+        : this.lastActive.get(connectionId);
+    return mine.find((t) => t.id === id) ?? mine[0];
+  }
+
+  /** Where the cursor is, whether or not this is the active tab. */
+  cursorOf(tab: ScriptTab): number {
+    const state = tab.id === this.activeId ? this.view.state : tab.state;
+    return state.selection.main.head;
   }
 
   /** The tab's current text, whether or not it is the active one. */

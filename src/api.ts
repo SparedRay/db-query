@@ -258,6 +258,48 @@ export interface FileTypeSpec {
   dialect: string;
 }
 
+// ------------------------------------------------------------------ session
+
+/**
+ * One tab as it is written down. Nothing describing a *result* is here: results
+ * are unbounded and stale by definition, so a restored tab shows its script and
+ * an empty results pane.
+ */
+export interface StoredTab {
+  title: string;
+  filePath: string | null;
+  dialect: string;
+  encoding: string;
+  lineEnding: string;
+  /** The mtime the baseline came from, so the save-time conflict check
+   *  still has something to compare against after a restart. */
+  mtimeMs: number | null;
+  /** Present only when this is the only copy: an untitled tab, or a
+   *  file-backed tab with unsaved edits. */
+  text: string | null;
+  cursor: number;
+  activeDb: string | null;
+  untitledNumber: number | null;
+}
+
+export interface StoredWorkspace {
+  connectionId: string;
+  tabs: StoredTab[];
+  /** An index, not an id: restored tabs are minted fresh ids. */
+  activeIndex: number;
+}
+
+export interface SessionStore {
+  version: number;
+  connections: StoredWorkspace[];
+}
+
+export interface SessionLoad {
+  session: SessionStore;
+  /** Set when the file was unreadable and moved aside. */
+  warning: string | null;
+}
+
 export interface OpenedFile {
   path: string;
   name: string;
@@ -327,6 +369,10 @@ export const api = {
    */
   tableDdl: (connectionId: string, db: string, table: string) =>
     invoke<string>("table_ddl", { connectionId, db, table }),
+
+  // --- the remembered session. Rust owns the file; the shape is ours.
+  loadSession: () => invoke<SessionLoad>("load_session"),
+  saveSession: (session: SessionStore) => invoke<void>("save_session", { session }),
 
   // --- self-update. `updateCheck` is safe to call unattended; `updateInstall`
   // must only ever follow an explicit yes from the user.

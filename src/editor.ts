@@ -67,11 +67,21 @@ let sharedExtensions: Extension[] | null = null;
  * Compartment contents (schema, linting) are per-state, so whoever swaps states
  * must re-apply them afterwards — see `setSchema` / `setLinting`.
  */
-export function createEditorState(doc: string): EditorState {
+/**
+ * `cursor` is clamped rather than trusted: it can come from a restored session
+ * whose file changed on disk while the app was closed, and an out-of-range
+ * offset makes `EditorState.create` throw — which at boot means no editor at
+ * all.
+ */
+export function createEditorState(doc: string, cursor?: number): EditorState {
   if (!sharedExtensions) {
     throw new Error("createEditor() must run before createEditorState()");
   }
-  return EditorState.create({ doc, extensions: sharedExtensions });
+  const selection =
+    cursor === undefined
+      ? undefined
+      : { anchor: Math.max(0, Math.min(cursor, doc.length)) };
+  return EditorState.create({ doc, selection, extensions: sharedExtensions });
 }
 
 export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorView {

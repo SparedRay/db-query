@@ -26,6 +26,7 @@ import {
   ConnectionManager, COLOURS, newConnectionId, type ConnectionEntry,
 } from "./connections";
 import { createFileUx, type FileUx } from "./files";
+import { createSessionPersistence } from "./session";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -116,6 +117,16 @@ let tabs!: TabManager;
 let files!: FileUx;
 
 let conns!: ConnectionManager;
+
+/**
+ * The open tabs, remembered across restarts. Restore happens per connection, on
+ * connect — nothing connects at boot, so there is nowhere for a tab to be until
+ * then.
+ */
+const session = createSessionPersistence({
+  tabs: () => tabs,
+  notify: (m) => results.setMessage(m),
+});
 
 /** Each connection keeps its own schema tree element, so expansion survives. */
 const trees = new Map<string, HTMLElement>();
@@ -233,6 +244,9 @@ function applyLintSetting(force = false) {
  * visible BEFORE the user tries, rather than only in the dialog afterwards.
  */
 function refreshFileNote() {
+  // Saving does not change the document, so `onDocChanged` never fires for it —
+  // but the path, the title and the mtime all just moved.
+  session.schedule();
   const tab = tabs?.active();
   if (!tab) {
     els.fileNote.hidden = true;
@@ -1307,6 +1321,7 @@ view = createEditor($("editor"), {
   onDocChanged: () => {
     tabs?.render();
     applyLintSetting();
+    session.schedule();
   },
 });
 
@@ -1320,15 +1335,41 @@ conns = new ConnectionManager($("rail"), {
     markActiveDb(tabs.active()?.activeDb ?? null);
     syncBusy();
   },
-  onConnected: (entry, info) => {
+  onConnected: async (entry, info) => {
     renderDatabases(entry.profile.id, info.databases);
     connected = true;
+
+    // Before anything else, and awaited: `setActiveConnection` runs a moment
+    // from now and creates an empty tab for a workspace it finds empty, which
+    // would leave a stray Untitled-1 beside everything we just restored.
+    const { warnings } = await session.restoreInto(entry.profile.id);
+
     // Register this connection's tabs with the backend; each is bound for life.
     for (const t of tabs.forConnection(entry.profile.id)) {
       void api.openTab(entry.profile.id, t.id);
+      // Put each tab back on the schema it was left on. `open_tab` is already
+      // issued unattended here; this is the same class of session setup, and
+      // without it a restored script silently runs against a different schema
+      // than the one it was written for. A failure is harmless — the tab simply
+      // stays on the connection's default.
+      if (t.activeDb && info.databases.includes(t.activeDb)) {
+        void api.useDatabase(t.id, t.activeDb).catch(() => {});
+      }
     }
+
     results.setMessage(`Connected to ${entry.profile.name} — MySQL ${info.serverVersion}.`);
+
+    // Restored tabs are their own evidence — they are on screen. A tab that did
+    // *not* come back is the thing nothing on screen can tell you, so it gets a
+    // dialog rather than a status line that the first tab activation overwrites.
+    // Not awaited: the workspace should finish opening behind it.
+    if (warnings.length) {
+      void choose("Some tabs were not restored", warnings.join("\n\n"), [
+        { value: "ok", label: "OK", primary: true },
+      ]);
+    }
     syncBusy();
+    session.schedule();
   },
   canDrop: async (entry) => {
     // Closing a connection closes its tabs, so the Stage 1 unsaved-changes
@@ -1347,10 +1388,12 @@ conns = new ConnectionManager($("rail"), {
       syncBusy();
     }
     for (const t of tabs.forConnection(entry.profile.id)) t.serverConnId = 0;
+    session.schedule();
   },
   onRemoved: (entry) => {
     trees.delete(entry.profile.id);
     for (const t of tabs.forConnection(entry.profile.id)) tabs.discard(t.id);
+    session.forget(entry.profile.id);
   },
   notify: (m) => results.setMessage(m),
 }, openConnectionEditor);
@@ -1361,6 +1404,7 @@ tabs = new TabManager($("script-tabs"), view, {
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
     void api.openTab(tab.connectionId, tab.id);
+    session.schedule();
   },
   onActivate: (tab) => {
     // Compartment contents live in the EditorState, so a swapped-in state has
@@ -1372,12 +1416,14 @@ tabs = new TabManager($("script-tabs"), view, {
     refreshFileNote();
     if (tab.activeDb) markActiveDb(tab.activeDb);
     view.focus();
+    session.schedule();
   },
   canClose: (tab) => files.confirmClose(tab),
   onClosed: (tab) => {
     // Releases that tab's MySQL connection; leaving it would leak until
     // disconnect.
     void api.closeTab(tab.id);
+    session.schedule();
   },
 });
 
@@ -1389,7 +1435,14 @@ files = createFileUx({
 });
 
 // No tab is created here: a tab must belong to a connection, and at boot there
-// is none. The first tab appears when a connection becomes active.
+// is none. The first tab appears when a connection becomes active — restored
+// from the session file if that connection had tabs when the app last closed.
+//
+// Read before anything can be written, or the first keystroke would save an
+// empty session over the remembered one.
+void session.boot().then((warning) => {
+  if (warning) results.setMessage(warning);
+});
 
 // One source of truth for the row numbers: the backend owns them, and the UI
 // asks rather than repeating them.
@@ -1581,7 +1634,12 @@ void getCurrentWebview().onDragDropEvent((event) => {
 // Quitting with unsaved work must ask first. `preventDefault` keeps the window
 // open while we do.
 void getCurrentWindow().onCloseRequested(async (event) => {
-  if (!(await files.confirmQuit())) event.preventDefault();
+  if (!(await files.confirmQuit())) {
+    event.preventDefault();
+    return;
+  }
+  // Last chance: the debounce may still be holding the most recent keystrokes.
+  await session.flush();
 });
 
 // --- tab keybindings, at window level so they work even when the tab bar has

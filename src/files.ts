@@ -224,8 +224,17 @@ export function createFileUx(deps: FileUxDeps): FileUx {
     return pick === "discard";
   }
 
+  /**
+   * Quitting asks about **files**, not buffers.
+   *
+   * Tabs are remembered across restarts now, so an untitled buffer is not at
+   * risk and no longer earns a prompt — prompting about work that is provably
+   * safe is how people learn to click through prompts. A file-backed tab with
+   * unsaved edits still does: what persists is the buffer, not the file, and
+   * the stale bytes on disk are what something else will read.
+   */
   async function confirmQuit(): Promise<boolean> {
-    const dirty = tabs.all().filter((t) => tabs.isDirty(t));
+    const dirty = tabs.all().filter((t) => t.filePath !== null && tabs.isDirty(t));
     if (dirty.length === 0) return true;
     const names = dirty.map((t) => t.title).join(", ");
     const pick = await choose(

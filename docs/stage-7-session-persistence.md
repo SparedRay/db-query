@@ -3,7 +3,7 @@
 **Goal:** the app comes back the way you left it. Tabs, their contents and their
 place in the workspace survive a quit, a crash and an update.
 **Builds on:** [Stage 6 — Updates & attribution](stage-6-updates-and-attribution.md).
-**Status:** 📋 Planned — analysis only, nothing built.
+**Status:** 🚧 In progress — restore-on-connect built 2026-09-08.
 
 ---
 
@@ -90,50 +90,43 @@ That keeps the common case to a few hundred bytes a tab.
 
 ---
 
-## 4. The one thing that does not fit today
+## 4. The decision: restore on connect
 
-**A disconnected connection cannot be the visible workspace.**
-`connections.ts` line ~252 reads:
+The analysis offered two shapes — restore lazily at connect (**A**), or restore
+eagerly into an offline workspace (**B**). The recommendation was B.
 
-```ts
-if (entry.connected) this.activate(entry.profile.id);
-else void this.connect(entry);
-```
+> *"the request will need the tabs to be restored when we connect (As each
+> connection can have its tab) so restoring them only when we connect is good
+> enough"*
 
-So there is no way to be *looking at* a connection that is offline, and at boot
-nothing is connected. Restored tabs would have nowhere to appear.
+**A**, and the reasoning is better than the recommendation was: tabs belong to a
+connection, so a workspace you cannot use is a workspace whose tabs cannot run
+anything anyway. It also leaves the connection model — Stage 2's, stable since —
+completely untouched.
 
-We will not solve that by connecting at boot. Connecting is a network action
-against someone else's server, it prompts for passwords that are not in the
-keychain, and it is squarely the thing this project has refused to do
-unattended since Stage 0.
+So a workspace waits, fully loaded, in memory until its connection comes up.
+Nothing connects at boot; that is asserted, not assumed.
 
-Two shapes, and they are genuinely different products:
+### The one ordering that matters
 
-| | **A — restore lazily, at connect** | **B — restore into an offline workspace** |
-|---|---|---|
-| Boot looks like | exactly as today | your tabs, as you left them |
-| Tabs appear | when you connect that server | immediately |
-| Connection model | untouched | rail click activates *and* connects |
-| Editing offline | impossible | works; Run is disabled and says why |
-| Cost | small | one new UI state, honestly done |
+`setActiveConnection` **creates an empty tab for any workspace it finds empty**,
+and it runs a moment after a connection opens. Restoring has to finish first or
+every restored workspace gets a stray `Untitled-1` beside it — and, worse, a
+restore that lost the race would leave the tabs on disk and an empty window on
+screen.
 
-**Recommendation: B**, because A does not actually answer the request — quitting
-and reopening would still show an empty window, and the scripts would be a
-password prompt away. The change B needs is small and is an improvement on its
-own terms:
+`onConnected` is therefore **awaited**: its hook type is now
+`void | Promise<void>`, and `attempt()` waits for it before calling `activate()`.
+Removing that one `await` fails **nine** of the seventeen tests, which is the
+right amount for something that load-bearing.
 
-- Rail click **always activates**, and additionally starts connecting if the
-  entry is offline. Nothing is taken away — one click still connects — but the
-  workspace and its spinner are visible while it happens, which is the Phase 5
-  loader argument applied one level up.
-- At boot, the last active connection is **activated, not connected**.
-- `syncBusy` learns to say *"Not connected"* rather than leaving Run enabled
-  against nothing.
+`restoreInto` also waits on the file read, because connecting can easily beat it
+at boot — and it takes its workspace out of `pending` *before* its first `await`,
+so two connects in flight cannot restore the same tabs twice.
 
 ---
 
-## 5. Decisions to make before writing code
+## 5. Decisions, and what implementation changed about them
 
 - **D1 — When does it write?** Debounced on document change (~1s idle), plus
   immediately on tab create / close / reorder / activate and on
@@ -170,38 +163,84 @@ own terms:
 
 ---
 
+### What implementation corrected
+
+- **D2 got simpler.** The plan worried about how to restore the baseline of a
+  dirty tab. The answer is to **re-read the file** — the baseline is whatever is
+  on disk, which is what it always meant. What is stored instead is the mtime
+  the tab was *based on*, so the first Save after a restart runs into the
+  **existing** conflict check rather than a second one invented for restore.
+  A clean tab takes the file's current mtime, because it **is** the file.
+- **D3 split in two, and the split is the whole point.** A vanished file takes a
+  **clean** tab with it — that tab held nothing the file did not, so dropping it
+  loses no work. A **dirty** tab keeps its buffer and lets go of its path, so
+  Save asks where to put it. Both are tested; the second is the one that would
+  destroy something if it were wrong.
+- **Warnings had to become a dialog.** They were going to `results.setMessage`,
+  which the first tab activation overwrites a moment later — so the message
+  saying a tab had been lost was invisible. Restored tabs are their own evidence,
+  on screen; a tab that did *not* come back is the one thing nothing on screen
+  can tell you, so it gets a dialog. **This also revealed that the existing
+  "Connected to …" line has never been visible either**, for the same reason.
+  Left alone, and recorded here.
+- **D5 held.** Fresh ids, and the active tab is stored as an **index** rather
+  than an id, since a stored id would refer to nothing after a restart.
+- **D6 was implemented.** Quitting now asks about **files**, not buffers: an
+  untitled buffer is remembered, so prompting about it is prompting about work
+  that is provably safe. A file-backed tab with unsaved edits still asks — what
+  persists is the buffer, not the file, and the stale bytes on disk are what
+  something else will read.
+- **`activeDb` is restored, and it issues a `USE`.** This is the one place
+  restore talks to the server beyond registering a tab. It is the same class of
+  session setup as `open_tab`, which is already issued unattended at connect, and
+  without it a restored script silently runs against a different schema than the
+  one it was written for. A failure is harmless: the tab stays on the default.
+- **The harness can fire Tauri events now.** `plugin:event|listen` is recorded
+  and `fireEvent(page, "tauri://close-requested")` dispatches it, which is what
+  made the quit path — the prompt *and* the final flush — testable at all.
+  Dispatch deliberately does not await the handler: a close handler that opens a
+  dialog never settles until someone answers, which would deadlock the test that
+  wants to see the dialog.
+
+---
+
 ## 6. Milestones
 
-- [ ] **S1 — Quit and reopen restores an untitled buffer**, its text, its cursor and its tab position.
-- [ ] **S2 — A clean file-backed tab restores from its path**, with no copy of its text in the session file.
-- [ ] **S3 — A dirty file-backed tab restores dirty**, with the unsaved edits intact and the dot showing.
-- [ ] **S4 — A file changed on disk while the app was closed** lands in the conflict path, not silently either way.
-- [ ] **S5 — Nothing connects at boot.** Asserted, not assumed: no `connect` command is invoked before the user acts.
-- [ ] **S6 — No result set is ever restored**, and the results pane says so rather than looking broken.
-- [ ] **S7 — A corrupt `session.json` is moved aside** and the app starts with no tabs and one warning.
-- [ ] **S8 — A kill -9 loses at most the debounce window**, demonstrated rather than reasoned about.
+- [x] **S1 — Quit and reopen restores an untitled buffer**, its text, its cursor and its tab position.
+- [x] **S2 — A clean file-backed tab restores from its path**, with no copy of its text in the session file.
+- [x] **S3 — A dirty file-backed tab restores dirty**, with the unsaved edits intact and the dot showing.
+- [x] **S4 — A file changed on disk while the app was closed** lands in the conflict path: the restored tab keeps the mtime it was based on, so the first Save asks.
+- [x] **S5 — Nothing connects at boot.** Asserted, not assumed: no `connect` or `connect_saved` command is invoked before the user acts.
+- [x] **S6 — No result set is ever restored** — asserted against the written payload, not just the screen.
+- [x] **S7 — A corrupt `session.json` is moved aside** and the app starts with no tabs and one warning (Rust).
+- [x] **S8 — Quitting flushes what the debounce is still holding**, so a clean quit loses nothing; a `kill -9` still costs at most the debounce window.
+- [ ] **S9 — Confirmed by hand on both platforms**: quit the real app with three tabs open and reopen it.
 
 ---
 
 ## 7. Task tracker
 
-### Phase 1 — Storage
-- [ ] `src-tauri/src/workspace.rs`: `SessionStore { version, connections: [{ id, tabs: [...], activeTabId }], activeConnectionId }`, `load` / `save`, atomic + 0600 + move-aside, unit tests mirroring `profiles.rs`
-- [ ] `load_session` / `save_session` commands; `api.ts` wrappers
+### Phase 1 — Storage — built 2026-09-08
+- [x] `src-tauri/src/workspace.rs`: `SessionStore { version, connections: [{ connectionId, tabs, activeIndex }] }`, `load` / `save`, atomic + 0600 + move-aside. **6 unit tests**, mirroring `profiles.rs` — including that `save` stamps the version itself, so a frontend that forgets to cannot write an unversioned file, and that an unknown field from a future version does not discard the tabs it *does* understand
+- [x] `load_session` / `save_session` commands; `api.ts` wrappers and types
 
-### Phase 2 — Capture
-- [ ] Serialise `ScriptTab` → stored shape; omit text for clean file-backed tabs
-- [ ] Debounced writer; flush on create / close / reorder / activate / `onCloseRequested`
+### Phase 2 — Capture — built 2026-09-08
+- [x] `src/session.ts`: snapshot, debounce (1s), flush
+- [x] Text stored only when it is the only copy — untitled, or file-backed and dirty
+- [x] **Workspaces never restored this session are written back untouched.** Without this, connecting to one server silently deletes every other server's remembered tabs. It has its own test, and that test fails without the merge
+- [x] Scheduled on doc change, tab create / close / activate, save, connect / disconnect / remove; flushed on `tauri://close-requested`
 
-### Phase 3 — Restore
-- [ ] The offline-workspace state (§4 B) and the rail click change
-- [ ] Materialise tabs per connection; re-read files; conflict path on mtime mismatch (D2, D3)
-- [ ] Drop tabs with no profile, with a warning (D4); fresh ids (D5)
+### Phase 3 — Restore — built 2026-09-08
+- [x] Materialise per connection, inside an **awaited** `onConnected` (§4)
+- [x] Re-read files; stored mtime for dirty tabs so the existing conflict check still fires (D2)
+- [x] A vanished file drops a clean tab and spares a dirty one (D3)
+- [x] Fresh ids; the front tab stored as an index (D5)
+- [x] `activeDb` re-issued as a `USE` per restored tab
 
-### Phase 4 — Consequences
-- [ ] Quit prompt counts only file-backed dirty tabs (D6)
-- [ ] Results pane copy for a restored tab (S6)
-- [ ] UI tests for S1-S8; Rust tests for the store
+### Phase 4 — Consequences — built 2026-09-08
+- [x] Quit prompt counts only file-backed dirty tabs (D6)
+- [x] **17 UI tests** on both engines, **6 Rust**. The `onConnected` await was removed to confirm nine of them fail without it, and the pending-merge was removed to confirm its test fails without it
+- [ ] D4 — tabs stored under a profile that no longer exists. `onRemoved` already forgets them live; a session file hand-edited or crashed mid-removal is not yet covered
 
 ---
 

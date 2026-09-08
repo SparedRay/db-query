@@ -12,6 +12,7 @@ pub mod session;
 pub mod split;
 pub mod sqlgen;
 pub mod update;
+pub mod workspace;
 
 use tauri::State;
 
@@ -74,6 +75,21 @@ fn list_profiles(app: tauri::AppHandle) -> Result<ProfileListOutcome, String> {
             .collect(),
         warning: out.warning,
     })
+}
+
+// ------------------------------------------------------------------ session
+//
+// The open tabs, remembered across restarts. Rust owns the file and nothing
+// else: what a tab *is* stays the frontend's business.
+
+#[tauri::command]
+fn load_session(app: tauri::AppHandle) -> Result<workspace::LoadOutcome, String> {
+    Ok(workspace::load(&config_dir(&app)?))
+}
+
+#[tauri::command]
+fn save_session(app: tauri::AppHandle, session: workspace::SessionStore) -> Result<(), String> {
+    workspace::save(&config_dir(&app)?, &session)
 }
 
 /// Save a profile, and optionally its password.
@@ -844,6 +860,8 @@ pub fn run() {
             list_routines,
             routine_ddl,
             table_ddl,
+            load_session,
+            save_session,
             app_defaults,
             generate_select,
             generate_drop,

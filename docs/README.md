@@ -13,7 +13,7 @@ decisions that were corrected along the way.
 | 4 | [Testability](stage-4-testability.md) | 🔒 **Frozen** — 192 UI tests on both engines; E1-E8 answered; CI + Windows carried to Stage 5 |
 | 5 | [Packaging & distribution](stage-5-packaging.md) | 🔒 **Frozen** — public repo, MIT, CI green on both platforms, installers built; updater and attribution carried to Stage 6 |
 | 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 📋 **Planned** — self-update on Windows, and the licence manifest distribution now obliges |
-| 7 | [Session persistence](stage-7-session-persistence.md) | 📋 **Planned** — analysis only; tabs and buffers surviving a quit |
+| 7 | [Session persistence](stage-7-session-persistence.md) | 🚧 **In progress** — tabs restore on connect; hands-on confirmation pending |
 
 ## Rules
 
