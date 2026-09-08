@@ -11,7 +11,8 @@ decisions that were corrected along the way.
 | 2 | [Connections](stage-2-connections.md) | 🔒 **Frozen** — complete; C3w (Windows) carried forward |
 | 3 | [Schema actions & result export](stage-3-explore-and-export.md) | 🔒 **Frozen** — built; E1-E8 click-through never run, carried to Stage 4 |
 | 4 | [Testability](stage-4-testability.md) | 🔒 **Frozen** — 192 UI tests on both engines; E1-E8 answered; CI + Windows carried to Stage 5 |
-| 5 | [Packaging & distribution](stage-5-packaging.md) | 🚧 **Active** — Linux + Windows installers, built by GitHub Actions, self-updating on Windows |
+| 5 | [Packaging & distribution](stage-5-packaging.md) | 🔒 **Frozen** — public repo, MIT, CI green on both platforms, installers built; updater and attribution carried to Stage 6 |
+| 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 📋 **Planned** — self-update on Windows, and the licence manifest distribution now obliges |
 
 ## Rules
 

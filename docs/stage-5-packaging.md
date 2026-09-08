@@ -1,10 +1,41 @@
 # Stage 5 — Packaging & distribution
 
+> ## 🔒 FROZEN — do not modify
+>
+> This tracker covers **Stage 5**. The project is public at
+> `github.com/SparedRay/db-query` under MIT, CI is green on Linux **and
+> Windows**, and the app has been run against a real database on a real Windows
+> machine — which is where the two bugs in §*First run against a real database*
+> came from, both fixed and covered by tests.
+>
+> **It is frozen with the second half of its own goal undone**, and the goal
+> line above still says it: *"and updates itself afterwards"*.
+>
+> - **P6 — the updater does not exist.** Not partially: `tauri-plugin-updater`
+>   is not a dependency, no signing key has been generated, and
+>   `tauri.conf.json` has no `plugins.updater`. Auto-update was an explicit
+>   decision in §4, and it was not built.
+> - **P7 — attribution does not ship.** No `cargo about`, no
+>   `THIRD-PARTY-LICENSES` in the bundle. §2's audit says the licences are
+>   clean; §1 says distribution turns that from a claim into an obligation.
+>   **Installers are now being distributed, so that obligation is live.**
+> - **P4 and P5 are reported working but were not verifiable from the
+>   development machine.** Tags `v0.1.0` and `v0.1.1` exist on the remote; the
+>   release workflow creates a **draft**, and drafts are invisible to
+>   unauthenticated API calls. Whether both installers were produced, and
+>   whether the Windows machine was installed from `setup.exe` rather than a
+>   local build, rests on report rather than on evidence gathered here.
+>
+> All of it carries to [Stage 6](stage-6-updates-and-attribution.md).
+>
+> Corrections belong in the current stage's tracker with a link back here.
+
 **Goal:** turn a `cargo run` into something that installs on Windows and Linux
 by double-clicking it, and updates itself afterwards.
 **Builds on:** [Stage 4 — Testability](stage-4-testability.md).
-**Status:** 📋 Planned, scoped and decided (2026-09-06) — **not started**. Renumbered from Stage 4: testability took that slot, because shipping something we cannot test is the wrong order.
-**Scope:** Linux + Windows. macOS is out. Built by GitHub Actions from a public repo; auto-update on Windows. See §4.
+**Status:** 🔒 Frozen 2026-09-07 — installers and CI delivered, **updater and
+attribution not built** and carried to Stage 6.
+**Scope:** Linux + Windows. macOS is out. Built by GitHub Actions from a public repo. See §4.
 
 ---
 
@@ -306,14 +337,15 @@ notes rather than being glossed.
 
 ## 6. Milestones
 
-- [ ] **P1 — It is on GitHub, public, with a licence.** History scanned again at push time; `LICENSE` present; README states what is and is not audited.
-- [ ] **P2 — CI is green on Linux and Windows.** `check`, the Rust suites, and the UI suite on every push. **This closes Stage 4's T7.**
-- [ ] **P3 — Windows is no longer a blank spot.** The Windows job runs `cargo test` and the keychain round trip against Credential Manager. **This closes T8 / E0 / C3w, carried since Stage 2.**
-- [ ] **P4 — A tag produces installers.** `.deb` and `-setup.exe` attached to a GitHub Release, downloadable from a plain URL.
-- [ ] **P5 — It installs on a Windows machine that has never seen the toolchain**, from a double-click, with no Administrator prompt, and appears in the Start Menu. Then it connects to a database and remembers a password across a relaunch.
-- [ ] **P6 — It updates itself on Windows.** Release `x.y.z+1`, and the installed copy offers it, applies it, and comes back running the new version.
-- [ ] **P7 — Attribution ships.** `THIRD-PARTY-LICENSES` generated per target by `cargo about` in CI, in the bundle, and reachable from inside the app.
-- [ ] **P8 — Nothing regressed.** Stages 0-4 suites pass by name on both platforms in the matrix.
+- [x] **P1 — It is on GitHub, public, with a licence.** Public at `github.com/SparedRay/db-query` under MIT; history scanned for secrets before the push; the README states what the audit covers and what it does not.
+- [x] **P2 — CI is green on Linux and Windows.** `check`, both Rust suites, the live MySQL suite and the UI suite, on every push. **Closes Stage 4's T7.**
+- [x] **P3 — Windows is no longer a blank spot.** The Windows job passes with the Credential Manager round trip inside it. **Closes T8 / E0 / C3w, carried since Stage 2 — three stages.**
+- [~] **P4 — A tag produces installers.** Tags `v0.1.0` and `v0.1.1` are on the remote and the workflow's failures were fixed, but the release it creates is a **draft**, and drafts are invisible to unauthenticated API calls. **Reported working; not verified from here.**
+- [~] **P5 — It runs on a real Windows machine against a real database.** Demonstrated — and it is what surfaced the layout and decoder bugs. Whether that machine was **installed from `setup.exe`** rather than built locally is unconfirmed.
+- [ ] **P5b — The double-click install itself:** no Administrator prompt, a Start Menu entry, and a password remembered across a relaunch. → **Stage 6.**
+- [ ] **P6 — It updates itself on Windows.** → **Not built at all. Stage 6.**
+- [ ] **P7 — Attribution ships.** → **Not built, and now a live obligation. Stage 6.**
+- [x] **P8 — Nothing regressed.** Stages 0-4 suites run on both platforms on every push.
 
 ---
 
