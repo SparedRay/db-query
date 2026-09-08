@@ -221,7 +221,11 @@ export interface ColumnMeta { name: string; typeHint: TypeHint; sqlType: string;
 /** Untagged on the Rust side: null stays null, numbers stay numbers. */
 export type CellValue = null | number | boolean | string;
 
-export type StatementKind = "select" | "rowReturning" | "modify" | "other";
+/**
+ * Mirrors Rust's `StatementKind`. `session` covers SET / USE / COMMIT and
+ * friends: statements for which a row count was never the point.
+ */
+export type StatementKind = "select" | "rowReturning" | "modify" | "session" | "other";
 
 export type Outcome =
   | { type: "rows"; columns: ColumnMeta[]; rows: CellValue[][]; truncated: boolean }

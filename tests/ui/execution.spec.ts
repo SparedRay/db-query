@@ -296,3 +296,76 @@ test("Ctrl+A in the grid selects everything and Ctrl+C copies it", async ({ page
   expect(text).toContain("1\t2");
   expect(text).not.toContain("a\tb");
 });
+
+// ------------------------------------------------ session statements
+
+/**
+ * `SET`, `USE`, `COMMIT` and friends report "0 rows affected", which is true
+ * and useless: it reads as a query that matched nothing rather than as a
+ * statement for which a row count was never the point.
+ */
+function sessionThenSelect() {
+  const set = {
+    sql: "SET @x = 1",
+    effectiveSql: null,
+    kind: "session",
+    outcome: { type: "affected", rows: 0 },
+    elapsedMs: 1,
+  };
+  const sel = rowsResult([{ name: "x" }], [["1"]], { sql: "SELECT @x" }).statements[0];
+  return {
+    statements: [set, sel],
+    totalElapsedMs: 2,
+    abortedAt: null,
+    delimiterDetected: false,
+    cancelled: false,
+    timedOut: false,
+  };
+}
+
+test("a SET says it ran, not that it affected no rows", async ({ page }) => {
+  const r = sessionThenSelect();
+  r.statements = [r.statements[0]];
+  await connect(page, { run_script: () => r });
+  await page.click("#btn-run-all");
+
+  await expect(page.locator("#grid .empty")).toHaveText("Statement executed.");
+  await expect(page.locator("#grid")).not.toContainText("affected");
+  await expect(page.locator("#status")).toContainText("executed");
+});
+
+/** Zero *is* the answer for an UPDATE, so that count must survive. */
+test("an UPDATE that matched nothing still reports zero", async ({ page }) => {
+  await connect(page, {
+    run_script: () => ({
+      statements: [
+        {
+          sql: "UPDATE t SET a = 1 WHERE 0",
+          effectiveSql: null,
+          kind: "modify",
+          outcome: { type: "affected", rows: 0 },
+          elapsedMs: 1,
+        },
+      ],
+      totalElapsedMs: 1,
+      abortedAt: null,
+      delimiterDetected: false,
+      cancelled: false,
+      timedOut: false,
+    }),
+  });
+  await page.click("#btn-run-all");
+  await expect(page.locator("#grid .empty")).toHaveText("0 row(s) affected.");
+});
+
+/** A script ending in COMMIT must not open on the commit. */
+test("the tab that opens is the last one with rows, not the last statement", async ({ page }) => {
+  const r = sessionThenSelect();
+  // SELECT first, then COMMIT: the naive "last statement" rule picks the wrong one.
+  r.statements = [r.statements[1], { ...r.statements[0], sql: "COMMIT" }];
+  await connect(page, { run_script: () => r });
+  await page.click("#btn-run-all");
+
+  await expect(page.locator("#tabs .tab.active")).toHaveText(/^1 ·/);
+  await expect(page.locator("table.rs")).toBeVisible();
+});

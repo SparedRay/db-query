@@ -8,6 +8,7 @@
    colour that cannot follow the theme, and one of them is enough to make light
    mode look broken. */
 :root {
+  --bg-app: #0d0f13;
   --bg: #16181d;
   --bg-raised: #1d2027;
   --bg-input: #12141a;
@@ -44,6 +45,7 @@
 }
 
 :root[data-theme="light"] {
+  --bg-app: #e6e8ec;
   --bg: #ffffff;
   --bg-raised: #f5f6f8;
   --bg-input: #ffffff;
@@ -84,7 +86,7 @@
 html, body, #app { height: 100%; margin: 0; }
 
 body {
-  background: var(--bg);
+  background: var(--bg-app);
   color: var(--fg);
   font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   overflow: hidden;
@@ -93,7 +95,12 @@ body {
 /* --- three-panel shell: sidebar | (editor over results) --- */
 #app {
   display: grid;
-  grid-template-columns: 48px var(--sidebar-w, 260px) 5px 1fr;
+  /* Panels on a recessed canvas. The padding is what separates them from the
+     window edge; the splitters provide the gaps between. */
+  background: var(--bg-app);
+  padding: 7px;
+  gap: 0;
+  grid-template-columns: 48px var(--sidebar-w, 260px) 7px 1fr;
   /* The row must be pinned, not implicit. An implicit row is `auto`, which
      sizes to its tallest child — so a schema with more tables than fit made the
      row taller than the window, pushed the results grid below the fold, and
@@ -114,9 +121,22 @@ body {
   background: var(--bg-raised);
 }
 
+/* The four surfaces. Rounding and a border make each one a *thing* rather than
+   a region of one flat screen — the same move the settings fieldsets make.
+   `overflow: hidden` is what keeps a sticky table header or a long tree from
+   painting over the rounded corner. */
+.railbar, #sidebar, #editor-pane, #results-pane {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+/* The rail sits flush against the sidebar; one seam between them, not two. */
+.railbar { border-right: none; border-radius: 9px 0 0 9px; }
+#sidebar { border-left: none; border-radius: 0 9px 9px 0; }
+
 #main {
   display: grid;
-  grid-template-rows: var(--editor-h, 45%) 5px 1fr;
+  grid-template-rows: var(--editor-h, 45%) 7px 1fr;
   min-width: 0;
   min-height: 0;
 }
@@ -128,7 +148,10 @@ body {
   min-width: 0;
 }
 
-.splitter { background: var(--border); }
+/* The gap between panels is the splitter. It stays invisible until aimed at:
+   a permanent line would put a seam back between surfaces that are now
+   separated by space. */
+.splitter { background: transparent; border-radius: 3px; }
 .splitter-v { cursor: col-resize; }
 .splitter-h { cursor: row-resize; }
 .splitter:hover, .splitter.dragging { background: var(--accent); }
@@ -196,7 +219,7 @@ input.num {
    so anything that must survive that lives beside it, not inside it. */
 .railbar {
   display: flex; flex-direction: column; min-height: 0;
-  background: var(--bg-rail); border-right: 1px solid var(--border);
+  background: var(--bg-rail);
 }
 .rail {
   flex: 1; min-height: 0;

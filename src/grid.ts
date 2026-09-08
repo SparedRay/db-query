@@ -131,8 +131,15 @@ export class ResultView {
 
   /** Index the UI should select for a freshly-arrived result. */
   static initialIndex(result: ScriptResult): number {
-    // The statement that failed if there was one, else the last result.
-    return result.abortedAt ?? Math.max(0, result.statements.length - 1);
+    // A failure wins: it is the thing you need to see.
+    if (result.abortedAt !== null) return result.abortedAt;
+    // Otherwise the last statement that actually returned something. A script
+    // ending in `COMMIT;` would otherwise open on the commit and hide the
+    // query above it — the answer is what you ran the script for.
+    for (let i = result.statements.length - 1; i >= 0; i--) {
+      if (result.statements[i].outcome.type === "rows") return i;
+    }
+    return Math.max(0, result.statements.length - 1);
   }
 
   private renderTabs() {
@@ -186,7 +193,19 @@ export class ResultView {
     if (s.outcome.type === "error") {
       this.gridEl.replaceChildren(el("div", "err-box", s.outcome.message));
     } else if (s.outcome.type === "affected") {
-      this.gridEl.replaceChildren(el("div", "empty", `${s.outcome.rows} row(s) affected.`));
+      // "0 rows affected" is true of a SET and tells you nothing — it reads as
+      // a query that matched nothing rather than as a statement that never had
+      // rows to report. An UPDATE that matched nothing keeps its count, because
+      // there zero *is* the answer.
+      this.gridEl.replaceChildren(
+        el(
+          "div",
+          "empty",
+          s.kind === "session"
+            ? "Statement executed."
+            : `${s.outcome.rows} row(s) affected.`,
+        ),
+      );
     } else {
       this.buildTable(s.outcome.columns, s.outcome.rows);
     }
@@ -619,7 +638,9 @@ export class ResultView {
         chips.push(el("span", "chip warn", `truncated at ${n}`));
       }
     } else if (s.outcome.type === "affected") {
-      chips.push(el("span", "chip", `${s.outcome.rows} affected`));
+      chips.push(
+        el("span", "chip", s.kind === "session" ? "executed" : `${s.outcome.rows} affected`),
+      );
     } else {
       chips.push(el("span", "chip err", "error"));
     }

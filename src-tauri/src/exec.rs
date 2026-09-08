@@ -44,6 +44,12 @@ pub enum StatementKind {
     /// Returns rows but must never be rewritten: SHOW / DESCRIBE / EXPLAIN.
     RowReturning,
     Modify,
+    /// Changes session or transaction state and returns nothing meaningful.
+    ///
+    /// `SET`, `USE`, `COMMIT` and friends all report "0 rows affected", which
+    /// is true and useless — it reads as a query that matched nothing rather
+    /// than as a statement for which a row count was never the point.
+    Session,
     Other,
 }
 
@@ -248,6 +254,11 @@ pub fn classify(sql: &str) -> StatementKind {
             StatementKind::RowReturning
         }
         "INSERT" | "UPDATE" | "DELETE" | "REPLACE" => StatementKind::Modify,
+        // Session and transaction control. Deliberately conservative: PREPARE
+        // and EXECUTE are left out because an executed prepared SELECT does
+        // return rows, and misclassifying that would silently discard them.
+        "SET" | "USE" | "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
+        | "LOCK" | "UNLOCK" | "FLUSH" => StatementKind::Session,
         _ => StatementKind::Other,
     }
 }
@@ -476,6 +487,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_statements_are_not_confused_with_modifications() {
+        for sql in [
+            "SET @x = 1",
+            "set autocommit = 0",
+            "USE poc",
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+            "FLUSH PRIVILEGES",
+        ] {
+            assert_eq!(classify(sql), StatementKind::Session, "{sql}");
+        }
+        // An UPDATE that matches nothing is a *result*: zero rows is the
+        // answer. That is the distinction this kind exists to preserve.
+        assert_eq!(classify("UPDATE t SET a = 1"), StatementKind::Modify);
+    }
+
+    #[test]
+    fn a_session_statement_returns_no_rows() {
+        assert!(!returns_rows(StatementKind::Session));
+    }
+
+    /// The frontend matches on this string; renaming it silently would leave
+    /// every SET reading "0 rows affected" again.
+    #[test]
+    fn session_serialises_as_the_name_the_ui_expects() {
+        let j = serde_json::to_value(StatementKind::Session).unwrap();
+        assert_eq!(j, serde_json::json!("session"));
+    }
+
+    use super::*;
+
+    #[test]
     fn classifies_row_returning_statements_separately_from_select() {
         assert_eq!(classify("SELECT 1"), StatementKind::Select);
         assert_eq!(classify("  select 1"), StatementKind::Select);
@@ -492,7 +537,9 @@ mod tests {
         assert_eq!(classify("EXPLAIN SELECT 1"), StatementKind::RowReturning);
         assert_eq!(classify("INSERT INTO t VALUES (1)"), StatementKind::Modify);
         assert_eq!(classify("CREATE TABLE t (a INT)"), StatementKind::Other);
-        assert_eq!(classify("USE mydb"), StatementKind::Other);
+        // USE moved to Session deliberately: see
+        // `session_statements_are_not_confused_with_modifications`.
+        assert_eq!(classify("USE mydb"), StatementKind::Session);
     }
 
     #[test]

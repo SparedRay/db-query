@@ -236,6 +236,49 @@ the `<dialog>` at all — simpler, and it cannot depend on how one engine treats
 flex on a dialog. Kept regardless of whether it turns out to be the cause: the
 construct bought nothing that a `max-height` on the body does not.
 
+### Panels, and SET is not a result — 2026-09-08
+
+#### Panels
+
+The rail+sidebar, the editor and the results are now bordered, rounded surfaces
+on a recessed canvas (`--bg-app`, new token, one value per theme) rather than
+regions of one flat screen — the same move the settings fieldsets make.
+
+- `overflow: hidden` on each panel is what keeps a sticky table header or a long
+  tree from painting over a rounded corner.
+- **The splitters are now invisible until aimed at.** They used to be drawn in
+  `--border`, which put a seam back between surfaces that are now separated by
+  space; they keep their hover and drag colours.
+- The rail and the sidebar share one panel — one seam between them, not two.
+
+#### `SET` reported "0 rows affected", which is true and useless
+
+> *"Using a SET seems to be returning a resultset, which we could skip — that's
+> not really a result is it?"*
+
+Right, and the fix is to stop calling it one rather than to hide it. `SET`,
+`USE`, `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `LOCK`, `UNLOCK`
+and `FLUSH` are now a distinct `StatementKind::Session`, and the UI reports
+**"Statement executed."** with an `executed` chip.
+
+- **The count still matters for an UPDATE.** An `UPDATE` that matched nothing
+  reports zero, because there zero *is* the answer. That distinction is the
+  whole reason this is a classification and not a check for `rows == 0`.
+- **The statement is still shown, not skipped.** Hiding it would mean a script
+  of nothing but `SET` appeared to do nothing at all, and would hide its errors
+  and its timing.
+- **What changed instead is which tab opens.** `initialIndex` now picks the last
+  statement that returned *rows*, falling back to the last statement; a failure
+  still wins outright. A script ending in `COMMIT;` used to open on the commit
+  and hide the query above it.
+- `PREPARE` / `EXECUTE` were deliberately left out: an executed prepared
+  `SELECT` does return rows, and misclassifying it would silently discard them.
+
+An existing test pinned `USE` as `Other`. That expectation was the old
+behaviour, so it was updated rather than worked around — and a test now asserts
+the serialised name `"session"`, because the frontend matches on that string and
+renaming it silently would put every `SET` back to "0 rows affected".
+
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
 - [ ] Re-run the audit on the Windows tree — the ~24 `windows-*` crates Stage 5 §2 could not read
