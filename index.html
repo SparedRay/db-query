@@ -10,7 +10,7 @@
     <div id="app">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
-        <button id="btn-theme" class="rail-theme" type="button"></button>
+        <button id="btn-settings" class="rail-cog" type="button" title="Settings">⚙</button>
       </div>
 
       <aside id="sidebar">
@@ -64,6 +64,55 @@
         </section>
       </main>
     </div>
+
+    <dialog id="settings-dialog">
+      <h2>Settings</h2>
+
+      <div class="settings-body">
+      <fieldset>
+        <legend>Appearance</legend>
+        <label>Theme
+          <select id="set-theme">
+            <option value="system">Follow the system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label>Code font
+          <select id="set-font"></select>
+        </label>
+        <label>Code size
+          <input type="number" id="set-font-size" min="9" max="22" step="1" />
+        </label>
+        <p class="hint">Applies to the editor and the results grid.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Updates</legend>
+        <p class="hint" id="set-version">Checking…</p>
+        <button type="button" id="set-check-update" class="mini">Check for updates</button>
+        <p class="hint" id="set-update-note" hidden></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Defaults for new sessions</legend>
+        <label class="toggle"><input type="checkbox" id="set-autolimit" /> Auto-LIMIT</label>
+        <label class="toggle"><input type="checkbox" id="set-lint" /> Lint</label>
+        <label>Query timeout (seconds, 0 = off)
+          <input type="number" id="set-timeout" min="0" max="3600" step="1" />
+        </label>
+        <label>Rows for “Select first N rows”
+          <input type="number" id="set-browse" min="1" max="1000000" step="100" />
+        </label>
+        <p class="hint">Applied at startup; the controls above the editor still win for this session.</p>
+      </fieldset>
+
+      </div>
+
+      <menu>
+        <button type="button" id="set-close" class="primary">Close</button>
+      </menu>
+    </dialog>
 
     <dialog id="export-dialog">
       <form method="dialog" id="export-form">

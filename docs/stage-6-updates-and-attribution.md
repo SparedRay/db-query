@@ -146,6 +146,58 @@ Asserting the state a feature sets, rather than the effect a user sees, is the
 same mistake the clipboard tests made in Stage 4 — six green tests while copying
 destroyed the results.
 
+### Phase 6 — Settings, and a mislabelled button — 2026-09-08
+
+- [x] **A settings dialog behind a cog** at the foot of the rail: theme, code
+  font and size, session defaults (Auto-LIMIT, Lint, timeout, browse limit),
+  and the running version with a manual **Check for updates**.
+- [x] **The connect button says Disconnect** when a connection is live.
+
+#### The button was already right; only its label was wrong
+
+`#btn-connect` has disconnected the active connection since Stage 2 — the
+handler branches on `active?.connected`. Nothing was broken except the word on
+it, which is the worse half: a control that does the opposite of what it says
+is more dangerous than one that is missing.
+
+#### Decisions
+
+- **Everything applies immediately.** A settings dialog with an OK button makes
+  you guess what a font looks like before you are allowed to see it.
+- **Updates sits second**, above the longer "defaults" block, because it is the
+  section people open settings to find and the dialog scrolls at 720px.
+- **The manual check is the counterpart to the silent boot check.** Being
+  offline at launch left no way to ask again; now there is one, and finding an
+  update from here closes settings rather than stacking two modals.
+- **Font choices are stacks, not families**, each ending in the system default,
+  so an uninstalled font degrades instead of disappearing.
+- **Out-of-range stored values reset rather than clamp.** These numbers can only
+  come from our own controls or from corruption, and a font size of 900 pinned
+  to 22 is a size nobody chose. Every field is validated individually —
+  `{...DEFAULTS, ...parsed}` would trust whatever is in storage, and one bad
+  value could lock someone out of the UI that would fix it.
+
+#### Three bugs the tests found, two of them pre-existing
+
+1. **A closed `<dialog>` stayed painted and swallowed clicks.** `display: flex`
+   on the dialog **beats the UA sheet's `dialog:not([open]) { display: none }`**,
+   so the settings dialog never really went away. Scoped to `[open]`. The value
+   viewer had the same declaration and got the same fix — it was invisible there
+   only because that dialog removes itself from the DOM. **This is the third
+   time an author `display` rule has silently beaten a UA one in this project**;
+   the first cost a whole stage (`[hidden]`, Stage 2).
+2. **The editor font size could not be changed**, because `styles.css` already
+   carried `#editor .cm-scroller { font-size: 13px }`. The new token rule sat
+   directly above it and lost.
+3. **My audit missed it** — the grep that was supposed to find every font and
+   colour rule ended in `| head`, and the offending line was the eleventh
+   result. The colour audit was re-run without truncation: **zero literals
+   outside `:root`**.
+
+Fonts are now set in the stylesheet rather than in the CodeMirror theme, where a
+plain rule beats the generated theme class and what is written is what is
+painted.
+
 ### Phase 3 — Attribution
 - [ ] `cargo about` config; `THIRD-PARTY-LICENSES` generated **per target** in CI
 - [ ] Re-run the audit on the Windows tree — the ~24 `windows-*` crates Stage 5 §2 could not read

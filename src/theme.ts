@@ -9,25 +9,6 @@ export type ThemePref = "system" | "light" | "dark";
 
 const KEY = "db-query.theme";
 
-/** Cycle order for the toggle: what the button does next. */
-const NEXT: Record<ThemePref, ThemePref> = {
-  system: "light",
-  light: "dark",
-  dark: "system",
-};
-
-const LABEL: Record<ThemePref, string> = {
-  system: "Theme: follow system",
-  light: "Theme: light",
-  dark: "Theme: dark",
-};
-
-const ICON: Record<ThemePref, string> = {
-  system: "◐", // half-filled circle
-  light: "☀", // sun
-  dark: "☽", // moon
-};
-
 /**
  * The stored preference.
  *
@@ -55,10 +36,10 @@ export function resolvesDark(pref: ThemePref): boolean {
 }
 
 export interface Theme {
-  /** Apply the stored preference. Safe to call more than once. */
+  /** Apply the current preference. Safe to call more than once. */
   apply: () => void;
-  /** Advance system -> light -> dark -> system, persist, and apply. */
-  cycle: () => void;
+  /** Choose explicitly, persist, and apply. */
+  set: (pref: ThemePref) => void;
   current: () => ThemePref;
 }
 
@@ -66,24 +47,21 @@ export interface Theme {
  * @param onChange told whether the *resolved* theme is dark, for anything that
  * cannot follow CSS variables on its own — the editor, in practice.
  */
-export function createTheme(button: HTMLButtonElement, onChange: (dark: boolean) => void): Theme {
+export function createTheme(onChange: (dark: boolean) => void): Theme {
   let pref = preference();
 
   const apply = () => {
     const dark = resolvesDark(pref);
     document.documentElement.dataset.theme = dark ? "dark" : "light";
-    button.textContent = ICON[pref];
-    button.title = `${LABEL[pref]} — click to change`;
-    button.setAttribute("aria-label", LABEL[pref]);
-    // Exposed for tests and for anyone reading the DOM: the *preference* is not
-    // recoverable from `data-theme` alone, since "system" resolves to one of
-    // the other two.
-    button.dataset.pref = pref;
+    // The *preference* is not recoverable from `data-theme` alone, since
+    // "system" resolves to one of the other two. Exposed for tests and for
+    // anyone reading the DOM.
+    document.documentElement.dataset.themePref = pref;
     onChange(dark);
   };
 
-  const cycle = () => {
-    pref = NEXT[pref];
+  const set = (next: ThemePref) => {
+    pref = next;
     try {
       localStorage.setItem(KEY, pref);
     } catch {
@@ -93,12 +71,10 @@ export function createTheme(button: HTMLButtonElement, onChange: (dark: boolean)
     apply();
   };
 
-  button.onclick = cycle;
-
   // Following the system means following it as it changes, not only at boot.
   window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (pref === "system") apply();
   });
 
-  return { apply, cycle, current: () => pref };
+  return { apply, set, current: () => pref };
 }

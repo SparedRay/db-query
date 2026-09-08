@@ -19,13 +19,20 @@ async function boot(page: Page, scheme: "dark" | "light" = "dark") {
   await page.emulateMedia({ colorScheme: scheme });
   await installBackend(page, schemaBackend);
   await page.goto("/");
-  await expect(page.locator("#btn-theme")).toBeVisible();
+  await expect(page.locator("#btn-settings")).toBeVisible();
+}
+
+/** The theme now lives in Settings, so choosing one means opening it. */
+async function chooseTheme(page: Page, value: "system" | "light" | "dark") {
+  await page.click("#btn-settings");
+  await page.selectOption("#set-theme", value);
+  await page.click("#set-close");
 }
 
 test("follows the system by default, in both directions", async ({ page }) => {
   await boot(page, "light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(page.locator("#btn-theme")).toHaveAttribute("data-pref", "system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-pref", "system");
 
   await page.emulateMedia({ colorScheme: "dark" });
   await page.reload();
@@ -40,32 +47,33 @@ test("a system change is picked up without a reload", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
-test("the button cycles system, light, dark and back", async ({ page }) => {
+test("each theme can be chosen explicitly", async ({ page }) => {
   await boot(page, "dark");
-  const btn = page.locator("#btn-theme");
-  await expect(btn).toHaveAttribute("data-pref", "system");
+  const html = page.locator("html");
+  await expect(html).toHaveAttribute("data-theme-pref", "system");
 
-  await btn.click();
-  await expect(btn).toHaveAttribute("data-pref", "light");
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await chooseTheme(page, "light");
+  await expect(html).toHaveAttribute("data-theme", "light");
+  await expect(html).toHaveAttribute("data-theme-pref", "light");
 
-  await btn.click();
-  await expect(btn).toHaveAttribute("data-pref", "dark");
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await chooseTheme(page, "dark");
+  await expect(html).toHaveAttribute("data-theme", "dark");
 
-  await btn.click();
-  await expect(btn).toHaveAttribute("data-pref", "system");
+  // Back to following the system, which here is dark.
+  await chooseTheme(page, "system");
+  await expect(html).toHaveAttribute("data-theme-pref", "system");
+  await expect(html).toHaveAttribute("data-theme", "dark");
 });
 
 /** An explicit choice must beat the system, or it is not a choice. */
 test("an explicit choice overrides the system and survives a reload", async ({ page }) => {
   await boot(page, "dark");
-  await page.locator("#btn-theme").click(); // -> light, against a dark system
+  await chooseTheme(page, "light"); // against a dark system
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(page.locator("#btn-theme")).toHaveAttribute("data-pref", "light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-pref", "light");
 });
 
 /**
@@ -78,7 +86,7 @@ test("the painted colours actually change, editor included", async ({ page }) =>
   const darkBody = await bg(page);
   const darkEditor = await editorBg(page);
 
-  await page.locator("#btn-theme").click(); // light
+  await chooseTheme(page, "light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   const lightBody = await bg(page);
   const lightEditor = await editorBg(page);
@@ -93,10 +101,10 @@ test("the painted colours actually change, editor included", async ({ page }) =>
 });
 
 /** The rail is rebuilt on every connection change; the button must survive. */
-test("the theme button survives the rail being rebuilt", async ({ page }) => {
+test("the settings cog survives the rail being rebuilt", async ({ page }) => {
   await boot(page, "dark");
   await page.click("#btn-connect");
   await page.click("#conn-ok");
   await expect(page.locator(".rail-item")).toHaveCount(1);
-  await expect(page.locator("#btn-theme")).toBeVisible();
+  await expect(page.locator("#btn-settings")).toBeVisible();
 });

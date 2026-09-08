@@ -17,7 +17,8 @@ import {
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose } from "./dialog";
-import { createTheme } from "./theme";
+import { createTheme, type ThemePref } from "./theme";
+import { FONTS, applyAppearance, load as loadSettings, save as saveSettings } from "./settings";
 import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
@@ -56,7 +57,19 @@ const els = {
   btnCopyNoHead: $<HTMLButtonElement>("btn-copy-nohead"),
   btnExport: $<HTMLButtonElement>("btn-export"),
   btnUpdate: $<HTMLButtonElement>("btn-update"),
-  btnTheme: $<HTMLButtonElement>("btn-theme"),
+  btnSettings: $<HTMLButtonElement>("btn-settings"),
+  settingsDialog: $<HTMLDialogElement>("settings-dialog"),
+  setTheme: $<HTMLSelectElement>("set-theme"),
+  setFont: $<HTMLSelectElement>("set-font"),
+  setFontSize: $<HTMLInputElement>("set-font-size"),
+  setAutoLimit: $<HTMLInputElement>("set-autolimit"),
+  setLint: $<HTMLInputElement>("set-lint"),
+  setTimeout: $<HTMLInputElement>("set-timeout"),
+  setBrowse: $<HTMLInputElement>("set-browse"),
+  setVersion: $<HTMLElement>("set-version"),
+  setCheckUpdate: $<HTMLButtonElement>("set-check-update"),
+  setUpdateNote: $<HTMLElement>("set-update-note"),
+  setClose: $<HTMLButtonElement>("set-close"),
   exportDialog: $<HTMLDialogElement>("export-dialog"),
   exportForm: $<HTMLFormElement>("export-form"),
   exportFormat: $<HTMLSelectElement>("export-format"),
@@ -262,6 +275,16 @@ function syncBusy() {
  */
 function syncConnLabel() {
   const active = conns?.active();
+  // The button has always disconnected when there was something to disconnect;
+  // it just never said so. A control that does the opposite of its label is
+  // worse than one that is missing.
+  const isLive = !!active?.connected;
+  els.btnConnect.textContent = isLive ? "Disconnect" : "Connect";
+  els.btnConnect.title = isLive
+    ? `Disconnect from ${active.profile.name}`
+    : "Open a connection";
+  els.btnConnect.classList.toggle("danger", isLive);
+
   if (!active) {
     els.connLabel.textContent = "No connection";
     els.connLabel.title = "";
@@ -1353,8 +1376,109 @@ void api.appDefaults().then((d) => {
 // Theme before anything else is drawn, so there is no flash of the wrong one.
 // CodeMirror is told separately: its `dark` facet is not a CSS variable and
 // decides how lint tooltips are drawn.
-const theme = createTheme(els.btnTheme, (dark) => setEditorTheme(view, dark));
-theme.apply();
+const theme = createTheme((dark) => setEditorTheme(view, dark));
+
+// --- settings ---------------------------------------------------------------
+
+const settings = loadSettings();
+
+/**
+ * Apply everything at boot: appearance through CSS, and the session defaults
+ * into the controls that own them. `browseLimit` is the one exception — the
+ * backend still supplies the number, and this only overrides it.
+ */
+function applySettings() {
+  applyAppearance(settings);
+  theme.set(settings.theme);
+  els.autoLimit.checked = settings.autoLimit;
+  els.lintOn.checked = settings.lint;
+  els.timeout.value = String(settings.timeoutSecs);
+  browseLimit = settings.browseLimit;
+  // Via the existing helper, which owns the debounce bucket — reconfiguring
+  // the linter behind its back would leave `appliedLintDelay` lying.
+  applyLintSetting(true);
+}
+
+for (const f of FONTS) {
+  els.setFont.append(new Option(f.label, f.stack));
+}
+
+function openSettings() {
+  els.setTheme.value = theme.current();
+  els.setFont.value = settings.fontFamily;
+  els.setFontSize.value = String(settings.fontSize);
+  els.setAutoLimit.checked = settings.autoLimit;
+  els.setLint.checked = settings.lint;
+  els.setTimeout.value = String(settings.timeoutSecs);
+  els.setBrowse.value = String(settings.browseLimit);
+  els.setUpdateNote.hidden = true;
+  els.settingsDialog.showModal();
+  void showVersion();
+}
+
+/** Every change takes effect immediately — a settings dialog with an OK button
+ *  makes you guess what a font looks like before you can see it. */
+function commit() {
+  settings.fontFamily = els.setFont.value;
+  settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
+  settings.autoLimit = els.setAutoLimit.checked;
+  settings.lint = els.setLint.checked;
+  settings.timeoutSecs = Math.max(0, Number(els.setTimeout.value) || 0);
+  settings.browseLimit = Math.max(1, Number(els.setBrowse.value) || 1);
+  settings.theme = els.setTheme.value as ThemePref;
+  saveSettings(settings);
+  applySettings();
+}
+
+for (const el of [
+  els.setFont, els.setFontSize, els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
+]) {
+  el.onchange = commit;
+}
+els.setTheme.onchange = commit;
+els.btnSettings.onclick = () => openSettings();
+els.setClose.onclick = () => els.settingsDialog.close();
+
+/** The running version, which every check reports whatever else it finds. */
+async function showVersion() {
+  try {
+    const s = await api.updateCheck();
+    els.setVersion.textContent =
+      s.type === "unsupported"
+        ? `Version unknown \u2014 ${s.reason}`
+        : `Running version ${s.current}.`;
+  } catch {
+    els.setVersion.textContent = "Version unavailable.";
+  }
+}
+
+/**
+ * The manual check. The boot check is silent by design, which leaves no way to
+ * ask again after being offline — this is that way.
+ */
+els.setCheckUpdate.onclick = async () => {
+  els.setCheckUpdate.disabled = true;
+  els.setUpdateNote.hidden = false;
+  els.setUpdateNote.textContent = "Checking\u2026";
+  try {
+    const s = await api.updateCheck();
+    if (s.type === "available") {
+      els.setUpdateNote.textContent = `Version ${s.version} is available.`;
+      els.settingsDialog.close();
+      await offerUpdate(s);
+    } else if (s.type === "unsupported") {
+      els.setUpdateNote.textContent = s.reason;
+    } else {
+      els.setUpdateNote.textContent = `You are on the latest version (${s.current}).`;
+    }
+  } catch (err) {
+    els.setUpdateNote.textContent = String(err);
+  } finally {
+    els.setCheckUpdate.disabled = false;
+  }
+};
+
+applySettings();
 
 // Saved connections appear in the rail immediately, disconnected. Nothing is
 // contacted until the user clicks one.

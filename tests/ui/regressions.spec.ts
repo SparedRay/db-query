@@ -501,3 +501,25 @@ test("a result too big for the window scrolls, and stays on screen", async ({ pa
   expect(m.docScrollH).toBeLessThanOrEqual(m.vh + 1);
   expect(m.gridScrollable).toBe(true);
 });
+
+/**
+ * The button has always disconnected when there was something to disconnect —
+ * it just never said so. A control whose label states the opposite of what it
+ * does is worse than one that is missing.
+ */
+test("the connect button says Disconnect while a connection is live", async ({ page }) => {
+  await installBackend(page, { ...schemaBackend });
+  await page.goto("/");
+  await expect(page.locator("#btn-connect")).toHaveText("Connect");
+
+  await page.click("#btn-connect");
+  await page.click("#conn-ok");
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await expect(page.locator("#btn-connect")).toHaveText("Disconnect");
+  await expect(page.locator("#btn-connect")).toHaveClass(/danger/);
+
+  await page.click("#btn-connect");
+  await expect(page.locator(".rail-item.live")).toHaveCount(0);
+  await expect(page.locator("#btn-connect")).toHaveText("Connect");
+  await expect(page.locator("#btn-connect")).not.toHaveClass(/danger/);
+});
