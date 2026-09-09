@@ -163,9 +163,12 @@ answer was asked for and this may not have been.
 - [x] External tabs are marked, and the mark survives a session restore
 - [x] `tests/ui/mcp.spec.ts`: 9 tests, both engines
 
-### Phase 3 — Settings and discoverability
-- [ ] Settings → *Integrations*: switch, port, token (copy / regenerate)
-- [ ] The exact client config snippet, copyable, with the URL and token in it
+### Phase 3 — Settings and discoverability ✅ 2026-09-09
+- [x] Settings → *Integrations*: switch, port, token (show / copy / regenerate)
+- [x] The exact client config snippet, copyable, with the URL and token in it —
+      both forms, checked against Claude Code's own documentation
+- [x] 10 more tests in `tests/ui/mcp.spec.ts`, and one more socket test for the
+      property regeneration actually has to have
 
 ### Phase 4 — Proving it
 - [x] Unit tests: tool list, auth, origin (11, in `mcp.rs`)
@@ -332,3 +335,54 @@ one you opened.
 test. Both were checked rather than assumed.
 
 Still unreachable by a user: nothing starts the server. That is Phase 3.
+
+---
+
+## 11. What Phase 3 built
+
+Settings → **Integrations**. A switch, a port, the token, and the two snippets
+that connect a client — which is what turns three phases of plumbing into a
+feature someone can use.
+
+**The switch is driven by the backend, never by the checkbox.** Every attempt
+repaints from the `McpStatus` that came back, so a port that will not bind
+leaves the box *unticked* and says why. A switch reading "on" while nothing is
+listening is worse than no switch, and it is the failure this arrangement is
+shaped around. `a_port_that_will_not_bind_leaves_the_switch_off` is the test;
+writing it also caught that Playwright's `check()` is the wrong tool for it,
+since `check()` asserts the box ends up ticked.
+
+**The token is minted when the server starts, not when the pane opens.**
+Creating a credential because somebody looked at a settings tab is a surprise
+nobody asked for, so the whole token block is hidden until something is
+listening. Masked by default, with *Show*.
+
+**Regenerating restarts the listener, in Rust.** `start` reads the token once
+and holds it for the listener's life, so minting a new one without a restart
+would leave the *old* token in force while Settings displayed the new one — a
+security control that reports success and changes nothing. It is a correctness
+property rather than a UI nicety, so it lives in `mcp_regenerate_token` rather
+than in the click handler, and
+`a_restart_with_a_new_token_stops_accepting_the_old_one` drives a real socket
+to prove it. Confirmed red by dropping the restart.
+
+**The snippets were verified, not remembered.** Fetched from Claude Code's own
+documentation: `--transport http` on the command line, `"type": "http"` in JSON,
+the token as an ordinary `Authorization` header. A test parses the rendered JSON
+and compares the object rather than matching a substring, so a change in shape
+fails rather than a change in whitespace.
+
+**The default port comes from Rust**, through `app_defaults`, joining
+`browseLimit` and `maxRows`. The stored preference is a `0` sentinel meaning
+"ask", so the number Settings shows and the number `mcp.rs` binds cannot drift.
+A stored port outside 1024–65535 falls back to the sentinel and self-heals.
+
+**A fresh install starts nothing**, and the server only comes back at boot if it
+was explicitly left on — both asserted.
+
+**A failure at boot is not the same as a failure you watched.** Turning the
+switch on and seeing it fail records "off": you saw it, and next launch should
+not surprise you. A *boot* that cannot bind reports it in the results pane and
+**keeps the preference**, because a port that happens to be busy this morning
+must not quietly turn a feature off forever. One flag, two behaviours, and a
+test for each.

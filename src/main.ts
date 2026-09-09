@@ -5,7 +5,9 @@ import {
   api,
   defaultCsvOptions,
   MCP_PUT_QUERY_EVENT,
+  type AppDefaults,
   type McpPutQuery,
+  type McpStatus,
   type ConnProfile,
   type TableRef,
   type RoutineRef,
@@ -106,6 +108,18 @@ const els = {
   setLint: $<HTMLInputElement>("set-lint"),
   setTimeout: $<HTMLInputElement>("set-timeout"),
   setBrowse: $<HTMLInputElement>("set-browse"),
+  setMcpOn: $<HTMLInputElement>("set-mcp-on"),
+  setMcpPort: $<HTMLInputElement>("set-mcp-port"),
+  setMcpStatus: $<HTMLElement>("set-mcp-status"),
+  setMcpLive: $<HTMLElement>("set-mcp-live"),
+  setMcpToken: $<HTMLInputElement>("set-mcp-token"),
+  setMcpReveal: $<HTMLButtonElement>("set-mcp-reveal"),
+  setMcpCopy: $<HTMLButtonElement>("set-mcp-copy"),
+  setMcpRegen: $<HTMLButtonElement>("set-mcp-regen"),
+  setMcpCli: $<HTMLElement>("set-mcp-cli"),
+  setMcpJson: $<HTMLElement>("set-mcp-json"),
+  setMcpCopyCli: $<HTMLButtonElement>("set-mcp-copy-cli"),
+  setMcpCopyJson: $<HTMLButtonElement>("set-mcp-copy-json"),
   setVersion: $<HTMLElement>("set-version"),
   setCheckUpdate: $<HTMLButtonElement>("set-check-update"),
   setUpdateNote: $<HTMLElement>("set-update-note"),
@@ -1716,10 +1730,16 @@ void session.boot().then((warning) => {
   if (warning) results.setMessage(warning);
 });
 
-// One source of truth for the row numbers: the backend owns them, and the UI
-// asks rather than repeating them.
-void api.appDefaults().then((d) => {
+// One source of truth for the numbers the backend owns, so the UI asks rather
+// than repeating them.
+let appDefaults: AppDefaults = { browseLimit: 1000, maxRows: 0, mcpPort: 0 };
+void api.appDefaults().then(async (d) => {
+  appDefaults = d;
   browseLimit = d.browseLimit;
+  // Start the MCP server if it was left on. **After** the defaults arrive,
+  // because that is where the port comes from when the user never chose one —
+  // and only then, so a fresh install listens on nothing.
+  if (settings.mcpEnabled) await applyMcp(true, "boot");
 });
 
 // Theme before anything else is drawn, so there is no flash of the wrong one.
@@ -1809,6 +1829,147 @@ els.settingsNav.addEventListener("keydown", (e) => {
   settingsTabs[to].focus();
 });
 
+/**
+ * The MCP server's half of Settings.
+ *
+ * Everything here is driven by the **backend's** notion of whether it is
+ * running, never by the checkbox. A switch that says "on" while nothing is
+ * listening — because the port was taken — is worse than no switch, so the
+ * checkbox is corrected from the status after every attempt.
+ */
+let mcpToken: string | null = null;
+
+/** The port to bind: what the user chose, or Rust's default. */
+function mcpPort(): number {
+  return settings.mcpPort || appDefaults.mcpPort;
+}
+
+function mcpConfigSnippets(url: string, token: string) {
+  // Verified against Claude Code's own documentation rather than remembered:
+  // `--transport http` on the command line, `"type": "http"` in JSON, and the
+  // token as an ordinary Authorization header.
+  els.setMcpCli.textContent =
+    `claude mcp add --transport http db-query ${url} \\\n` +
+    `  --header "Authorization: Bearer ${token}"`;
+  els.setMcpJson.textContent = JSON.stringify(
+    {
+      mcpServers: {
+        "db-query": {
+          type: "http",
+          url,
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/** Paint the pane from a status the backend just gave us. */
+async function showMcp(status: McpStatus, error?: string) {
+  els.setMcpOn.checked = status.running;
+  els.setMcpLive.hidden = !status.running;
+
+  if (error) {
+    els.setMcpStatus.textContent = error;
+    mcpToken = null;
+    return;
+  }
+  if (!status.running || !status.url) {
+    els.setMcpStatus.textContent = "Off. Nothing is listening.";
+    mcpToken = null;
+    return;
+  }
+
+  els.setMcpStatus.textContent = `Listening on ${status.url}`;
+  els.setMcpPort.value = String(status.port ?? mcpPort());
+  try {
+    // Read only once it is running: minting a credential because somebody
+    // opened a settings pane is a surprise nobody asked for.
+    mcpToken = await api.mcpToken();
+  } catch (err) {
+    mcpToken = null;
+    els.setMcpStatus.textContent = `Listening, but the token could not be read: ${String(err)}`;
+    return;
+  }
+  els.setMcpToken.value = mcpToken;
+  mcpConfigSnippets(status.url, mcpToken);
+}
+
+/**
+ * Start or stop, then repaint from whatever actually happened.
+ *
+ * `intent` separates two cases that want opposite handling of the stored
+ * preference. A **toggle** is the user saying what they want, so a failure they
+ * just watched should leave the switch off for next time. A **boot** attempt is
+ * acting on a decision made earlier, and a port that happens to be busy this
+ * morning must not quietly turn the feature off forever — it retries next
+ * launch, and says so now rather than failing in silence.
+ */
+async function applyMcp(on: boolean, intent: "toggle" | "boot" = "toggle") {
+  try {
+    const status = on ? await api.mcpStart(mcpPort()) : await api.mcpStop();
+    settings.mcpEnabled = status.running;
+    saveSettings(settings);
+    await showMcp(status);
+    // The server reports the connection on screen, and it has been off until
+    // now, so it does not know one yet.
+    if (status.running) setMcpFocus(conns.active()?.profile.id ?? null);
+  } catch (err) {
+    if (intent === "toggle") {
+      settings.mcpEnabled = false;
+      saveSettings(settings);
+    } else {
+      results.setMessage(`The MCP server did not start: ${String(err)}`);
+    }
+    await showMcp({ running: false, port: null, url: null }, String(err));
+  }
+}
+
+els.setMcpOn.onchange = () => void applyMcp(els.setMcpOn.checked);
+els.setMcpPort.onchange = () => {
+  const n = Number(els.setMcpPort.value);
+  settings.mcpPort = n >= 1024 && n <= 65535 ? Math.round(n) : 0;
+  saveSettings(settings);
+  // Only rebind if it is already listening — changing the port while off is a
+  // preference, not an action.
+  if (els.setMcpOn.checked) void applyMcp(true);
+};
+
+els.setMcpReveal.onclick = () => {
+  const hidden = els.setMcpToken.type === "password";
+  els.setMcpToken.type = hidden ? "text" : "password";
+  els.setMcpReveal.textContent = hidden ? "Hide" : "Show";
+};
+els.setMcpCopy.onclick = () => {
+  if (mcpToken) void copyText(mcpToken);
+};
+els.setMcpCopyCli.onclick = () => void copyText(els.setMcpCli.textContent ?? "");
+els.setMcpCopyJson.onclick = () => void copyText(els.setMcpJson.textContent ?? "");
+
+els.setMcpRegen.onclick = async () => {
+  const yes = await choose(
+    "Regenerate the access token?",
+    "Every client already configured with the current token stops working " +
+      "until you give it the new one. This cannot be undone.",
+    [
+      { value: "no", label: "Cancel" },
+      { value: "yes", label: "Regenerate", primary: true },
+    ],
+  );
+  if (yes !== "yes") return;
+  try {
+    // Rust mints it and restarts the listener, so the token on screen is the
+    // one being checked rather than merely the newest one stored.
+    await api.mcpRegenerateToken();
+    await showMcp(await api.mcpStatus());
+    els.setMcpStatus.textContent += " — new token issued.";
+  } catch (err) {
+    els.setMcpStatus.textContent = `Could not regenerate the token: ${String(err)}`;
+  }
+};
+
 function openSettings() {
   els.setTheme.value = theme.current();
   els.setFont.value = settings.fontFamily;
@@ -1817,7 +1978,11 @@ function openSettings() {
   els.setLint.checked = settings.lint;
   els.setTimeout.value = String(settings.timeoutSecs);
   els.setBrowse.value = String(settings.browseLimit);
+  els.setMcpPort.value = String(mcpPort());
   els.setUpdateNote.hidden = true;
+  // Ask the backend rather than trusting the stored preference: the server can
+  // have failed to start, or been stopped, since this was last opened.
+  void api.mcpStatus().then((st) => void showMcp(st)).catch(() => {});
   showSettingsSection(settingsSection);
   els.settingsDialog.showModal();
   void showVersion();

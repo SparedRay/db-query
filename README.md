@@ -150,6 +150,23 @@ someone has fetched it.
 `mise run set-version X.Y.Z` writes all three files and neither commits nor
 tags. For bringing a tree back in line with a release CI stamped on its own.
 
+## Letting other tools in
+
+An **MCP server**, off by default, in *Settings → Integrations*. Turn it on and
+another tool — Claude Code, Claude Desktop, any MCP client — can read the schema
+of the connection you have open and drop a query into your editor.
+
+**It cannot run one.** There is no execute tool, no way to read rows, and a test
+asserts the advertised tool list is exactly `list_databases`, `list_tables`,
+`describe_table` and `put_query`. A query that arrives opens in a new tab,
+marked as external, and waits for you.
+
+It listens on `127.0.0.1` only, validates `Origin`, and needs a bearer token
+that lives in your system keychain. Settings shows the exact command or JSON to
+paste into a client. See
+[the Stage 13 tracker](docs/stage-13-mcp-server.md) for the design and the
+reasoning.
+
 ## Targets
 
 MySQL **8.0+**, and **Elasticsearch SQL** (`POST /_sql`) — read-only, since that

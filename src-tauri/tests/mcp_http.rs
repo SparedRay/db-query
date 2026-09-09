@@ -287,3 +287,43 @@ async fn restarting_releases_the_previous_port() {
 
     mcp::stop(&state).await;
 }
+
+/// Regenerating a token has to change **what the door accepts**, not just what
+/// Settings displays.
+///
+/// `start` reads the token once and holds it for the listener's life, so the
+/// restart in `mcp_regenerate_token` is load-bearing: without it the old token
+/// would still work while the new one was on screen — a security control that
+/// reports success and changes nothing. Confirmed to go red by dropping the
+/// restart.
+#[tokio::test]
+async fn a_restart_with_a_new_token_stops_accepting_the_old_one() {
+    let (app, state, _url, old) = serve().await;
+
+    mcp::start_with_token(&app.handle().clone(), &state, 0, "the-new-token".into())
+        .await
+        .expect("restart with a fresh token");
+    let url = state.status().await.url.expect("running");
+
+    let refused = client()
+        .post(&url)
+        .header("authorization", format!("Bearer {old}"))
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 401, "the old token still works");
+
+    let accepted = client()
+        .post(&url)
+        .header("authorization", "Bearer the-new-token")
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), 200, "the new token was not accepted");
+
+    mcp::stop(&state).await;
+}

@@ -96,6 +96,8 @@
                   aria-controls="set-pane-editor">Editor</button>
           <button type="button" role="tab" id="set-tab-assistant"
                   aria-controls="set-pane-assistant">Assistant</button>
+          <button type="button" role="tab" id="set-tab-integrations"
+                  aria-controls="set-pane-integrations">Integrations</button>
           <button type="button" role="tab" id="set-tab-updates"
                   aria-controls="set-pane-updates">Updates</button>
           <button type="button" role="tab" id="set-tab-about"
@@ -160,6 +162,51 @@
               provider, never in a config file. The assistant writes SQL for you to
               review and run — it cannot execute anything itself. Your schema's
               table and column names are sent with each question; row data never is.</p>
+          </section>
+
+          <section class="pane" id="set-pane-integrations" role="tabpanel"
+                   aria-labelledby="set-tab-integrations" hidden>
+            <h3>MCP server</h3>
+            <p class="hint">Lets another tool — Claude Code, Claude Desktop, any
+              MCP client — read the schema of the connection you have open and
+              put a query in your editor. It <strong>cannot run one</strong>:
+              there is no execute tool and no way to read rows.</p>
+            <label class="toggle">
+              <input type="checkbox" id="set-mcp-on" /> Allow MCP clients to connect
+            </label>
+            <label>Port
+              <input type="number" id="set-mcp-port" min="1024" max="65535" step="1" />
+            </label>
+            <p class="hint" id="set-mcp-status">Off.</p>
+
+            <div id="set-mcp-live" hidden>
+              <label>Access token
+                <input type="password" id="set-mcp-token" readonly autocomplete="off" spellcheck="false" />
+              </label>
+              <div class="ai-key-actions">
+                <button type="button" id="set-mcp-reveal" class="mini">Show</button>
+                <button type="button" id="set-mcp-copy" class="mini">Copy token</button>
+                <button type="button" id="set-mcp-regen" class="mini">Regenerate</button>
+              </div>
+              <p class="hint">Stored in your system keychain, never in a config
+                file. Regenerating stops every client already configured with the
+                old one.</p>
+
+              <h3>Connect a client</h3>
+              <p class="hint">For Claude Code, one command:</p>
+              <pre class="snippet" id="set-mcp-cli"></pre>
+              <button type="button" id="set-mcp-copy-cli" class="mini">Copy command</button>
+              <p class="hint">Or, in a client that takes a JSON config:</p>
+              <pre class="snippet" id="set-mcp-json"></pre>
+              <button type="button" id="set-mcp-copy-json" class="mini">Copy config</button>
+              <p class="hint">Both contain the token. Treat them like a password
+                — anything holding one can read this connection's schema.</p>
+            </div>
+
+            <p class="hint">The server listens on 127.0.0.1 only, refuses
+              requests from a web page, and is off until you turn it on. It
+              reports whichever connection is on screen, so switching connection
+              changes what a client sees.</p>
           </section>
 
           <section class="pane" id="set-pane-updates" role="tabpanel"

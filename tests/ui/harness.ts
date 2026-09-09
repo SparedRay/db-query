@@ -58,7 +58,10 @@ function tsv(args: Record<string, unknown>): string {
 /** Commands every boot needs, so a test only declares what it cares about. */
 export const baseBackend: Backend = {
   clipboard_text: (args) => tsv(args),
-  app_defaults: () => ({ browseLimit: 1000, maxRows: 5000 }),
+  app_defaults: () => ({ browseLimit: 1000, maxRows: 5000, mcpPort: 49731 }),
+  // Every boot asks, and the answer is "off" unless a test says otherwise. The
+  // server itself is proved over a real socket in src-tauri/tests/mcp_http.rs.
+  mcp_status: () => ({ running: false, port: null, url: null }),
   // Every boot checks for an update. Stubbed as "nothing new" so no other test
   // has to think about it, and overridden by the ones that do.
   update_check: () => ({ type: "upToDate", current: "0.0.0-test" }),

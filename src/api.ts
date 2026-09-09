@@ -107,6 +107,9 @@ export interface AppDefaults {
   browseLimit: number;
   /** The executor's per-statement safety ceiling. A different thing entirely. */
   maxRows: number;
+  /** Where the MCP server listens when nobody has chosen. From Rust, so the
+   *  number Settings shows is the number that gets bound. */
+  mcpPort: number;
 }
 
 /**

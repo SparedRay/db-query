@@ -683,6 +683,10 @@ struct AppDefaults {
     /// The safety ceiling the executor applies per statement. A different
     /// concept from the browse limit, shown so the UI can explain truncation.
     max_rows: u32,
+    /// Where the MCP server listens when nobody has chosen a port. Sent rather
+    /// than repeated in TypeScript, so the number in Settings and the number
+    /// `mcp.rs` binds cannot drift apart.
+    mcp_port: u16,
 }
 
 #[tauri::command]
@@ -690,6 +694,7 @@ fn app_defaults() -> AppDefaults {
     AppDefaults {
         browse_limit: sqlgen::DEFAULT_BROWSE_LIMIT,
         max_rows: exec::MAX_ROWS as u32,
+        mcp_port: mcp::DEFAULT_PORT,
     }
 }
 
@@ -1249,9 +1254,22 @@ fn mcp_token() -> Result<String, String> {
     mcp::token()
 }
 
+/// Mint a new token, **and restart the server if it is running**.
+///
+/// `start` reads the token once and holds it for the listener's life, so
+/// regenerating without a restart would leave the old token in force while
+/// Settings displayed the new one — the worst kind of security control, the
+/// sort that reports success and changes nothing.
 #[tauri::command]
-fn mcp_regenerate_token() -> Result<String, String> {
-    mcp::regenerate()
+async fn mcp_regenerate_token(
+    app: tauri::AppHandle,
+    state: State<'_, mcp::McpState>,
+) -> Result<String, String> {
+    let token = mcp::regenerate()?;
+    if let Some(port) = state.status().await.port {
+        mcp::start_with_token(&app, &state, port, token.clone()).await?;
+    }
+    Ok(token)
 }
 
 pub fn run() {
