@@ -29,6 +29,7 @@
     "targets": [
       "deb"
     ],
+    "createUpdaterArtifacts": true,
     "resources": [
       "THIRD-PARTY-LICENSES.txt"
     ],

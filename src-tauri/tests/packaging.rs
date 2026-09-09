@@ -42,6 +42,46 @@ fn the_app_version_is_read_from_package_json() {
     assert!(pkg.exists(), "{} must exist", pkg.display());
 }
 
+/// Without this, `tauri build` produces **no signatures**, so `tauri-action`
+/// has nothing to put in `latest.json` and attaches none — and every release
+/// looks complete while the updater has nothing to read.
+///
+/// That is what happened: `v0.3.5` was published with the `.deb` and the
+/// `-setup.exe` and no `latest.json` at all. The signing key was configured,
+/// the workflow asked for the manifest, and CI passed. Tauri v2 only creates
+/// updater artifacts when this is set:
+/// <https://v2.tauri.app/plugin/updater/>
+#[test]
+fn the_bundler_is_told_to_create_updater_artifacts() {
+    let cfg = config();
+    assert_eq!(
+        cfg["bundle"]["createUpdaterArtifacts"].as_bool(),
+        Some(true),
+        "bundle.createUpdaterArtifacts must be true, or the release ships without \
+         latest.json and no install can ever update itself. Nothing else fails when \
+         this is missing — not the build, not CI, not the release job."
+    );
+}
+
+/// The endpoint and the key are the other two halves. A release with a manifest
+/// nobody can verify is no better than one with no manifest.
+#[test]
+fn the_updater_is_configured_end_to_end() {
+    let cfg = config();
+    let updater = &cfg["plugins"]["updater"];
+    assert!(
+        updater["pubkey"].as_str().is_some_and(|k| !k.is_empty()),
+        "the updater needs the public key matching the private key CI signs with"
+    );
+    let endpoint = updater["endpoints"][0]
+        .as_str()
+        .expect("the updater needs an endpoint");
+    assert!(
+        endpoint.ends_with("/releases/latest/download/latest.json"),
+        "the endpoint must be the release asset the workflow attaches, got {endpoint}"
+    );
+}
+
 /// package.json is the source of truth, but a crate that disagrees with the app
 /// it builds is a trap for whoever reads it next. `set-version` moves both.
 #[test]
