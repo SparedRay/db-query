@@ -876,7 +876,20 @@ dialog.viewer .viewer-note {
 }
 #assistant-dialog menu button:disabled { opacity: .55; cursor: default; }
 
-.ai-key-actions { display: flex; gap: 6px; margin-top: 6px; }
+.ai-key-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+
+/* A config snippet, meant to be read and copied rather than edited. It scrolls
+   sideways inside itself: a token is 43 characters and the dialog is not, and a
+   wrapped credential is one someone mis-copies. */
+.snippet {
+  margin: 4px 0 8px; padding: 7px 9px; overflow-x: auto;
+  background: var(--bg-input); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px;
+  font: 11px/1.5 var(--mono); white-space: pre; user-select: text;
+}
+/* Same shape as the assistant's key field, for the same reason: it holds a
+   credential and should not look like an ordinary text input. */
+#set-mcp-token,
 #set-ai-key {
   display: block; width: 100%; margin-top: 3px; padding: 5px 7px;
   background: var(--bg-input); color: var(--fg);

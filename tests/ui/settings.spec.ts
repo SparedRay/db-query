@@ -185,17 +185,20 @@ test("a build that cannot update itself explains why, here too", async ({ page }
 // ------------------------------------------------------------------ sections
 
 /**
- * Settings are five unrelated subjects, so they are five panes rather than one
- * scrolling column. What is worth pinning is that exactly one is on screen —
- * a pane that failed to hide is the only way this arrangement can be worse
- * than the stack it replaced.
+ * Settings are several unrelated subjects, so they are several panes rather
+ * than one scrolling column. What is worth pinning is that exactly one is on
+ * screen — a pane that failed to hide is the only way this arrangement can be
+ * worse than the stack it replaced. The count is asserted against the tab
+ * strip rather than written down, so adding a section is one edit.
  */
 test("one section is shown at a time", async ({ page }) => {
   await connect(page, schemaBackend);
   await open(page);
 
   const panes = page.locator("#settings-dialog .pane");
-  await expect(panes).toHaveCount(5);
+  await expect(panes).toHaveCount(
+    await page.locator('#settings-nav [role="tab"]').count(),
+  );
   await expect(page.locator("#settings-dialog .pane:visible")).toHaveCount(1);
   await expect(page.locator("#set-pane-appearance")).toBeVisible();
 

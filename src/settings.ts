@@ -25,6 +25,13 @@ export interface Settings {
   /** Base URL, so any OpenAI-compatible server — including a local one — works. */
   aiBaseUrl: string;
   aiModel: string;
+
+  // --- the MCP server. Off unless turned on; the token is in the keychain and
+  // is deliberately not here — this file is localStorage, which is not where
+  // credentials go.
+  mcpEnabled: boolean;
+  /** 0 means "whatever Rust's default is", resolved at boot from app_defaults. */
+  mcpPort: number;
 }
 
 export const DEFAULT_MONO =
@@ -51,6 +58,10 @@ export const DEFAULTS: Settings = {
   aiProvider: "anthropic",
   aiBaseUrl: "https://api.anthropic.com",
   aiModel: "claude-opus-5",
+  mcpEnabled: false,
+  // Not a number: the default lives in Rust, and repeating it here is how the
+  // two drift. `app_defaults` fills it in before Settings can be opened.
+  mcpPort: 0,
 };
 
 /**
@@ -170,6 +181,12 @@ export function load(): Settings {
     aiProvider: provider(o.aiProvider),
     aiBaseUrl: text(o.aiBaseUrl, DEFAULTS.aiBaseUrl),
     aiModel: text(o.aiModel, DEFAULTS.aiModel),
+    mcpEnabled: typeof o.mcpEnabled === "boolean" ? o.mcpEnabled : DEFAULTS.mcpEnabled,
+    // Unprivileged ports only: a stored 80 would fail to bind on every
+    // platform and read as the feature being broken. Anything outside the
+    // range — including a stored 0 — falls back to the 0 sentinel, which means
+    // "use whatever Rust says", so a nonsense value self-heals.
+    mcpPort: bounded(Number(o.mcpPort), 1024, 65535, DEFAULTS.mcpPort),
   };
 }
 
