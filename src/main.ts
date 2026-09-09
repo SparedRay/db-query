@@ -18,7 +18,9 @@ import {
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
 import { createTheme, type ThemePref } from "./theme";
-import { FONTS, applyAppearance, load as loadSettings, save as saveSettings } from "./settings";
+import {
+  AI_PRESETS, FONTS, applyAppearance, load as loadSettings, save as saveSettings,
+} from "./settings";
 import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
 import { TabManager, type ScriptTab } from "./tabs";
@@ -70,6 +72,9 @@ const els = {
   chatClear: $<HTMLButtonElement>("chat-clear"),
   chatClose: $<HTMLButtonElement>("chat-close"),
   chatNote: $<HTMLElement>("chat-note"),
+  setAiPreset: $<HTMLSelectElement>("set-ai-preset"),
+  setAiBase: $<HTMLInputElement>("set-ai-base"),
+  setAiModel: $<HTMLInputElement>("set-ai-model"),
   setAiKey: $<HTMLInputElement>("set-ai-key"),
   setAiSave: $<HTMLButtonElement>("set-ai-save"),
   setAiForget: $<HTMLButtonElement>("set-ai-forget"),
@@ -1462,8 +1467,6 @@ files = createFileUx({
 //
 // Read before anything can be written, or the first keystroke would save an
 // empty session over the remembered one.
-void refreshAiNote();
-
 void session.boot().then((warning) => {
   if (warning) results.setMessage(warning);
 });
@@ -1591,6 +1594,11 @@ const assistant = createAssistant({
   clear: els.chatClear,
   close: els.chatClose,
   note: els.chatNote,
+  config: () => ({
+    provider: settings.aiProvider,
+    baseUrl: settings.aiBaseUrl,
+    model: settings.aiModel,
+  }),
   context: () => ({
     connectionId: conns.active()?.profile.id ?? null,
     db: tabs.active()?.activeDb ?? null,
@@ -1614,21 +1622,78 @@ const assistant = createAssistant({
 
 els.btnAssistant.onclick = () => void assistant.open();
 
-/** The API key. Written to the keychain; never read back out. */
+// --- assistant configuration ------------------------------------------------
+
+/**
+ * Presets fill the fields; the fields are what actually count.
+ *
+ * "Other OpenAI-compatible" is a real entry rather than an escape hatch: the
+ * two adapters cover every server that speaks one of the two shapes, and a
+ * base URL is all that separates Ollama from Groq.
+ */
+for (const [i, preset] of AI_PRESETS.entries()) {
+  els.setAiPreset.append(new Option(preset.label, String(i)));
+}
+
+/** Which preset the current settings look like, for the select. */
+function matchingPreset(): number {
+  const i = AI_PRESETS.findIndex(
+    (p) => p.provider === settings.aiProvider && p.baseUrl === settings.aiBaseUrl,
+  );
+  // Falls back to "Other", which is where a hand-edited base URL belongs.
+  return i === -1 ? AI_PRESETS.length - 1 : i;
+}
+
+/** What is stored for the provider currently selected. */
 async function refreshAiNote() {
+  els.setAiModel.placeholder = AI_PRESETS[matchingPreset()]?.modelHint ?? "model name";
   try {
-    const s = await api.assistantStatus();
-    els.setAiNote.textContent = s.configured
-      ? `A key is stored. Model: ${s.model}.`
-      : "No key stored — the assistant is off.";
+    const s = await api.assistantStatus(settings.aiProvider, settings.aiBaseUrl);
+    const parts = [s.hasKey ? "A key is stored." : "No key stored."];
+    if (s.local) {
+      // The genuinely better property of a local model, and the reason to
+      // offer one at all.
+      parts.push("This server is on your machine — nothing leaves it.");
+    }
+    if (!s.ready) parts.push("The assistant is off until a key is set.");
+    els.setAiNote.textContent = parts.join(" ");
   } catch (err) {
     els.setAiNote.textContent = String(err);
   }
 }
 
+function applyAiSettings() {
+  els.setAiPreset.value = String(matchingPreset());
+  els.setAiBase.value = settings.aiBaseUrl;
+  els.setAiModel.value = settings.aiModel;
+  void refreshAiNote();
+}
+
+els.setAiPreset.onchange = () => {
+  const preset = AI_PRESETS[Number(els.setAiPreset.value)];
+  if (!preset) return;
+  settings.aiProvider = preset.provider;
+  settings.aiBaseUrl = preset.baseUrl;
+  // Only overwrite the model when the preset knows one. Clearing it for a local
+  // server is deliberate: which models that machine has pulled is not knowable
+  // from here, and a guess produces a confident 404.
+  settings.aiModel = preset.model;
+  saveSettings(settings);
+  applyAiSettings();
+};
+
+for (const el of [els.setAiBase, els.setAiModel]) {
+  el.onchange = () => {
+    settings.aiBaseUrl = els.setAiBase.value.trim();
+    settings.aiModel = els.setAiModel.value.trim();
+    saveSettings(settings);
+    void refreshAiNote();
+  };
+}
+
 els.setAiSave.onclick = async () => {
   try {
-    await api.assistantSetKey(els.setAiKey.value);
+    await api.assistantSetKey(settings.aiProvider, els.setAiKey.value);
     // Cleared immediately: the field exists to hand the key over, not to hold it.
     els.setAiKey.value = "";
     await refreshAiNote();
@@ -1639,13 +1704,16 @@ els.setAiSave.onclick = async () => {
 
 els.setAiForget.onclick = async () => {
   try {
-    await api.assistantSetKey(null);
+    await api.assistantSetKey(settings.aiProvider, null);
     els.setAiKey.value = "";
     await refreshAiNote();
   } catch (err) {
     els.setAiNote.textContent = String(err);
   }
 };
+
+// After the handlers, and after `settings` exists — this reads it.
+applyAiSettings();
 
 els.setLicences.onclick = async () => {
   els.setLicences.disabled = true;

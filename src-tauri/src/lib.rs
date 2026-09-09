@@ -353,32 +353,39 @@ fn source_of(proposals: &assistant::Proposals, sql: &str) -> String {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AssistantStatus {
-    /// True when a key is in the keychain. The key itself never comes back out.
-    configured: bool,
-    model: String,
+    /// True when this provider has a key stored. The key never comes back out.
+    has_key: bool,
+    /// True when it can actually be used — a local model needs no key.
+    ready: bool,
+    /// True when nothing leaves the machine, which is worth saying out loud.
+    local: bool,
 }
 
 #[tauri::command]
-fn assistant_status() -> AssistantStatus {
+fn assistant_status(provider: assistant::Provider, base_url: String) -> AssistantStatus {
+    let has_key = secrets::has_stored(provider.key_id());
+    let local = provider == assistant::Provider::OpenAiCompatible && assistant::is_local(&base_url);
     AssistantStatus {
-        configured: secrets::has_stored(assistant::KEY_ID),
-        model: assistant::MODEL.to_string(),
+        has_key,
+        ready: has_key || !provider.requires_key(&base_url),
+        local,
     }
 }
 
-/// Store or forget the API key. `None` (or empty) forgets it.
+/// Store or forget a provider's API key. `None` (or empty) forgets it.
 ///
 /// Same three-way shape and the same store as a database password: the OS
-/// credential store, never a config file.
+/// credential store, never a config file. Keyed per provider, so configuring a
+/// local model does not throw away a cloud key.
 #[tauri::command]
-fn assistant_set_key(key: Option<String>) -> Result<bool, String> {
+fn assistant_set_key(provider: assistant::Provider, key: Option<String>) -> Result<bool, String> {
     match key.map(|k| k.trim().to_string()) {
         Some(k) if !k.is_empty() => {
-            secrets::store(assistant::KEY_ID, &secrets::Secret::new(k)).map_err(|e| e.0)?;
+            secrets::store(provider.key_id(), &secrets::Secret::new(k)).map_err(|e| e.0)?;
             Ok(true)
         }
         _ => {
-            secrets::delete(assistant::KEY_ID).map_err(|e| e.0)?;
+            secrets::delete(provider.key_id()).map_err(|e| e.0)?;
             Ok(false)
         }
     }
@@ -403,14 +410,21 @@ async fn remember_proposal(state: State<'_, AppState>, sql: String) -> Result<()
 #[tauri::command]
 async fn assistant_send(
     state: State<'_, AppState>,
+    provider: assistant::Provider,
+    base_url: String,
+    model: String,
     connection_id: Option<String>,
     db: Option<String>,
     messages: Vec<assistant::ChatMessage>,
     on_event: tauri::ipc::Channel<assistant::StreamEvent>,
 ) -> Result<(), String> {
-    let Some(key) = secrets::load(assistant::KEY_ID).map_err(|e| e.0)? else {
+    if model.trim().is_empty() {
+        return Err("No model is set. Choose one in Settings.".into());
+    }
+    let key = secrets::load(provider.key_id()).map_err(|e| e.0)?;
+    if key.is_none() && provider.requires_key(&base_url) {
         return Err("No API key is set. Add one in Settings to use the assistant.".into());
-    };
+    }
 
     // Schema, when there is a live connection to take it from. Names and types
     // only — `render_schema` cannot see row data, by construction.
@@ -435,17 +449,29 @@ async fn assistant_send(
     };
 
     let system = assistant::system_prompt(&server_version, schema_text.as_deref());
-    let body = assistant::request(assistant::MODEL, &system, &messages);
+    let body = assistant::request(provider, &model, &system, &messages);
 
-    let response = reqwest::Client::new()
-        .post(assistant::API_URL)
-        .header("x-api-key", key.expose())
-        .header("anthropic-version", assistant::API_VERSION)
-        .header("content-type", "application/json")
+    // Auth differs by provider, and a local server usually wants none at all —
+    // so the header is attached only when there is a key to attach.
+    let mut request = reqwest::Client::new()
+        .post(provider.endpoint(&base_url))
+        .header("content-type", "application/json");
+    if let Some(key) = &key {
+        request = match provider {
+            assistant::Provider::Anthropic => request
+                .header("x-api-key", key.expose())
+                .header("anthropic-version", assistant::API_VERSION),
+            assistant::Provider::OpenAiCompatible => {
+                request.header("authorization", format!("Bearer {}", key.expose()))
+            }
+        };
+    }
+
+    let response = request
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Could not reach the API: {e}"))?;
+        .map_err(|e| format!("Could not reach {}: {e}", base_url.trim()))?;
 
     let status = response.status().as_u16();
     if !response.status().is_success() {
@@ -455,7 +481,7 @@ async fn assistant_send(
     }
 
     let mut response = response;
-    let mut decoder = assistant::SseDecoder::default();
+    let mut decoder = assistant::SseDecoder::new(provider);
     loop {
         match response.chunk().await {
             Ok(Some(bytes)) => {

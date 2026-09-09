@@ -111,18 +111,27 @@
 
       <fieldset>
         <legend>Assistant</legend>
-        <label>Anthropic API key
-          <input type="password" id="set-ai-key" placeholder="sk-ant-…" autocomplete="off" />
+        <label>Provider
+          <select id="set-ai-preset"></select>
+        </label>
+        <label>Base URL
+          <input type="text" id="set-ai-base" placeholder="https://…" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>Model
+          <input type="text" id="set-ai-model" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>API key
+          <input type="password" id="set-ai-key" placeholder="leave empty for a local model" autocomplete="off" />
         </label>
         <div class="ai-key-actions">
           <button type="button" id="set-ai-save" class="mini">Save key</button>
           <button type="button" id="set-ai-forget" class="mini">Forget key</button>
         </div>
         <p class="hint" id="set-ai-note">Checking…</p>
-        <p class="hint">Stored in your system keychain, never in a config file.
-          The assistant writes SQL for you to review and run — it cannot execute
-          anything itself. Your schema's table and column names are sent with
-          each question; row data never is.</p>
+        <p class="hint">Keys are stored in your system keychain, one per
+          provider, never in a config file. The assistant writes SQL for you to
+          review and run — it cannot execute anything itself. Your schema's
+          table and column names are sent with each question; row data never is.</p>
       </fieldset>
 
       <fieldset>

@@ -5,6 +5,7 @@
 // job is connections. Reads are defensive — storage throws outright in some
 // embeddings, and a value written by a future version must not break this one.
 
+import type { Provider } from "./api";
 import type { ThemePref } from "./theme";
 
 export interface Settings {
@@ -18,6 +19,12 @@ export interface Settings {
   timeoutSecs: number;
   /** Rows for the generated "SELECT ... LIMIT n" browse query. */
   browseLimit: number;
+
+  // --- assistant. Where questions go; the key lives in the keychain.
+  aiProvider: Provider;
+  /** Base URL, so any OpenAI-compatible server — including a local one — works. */
+  aiBaseUrl: string;
+  aiModel: string;
 }
 
 export const DEFAULT_MONO =
@@ -41,7 +48,63 @@ export const DEFAULTS: Settings = {
   lint: true,
   timeoutSecs: 0,
   browseLimit: 1000,
+  aiProvider: "anthropic",
+  aiBaseUrl: "https://api.anthropic.com",
+  aiModel: "claude-opus-5",
 };
+
+/**
+ * One-click starting points. Every entry but the first speaks the OpenAI
+ * shape — which is why a second provider was cheap and a fifth is free.
+ *
+ * The model is left to the user wherever we cannot know it: which models a
+ * local server has pulled is a property of that machine, and guessing produces
+ * a confident 404.
+ */
+export const AI_PRESETS: Array<{
+  label: string;
+  provider: Provider;
+  baseUrl: string;
+  model: string;
+  /** Placeholder when `model` is blank, so the field is not a mystery. */
+  modelHint: string;
+}> = [
+  {
+    label: "Anthropic",
+    provider: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-opus-5",
+    modelHint: "claude-opus-5",
+  },
+  {
+    label: "OpenAI",
+    provider: "openAiCompatible",
+    baseUrl: "https://api.openai.com/v1",
+    model: "",
+    modelHint: "the model name from your account",
+  },
+  {
+    label: "Ollama (local)",
+    provider: "openAiCompatible",
+    baseUrl: "http://localhost:11434/v1",
+    model: "",
+    modelHint: "a model you have pulled, e.g. llama3.1",
+  },
+  {
+    label: "LM Studio (local)",
+    provider: "openAiCompatible",
+    baseUrl: "http://localhost:1234/v1",
+    model: "",
+    modelHint: "the model loaded in LM Studio",
+  },
+  {
+    label: "Other OpenAI-compatible",
+    provider: "openAiCompatible",
+    baseUrl: "",
+    model: "",
+    modelHint: "the model name your server expects",
+  },
+];
 
 const KEY = "db-query.settings";
 
@@ -52,6 +115,13 @@ const KEY = "db-query.settings";
  * or from corruption, and 900 pinned to 22 is a size nobody chose — a reset is
  * more honest than an approximation of a value that was never meant.
  */
+/** A string field, taken only when it really is a string. */
+const text = (v: unknown, fallback: string): string =>
+  typeof v === "string" ? v : fallback;
+
+const provider = (v: unknown): Provider =>
+  v === "openAiCompatible" || v === "anthropic" ? v : DEFAULTS.aiProvider;
+
 const bounded = (n: number, lo: number, hi: number, fallback: number) =>
   Number.isFinite(n) && n >= lo && n <= hi ? Math.round(n) : fallback;
 
@@ -85,6 +155,9 @@ export function load(): Settings {
     lint: typeof o.lint === "boolean" ? o.lint : DEFAULTS.lint,
     timeoutSecs: bounded(Number(o.timeoutSecs), 0, 3600, DEFAULTS.timeoutSecs),
     browseLimit: bounded(Number(o.browseLimit), 1, 1_000_000, DEFAULTS.browseLimit),
+    aiProvider: provider(o.aiProvider),
+    aiBaseUrl: text(o.aiBaseUrl, DEFAULTS.aiBaseUrl),
+    aiModel: text(o.aiModel, DEFAULTS.aiModel),
   };
 }
 

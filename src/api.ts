@@ -260,10 +260,27 @@ export interface FileTypeSpec {
 
 // ---------------------------------------------------------------- assistant
 
-export interface AssistantStatus {
-  /** True when a key is in the keychain. The key never comes back out. */
-  configured: boolean;
+/**
+ * Which wire format to speak. Two, not five: Ollama, LM Studio, llama.cpp,
+ * vLLM, OpenRouter, Groq and Azure all expose the OpenAI Chat Completions
+ * shape, so "openAiCompatible plus a base URL" reaches every one of them.
+ */
+export type Provider = "anthropic" | "openAiCompatible";
+
+/** Where to send questions. Not a secret — the key is separate. */
+export interface AssistantConfig {
+  provider: Provider;
+  baseUrl: string;
   model: string;
+}
+
+export interface AssistantStatus {
+  /** A key is stored for this provider. It never comes back out. */
+  hasKey: boolean;
+  /** Usable — a local model needs no key. */
+  ready: boolean;
+  /** Nothing leaves the machine. Worth saying out loud. */
+  local: boolean;
 }
 
 export interface ChatMessage {
@@ -419,15 +436,18 @@ export const api = {
 
   // --- the assistant. It has no tools and no connection: it writes SQL into
   // the editor and the user runs it, like every other generated-SQL path here.
-  assistantStatus: () => invoke<AssistantStatus>("assistant_status"),
-  /** `null` or "" forgets the key. Returns whether one is now stored. */
-  assistantSetKey: (key: string | null) => invoke<boolean>("assistant_set_key", { key }),
+  assistantStatus: (provider: Provider, baseUrl: string) =>
+    invoke<AssistantStatus>("assistant_status", { provider, baseUrl }),
+  /** `null` or "" forgets the key. Keys are stored per provider. */
+  assistantSetKey: (provider: Provider, key: string | null) =>
+    invoke<boolean>("assistant_set_key", { provider, key }),
   /**
    * Stream one reply. Rejects only if the request never started; anything that
    * goes wrong afterwards arrives as a `failed` event, so a partial answer
    * already on screen is kept.
    */
   assistantSend: (
+    config: AssistantConfig,
     connectionId: string | null,
     db: string | null,
     messages: ChatMessage[],
@@ -435,7 +455,15 @@ export const api = {
   ) => {
     const channel = new Channel<AssistantEvent>();
     channel.onmessage = onEvent;
-    return invoke<void>("assistant_send", { connectionId, db, messages, onEvent: channel });
+    return invoke<void>("assistant_send", {
+      provider: config.provider,
+      baseUrl: config.baseUrl,
+      model: config.model,
+      connectionId,
+      db,
+      messages,
+      onEvent: channel,
+    });
   },
 
   /** Record that the assistant proposed this SQL, for history provenance. */

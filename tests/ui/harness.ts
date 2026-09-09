@@ -75,7 +75,7 @@ export const baseBackend: Backend = {
   // Every run records history; every boot may open the dialog. Stubbed empty so
   // no other test has to think about it.
   history_search: () => [],
-  assistant_status: () => ({ configured: false, model: "claude-opus-5" }),
+  assistant_status: () => ({ hasKey: false, ready: false, local: false }),
   remember_proposal: () => null,
   history_clear: () => null,
 };

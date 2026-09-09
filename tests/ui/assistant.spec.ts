@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-const CONFIGURED = { configured: true, model: "claude-opus-5" };
+const READY = { hasKey: true, ready: true, local: false };
 
 /**
  * `assistant_send` must not resolve until the stream is over.
@@ -53,7 +53,7 @@ async function reply(page: Page, text: string) {
 async function openChat(page: Page, extra: Record<string, unknown> = {}) {
   stream = gate();
   await connect(page, {
-    assistant_status: () => CONFIGURED,
+    assistant_status: () => READY,
     assistant_send: () => stream.promise,
     ...extra,
   });
@@ -191,7 +191,7 @@ test("a request that never starts reports why", async ({ page }) => {
 test("with no key the chat says so and cannot be used", async ({ page }) => {
   await installBackend(page, {
     ...schemaBackend,
-    assistant_status: () => ({ configured: false, model: "claude-opus-5" }),
+    assistant_status: () => ({ hasKey: false, ready: false, local: false }),
   });
   await page.goto("/");
   await page.click("#btn-assistant");
@@ -211,7 +211,7 @@ test("the chat states what is sent and what is not", async ({ page }) => {
 
 test("saving a key hands it over and does not keep it in the field", async ({ page }) => {
   await connect(page, {
-    assistant_status: () => ({ configured: false, model: "claude-opus-5" }),
+    assistant_status: () => ({ hasKey: false, ready: false, local: false }),
     assistant_set_key: () => true,
   });
   await page.click("#btn-settings");
@@ -226,11 +226,108 @@ test("saving a key hands it over and does not keep it in the field", async ({ pa
 });
 
 test("forgetting the key sends null", async ({ page }) => {
-  await connect(page, { assistant_status: () => CONFIGURED, assistant_set_key: () => false });
+  await connect(page, { assistant_status: () => READY, assistant_set_key: () => false });
   await page.click("#btn-settings");
   await page.click("#set-ai-forget");
 
   await expect
     .poll(async () => (await calls(page)).find((c) => c.cmd === "assistant_set_key")?.args.key)
     .toBe(null);
+});
+
+// ------------------------------------------------------------------ providers
+
+/**
+ * The point of the abstraction: the same chat, a different server.
+ *
+ * Two adapters cover Anthropic and everything speaking OpenAI's shape — which
+ * is Ollama, LM Studio, llama.cpp, vLLM, OpenRouter, Groq and Azure. What each
+ * test here checks is that the *choice* reaches the backend, since the wire
+ * formats themselves are pinned by Rust unit tests.
+ */
+async function choosePreset(page: Page, label: string) {
+  await page.click("#btn-settings");
+  await page.selectOption("#set-ai-preset", { label });
+}
+
+test("switching to a local model sends that provider and base URL", async ({ page }) => {
+  await connect(page, {
+    assistant_status: () => ({ hasKey: false, ready: true, local: true }),
+    assistant_send: () => new Promise(() => {}),
+  });
+
+  await choosePreset(page, "Ollama (local)");
+  await page.fill("#set-ai-model", "llama3.1");
+  await page.locator("#set-ai-model").blur();
+  await page.click("#set-close");
+
+  await page.click("#btn-assistant");
+  await page.fill("#chat-input", "hi");
+  await page.click("#chat-send");
+
+  const sent = (await calls(page)).find((c) => c.cmd === "assistant_send");
+  expect(sent?.args).toMatchObject({
+    provider: "openAiCompatible",
+    baseUrl: "http://localhost:11434/v1",
+    model: "llama3.1",
+  });
+});
+
+/** A local model is the one configuration where nothing leaves the machine. */
+test("a local model says so instead of warning about what is sent", async ({ page }) => {
+  await connect(page, {
+    assistant_status: () => ({ hasKey: false, ready: true, local: true }),
+  });
+  await choosePreset(page, "Ollama (local)");
+  await page.fill("#set-ai-model", "llama3.1");
+  await page.locator("#set-ai-model").blur();
+  await expect(page.locator("#set-ai-note")).toContainText("nothing leaves it");
+  await page.click("#set-close");
+
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-note")).toContainText("runs on your machine");
+});
+
+/** Keys are per provider, so configuring one must not touch another's. */
+test("the key is saved against the selected provider", async ({ page }) => {
+  await connect(page, { assistant_status: () => READY, assistant_set_key: () => true });
+  await choosePreset(page, "OpenAI");
+  await page.fill("#set-ai-key", "sk-openai");
+  await page.click("#set-ai-save");
+
+  await expect
+    .poll(async () => (await calls(page)).find((c) => c.cmd === "assistant_set_key")?.args)
+    .toMatchObject({ provider: "openAiCompatible", key: "sk-openai" });
+});
+
+/**
+ * A local server's model list is a property of that machine, so the preset
+ * clears the field rather than guessing — a guess is a confident 404.
+ */
+test("a provider with no known model leaves the field blank, and blocks the chat", async ({
+  page,
+}) => {
+  await connect(page, {
+    assistant_status: () => ({ hasKey: false, ready: true, local: true }),
+  });
+  await choosePreset(page, "Ollama (local)");
+  await expect(page.locator("#set-ai-model")).toHaveValue("");
+  await expect(page.locator("#set-ai-model")).toHaveAttribute("placeholder", /llama3\.1/);
+  await page.click("#set-close");
+
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-note")).toContainText("No model set");
+  await expect(page.locator("#chat-send")).toBeDisabled();
+});
+
+test("the choice survives a reload", async ({ page }) => {
+  await connect(page, { assistant_status: () => READY });
+  await choosePreset(page, "OpenAI");
+  await page.fill("#set-ai-model", "some-model");
+  await page.locator("#set-ai-model").blur();
+
+  await page.reload();
+  await page.click("#btn-settings");
+  await expect(page.locator("#set-ai-base")).toHaveValue("https://api.openai.com/v1");
+  await expect(page.locator("#set-ai-model")).toHaveValue("some-model");
 });

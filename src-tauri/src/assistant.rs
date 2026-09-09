@@ -25,20 +25,83 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::DbSchema;
 
-/// The keychain account the API key lives under.
-///
-/// Namespaced so it cannot collide with a connection id, which is a UUID. Like
-/// every other secret in this app it lives in the OS credential store, never in
-/// a config file.
-pub const KEY_ID: &str = "assistant:anthropic";
-
-pub const API_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const API_VERSION: &str = "2023-06-01";
-/// Anthropic's most capable model. Chosen deliberately: writing correct SQL
-/// against an unfamiliar schema is the kind of task where the difference shows.
-pub const MODEL: &str = "claude-opus-5";
 /// Streaming, so a long answer cannot hit a request timeout.
 pub const MAX_TOKENS: u32 = 16_000;
+
+pub const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
+/// Anthropic's most capable model. Writing correct SQL against an unfamiliar
+/// schema is the kind of task where model quality shows.
+pub const ANTHROPIC_MODEL: &str = "claude-opus-5";
+
+/// Which wire format to speak.
+///
+/// **Two, not five.** Ollama, LM Studio, llama.cpp's server, vLLM, OpenRouter,
+/// Groq and Azure all expose the OpenAI Chat Completions shape, so "OpenAI
+/// compatible plus a base URL" covers every one of them. A third adapter would
+/// need a provider that speaks neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Provider {
+    Anthropic,
+    /// Anything speaking `/chat/completions`, including everything local.
+    OpenAiCompatible,
+}
+
+impl Provider {
+    /// Where the key lives. **One account per provider**, so switching away and
+    /// back does not lose the other key — and so a local setup with no key at
+    /// all cannot shadow a stored cloud one.
+    pub fn key_id(self) -> &'static str {
+        match self {
+            Self::Anthropic => "assistant:anthropic",
+            Self::OpenAiCompatible => "assistant:openai",
+        }
+    }
+
+    /// The completions endpoint under a base URL, whose trailing slash is not
+    /// the user's problem to get right.
+    pub fn endpoint(self, base: &str) -> String {
+        let base = base.trim().trim_end_matches('/');
+        match self {
+            Self::Anthropic => format!("{base}/v1/messages"),
+            Self::OpenAiCompatible => format!("{base}/chat/completions"),
+        }
+    }
+
+    /// Does a missing key stop us? A local model has none and needs none.
+    pub fn requires_key(self, base: &str) -> bool {
+        match self {
+            Self::Anthropic => true,
+            Self::OpenAiCompatible => !is_local(base),
+        }
+    }
+}
+
+/// Is this base URL a machine-local server?
+///
+/// Used for two things that are both about honesty rather than security: not
+/// demanding an API key a local model does not want, and telling the user their
+/// schema is not leaving the machine.
+pub fn is_local(base: &str) -> bool {
+    let b = base.trim().to_ascii_lowercase();
+    let host = b
+        .split("://")
+        .nth(1)
+        .unwrap_or(&b)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    // A bracketed IPv6 literal cannot be split on ':' — `[::1]:8080` would
+    // yield "[". Strip the brackets first, then the port.
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") || name.ends_with(".localhost")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -171,39 +234,48 @@ pub fn system_prompt(server_version: &str, schema: Option<&str>) -> String {
 
 // ----------------------------------------------------------------- the request
 
-#[derive(Serialize)]
-struct Thinking {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    display: &'static str,
-}
-
-#[derive(Serialize)]
-pub struct Request<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    stream: bool,
-    system: &'a str,
-    messages: &'a [ChatMessage],
-    thinking: Thinking,
-}
-
-/// Body for one streamed completion.
+/// The body for one streamed completion.
 ///
-/// `thinking.display: "summarized"` is set explicitly: on this model thinking is
-/// on by default but its display defaults to omitted, which in a chat window
-/// reads as the app having hung.
-pub fn request<'a>(model: &'a str, system: &'a str, messages: &'a [ChatMessage]) -> Request<'a> {
-    Request {
-        model,
-        max_tokens: MAX_TOKENS,
-        stream: true,
-        system,
-        messages,
-        thinking: Thinking {
-            kind: "adaptive",
-            display: "summarized",
-        },
+/// Built as a `Value` rather than a struct per provider: the two shapes differ
+/// in more places than they share, and a struct with half its fields
+/// `skip_serializing_if` would obscure which provider gets what.
+pub fn request(
+    provider: Provider,
+    model: &str,
+    system: &str,
+    messages: &[ChatMessage],
+) -> serde_json::Value {
+    let turns: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect();
+
+    match provider {
+        // `thinking.display: "summarized"` is set explicitly: on this model
+        // thinking is on by default but its display defaults to omitted, which
+        // in a chat window is indistinguishable from the app having hung.
+        // `budget_tokens` is deliberately absent — it is rejected outright.
+        Provider::Anthropic => serde_json::json!({
+            "model": model,
+            "max_tokens": MAX_TOKENS,
+            "stream": true,
+            "system": system,
+            "messages": turns,
+            "thinking": { "type": "adaptive", "display": "summarized" },
+        }),
+        // The system prompt is a message rather than a field, and nothing
+        // Anthropic-specific is sent — an unknown parameter is a 400 on some
+        // servers and silently ignored on others, and neither is worth risking
+        // for a field a local model would not honour anyway.
+        Provider::OpenAiCompatible => {
+            let mut all = vec![serde_json::json!({ "role": "system", "content": system })];
+            all.extend(turns);
+            serde_json::json!({
+                "model": model,
+                "stream": true,
+                "messages": all,
+            })
+        }
     }
 }
 
@@ -216,23 +288,38 @@ pub fn request<'a>(model: &'a str, system: &'a str, messages: &'a [ChatMessage])
 /// chunk boundaries fall wherever the network puts them, so a JSON payload can
 /// arrive split across two reads. Buffering until a blank line is what makes
 /// that a non-issue, and what makes the whole thing testable without a network.
-#[derive(Default)]
 pub struct SseDecoder {
+    provider: Provider,
     buffer: String,
 }
 
 impl SseDecoder {
+    pub fn new(provider: Provider) -> Self {
+        Self {
+            provider,
+            buffer: String::new(),
+        }
+    }
+
     /// Feed a chunk; get back whatever complete events it completed.
+    ///
+    /// **The framing is the same for both providers** — `data:` lines, events
+    /// separated by a blank line — so only the payload decoding forks. That is
+    /// the whole reason a second provider was cheap.
     pub fn push(&mut self, chunk: &str) -> Vec<StreamEvent> {
         self.buffer.push_str(chunk);
         let mut events = Vec::new();
 
-        // Events are separated by a blank line. Anything after the last one is
-        // an incomplete event and stays in the buffer for the next chunk.
+        // Anything after the last blank line is an incomplete event and stays
+        // in the buffer for the next chunk.
         while let Some(end) = self.buffer.find("\n\n") {
             let block: String = self.buffer[..end].to_string();
             self.buffer.drain(..end + 2);
-            if let Some(e) = decode_block(&block) {
+            let decoded = match self.provider {
+                Provider::Anthropic => decode_block(&block),
+                Provider::OpenAiCompatible => decode_openai_block(&block),
+            };
+            if let Some(e) = decoded {
                 events.push(e);
             }
         }
@@ -240,9 +327,8 @@ impl SseDecoder {
     }
 }
 
-/// One SSE block into at most one event we care about.
-fn decode_block(block: &str) -> Option<StreamEvent> {
-    // Only `data:` matters; the `event:` line repeats what the payload says.
+/// Read the `data:` payload out of one SSE block, if it has a usable one.
+fn payload(block: &str) -> Option<serde_json::Value> {
     let data = block
         .lines()
         .find_map(|l| l.strip_prefix("data:"))
@@ -250,8 +336,63 @@ fn decode_block(block: &str) -> Option<StreamEvent> {
     if data.is_empty() || data == "[DONE]" {
         return None;
     }
+    serde_json::from_str(data).ok()
+}
 
-    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+/// One OpenAI-style block.
+///
+/// `choices[0].delta.content` is the answer. `reasoning_content` is what
+/// several reasoning models (and Ollama's OpenAI endpoint) put their thinking
+/// in; it is read best-effort, because the field is a convention rather than
+/// part of the spec, and its absence costs nothing.
+fn decode_openai_block(block: &str) -> Option<StreamEvent> {
+    let v = payload(block)?;
+
+    // Errors arrive as a plain object rather than inside `choices`.
+    if let Some(message) = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
+        return Some(StreamEvent::Failed {
+            message: message.to_string(),
+        });
+    }
+
+    let choice = v.get("choices")?.get(0)?;
+    if let Some(delta) = choice.get("delta") {
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(t) = delta.get(key).and_then(|t| t.as_str()) {
+                if !t.is_empty() {
+                    return Some(StreamEvent::Thinking {
+                        delta: t.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+            if !text.is_empty() {
+                return Some(StreamEvent::Text {
+                    delta: text.to_string(),
+                });
+            }
+        }
+    }
+
+    // A finish reason ends the turn. Checked after the delta because the final
+    // chunk can carry both.
+    match choice.get("finish_reason") {
+        Some(r) if !r.is_null() => Some(StreamEvent::Done {
+            stop_reason: r.as_str().map(str::to_owned),
+        }),
+        _ => None,
+    }
+}
+
+/// One Anthropic SSE block into at most one event we care about.
+fn decode_block(block: &str) -> Option<StreamEvent> {
+    // Only `data:` matters; the `event:` line repeats what the payload says.
+    let v = payload(block)?;
     match v.get("type").and_then(|t| t.as_str())? {
         "content_block_delta" => {
             let delta = v.get("delta")?;
@@ -343,7 +484,7 @@ mod tests {
 
     #[test]
     fn decodes_text_deltas_in_order() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         let events = d.push(&(text_event("SELECT") + &text_event(" 1")));
         assert_eq!(
             events,
@@ -363,7 +504,7 @@ mod tests {
         let whole = text_event("hello");
         let (a, b) = whole.split_at(whole.len() / 2);
 
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         assert!(d.push(a).is_empty(), "half an event is not an event");
         assert_eq!(
             d.push(b),
@@ -375,7 +516,7 @@ mod tests {
 
     #[test]
     fn thinking_is_reported_separately_from_the_answer() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         let events = d.push(
             "data: {\"type\":\"content_block_delta\",\"delta\":\
              {\"type\":\"thinking_delta\",\"thinking\":\"considering joins\"}}\n\n",
@@ -390,7 +531,7 @@ mod tests {
 
     #[test]
     fn a_message_delta_ends_the_turn_and_carries_the_reason() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         let events = d.push(
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
         );
@@ -406,7 +547,7 @@ mod tests {
     /// reach the UI as an event, so what was already written is not thrown away.
     #[test]
     fn a_mid_stream_error_becomes_an_event() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         let events = d.push(
             "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
              \"message\":\"Overloaded\"}}\n\n",
@@ -421,7 +562,7 @@ mod tests {
 
     #[test]
     fn unknown_events_and_pings_are_ignored_rather_than_breaking_the_stream() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         let events = d.push(
             "event: ping\ndata: {\"type\":\"ping\"}\n\n\
              data: {\"type\":\"content_block_start\",\"index\":0}\n\n",
@@ -433,7 +574,7 @@ mod tests {
 
     #[test]
     fn a_malformed_payload_does_not_take_the_stream_down() {
-        let mut d = SseDecoder::default();
+        let mut d = SseDecoder::new(Provider::Anthropic);
         assert!(d.push("data: {not json\n\n").is_empty());
         assert_eq!(d.push(&text_event("still here")).len(), 1);
     }
@@ -537,8 +678,8 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
         }];
-        let body = serde_json::to_value(request(MODEL, "sys", &messages)).unwrap();
-        assert_eq!(body["model"], MODEL);
+        let body = request(Provider::Anthropic, ANTHROPIC_MODEL, "sys", &messages);
+        assert_eq!(body["model"], ANTHROPIC_MODEL);
         assert_eq!(body["stream"], true);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -577,5 +718,152 @@ mod tests {
             !p.contains("SELECT * FROM users WHERE id = 1"),
             "an edited statement is the user's, not the assistant's"
         );
+    }
+
+    // ------------------------------------------------------- other providers
+
+    fn openai(chunk: &str) -> Vec<StreamEvent> {
+        SseDecoder::new(Provider::OpenAiCompatible).push(chunk)
+    }
+
+    #[test]
+    fn openai_style_deltas_decode_to_the_same_events() {
+        let events = openai(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"SELECT\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\" 1\"}}]}\n\n",
+        );
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Text {
+                    delta: "SELECT".into()
+                },
+                StreamEvent::Text { delta: " 1".into() },
+            ]
+        );
+    }
+
+    /// `[DONE]` is OpenAI's terminator and is not JSON. Treating it as a
+    /// payload would log a parse failure on every single reply.
+    #[test]
+    fn the_openai_done_sentinel_is_not_an_error() {
+        assert!(openai("data: [DONE]\n\n").is_empty());
+    }
+
+    #[test]
+    fn an_openai_finish_reason_ends_the_turn() {
+        let events = openai("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
+        assert_eq!(
+            events,
+            vec![StreamEvent::Done {
+                stop_reason: Some("stop".into())
+            }]
+        );
+    }
+
+    /// Several reasoning models — and Ollama's OpenAI endpoint — stream their
+    /// thinking in `reasoning_content`. It is a convention, not a spec, so it
+    /// is read best-effort and its absence costs nothing.
+    #[test]
+    fn openai_reasoning_content_is_shown_as_thinking() {
+        let events =
+            openai("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n");
+        assert_eq!(
+            events,
+            vec![StreamEvent::Thinking {
+                delta: "hmm".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_openai_error_object_becomes_a_failure() {
+        let events = openai("data: {\"error\":{\"message\":\"model not found\"}}\n\n");
+        assert_eq!(
+            events,
+            vec![StreamEvent::Failed {
+                message: "model not found".into()
+            }]
+        );
+    }
+
+    /// Empty deltas are how OpenAI streams open and close a turn. Rendering
+    /// them would put stray empty text blocks through the UI.
+    #[test]
+    fn empty_openai_deltas_produce_nothing() {
+        assert!(openai("data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n").is_empty());
+        assert!(
+            openai("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n").is_empty()
+        );
+    }
+
+    // ------------------------------------------------------------ endpoints
+
+    #[test]
+    fn an_endpoint_is_built_regardless_of_a_trailing_slash() {
+        assert_eq!(
+            Provider::Anthropic.endpoint("https://api.anthropic.com/"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            Provider::OpenAiCompatible.endpoint("http://localhost:11434/v1"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    /// Each provider gets its own keychain account, so switching away and back
+    /// does not lose the other key.
+    #[test]
+    fn providers_do_not_share_a_key() {
+        assert_ne!(
+            Provider::Anthropic.key_id(),
+            Provider::OpenAiCompatible.key_id()
+        );
+    }
+
+    #[test]
+    fn a_local_server_is_recognised_and_needs_no_key() {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8080/v1",
+            "http://LocalHost:11434",
+        ] {
+            assert!(is_local(base), "{base}");
+            assert!(!Provider::OpenAiCompatible.requires_key(base), "{base}");
+        }
+    }
+
+    /// The check must not be fooled into calling a remote host local — that
+    /// would suppress the warning that the schema is leaving the machine.
+    #[test]
+    fn a_remote_host_is_never_mistaken_for_a_local_one() {
+        for base in [
+            "https://api.openai.com/v1",
+            "https://localhost.example.com/v1",
+            "http://evil.com/?x=localhost",
+            "http://user@example.com/v1",
+        ] {
+            assert!(!is_local(base), "{base}");
+            assert!(Provider::OpenAiCompatible.requires_key(base), "{base}");
+        }
+    }
+
+    #[test]
+    fn an_openai_request_carries_the_system_prompt_as_a_message() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+        }];
+        let body = request(Provider::OpenAiCompatible, "llama3.1", "rules", &messages);
+        assert_eq!(body["model"], "llama3.1");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "rules");
+        assert_eq!(body["messages"][1]["content"], "hi");
+        // Nothing Anthropic-specific: an unknown parameter is a 400 on some
+        // servers and silently ignored on others.
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("system").is_none());
     }
 }

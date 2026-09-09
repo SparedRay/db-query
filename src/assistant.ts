@@ -14,7 +14,7 @@
 // *around* the SQL — which is usually the part that explains a join — instead of
 // throwing it away to get at a structured field.
 
-import { api, type AssistantEvent, type ChatMessage } from "./api";
+import { api, type AssistantConfig, type AssistantEvent, type ChatMessage } from "./api";
 
 export interface AssistantDeps {
   dialog: HTMLDialogElement;
@@ -24,6 +24,8 @@ export interface AssistantDeps {
   clear: HTMLButtonElement;
   close: HTMLElement;
   note: HTMLElement;
+  /** Where questions go. Read per send, so a settings change takes effect. */
+  config: () => AssistantConfig;
   /** Which connection and database to describe to the model. */
   context: () => { connectionId: string | null; db: string | null };
   /** Put SQL where the cursor is. */
@@ -180,7 +182,7 @@ export function createAssistant(deps: AssistantDeps) {
       const { connectionId, db } = deps.context();
       // A copy: the request is a snapshot of the conversation, and `history` is
       // still being mutated by the turn that is in flight.
-      await api.assistantSend(connectionId, db, [...history], onEvent);
+      await api.assistantSend(deps.config(), connectionId, db, [...history], onEvent);
     } catch (err) {
       // The request never started — nothing was shown, so this replaces it.
       failed = String(err);
@@ -231,15 +233,25 @@ export function createAssistant(deps: AssistantDeps) {
         deps.input.focus();
         return;
       }
-      const status = await api.assistantStatus().catch(() => null);
-      const configured = status?.configured ?? false;
-      deps.note.textContent = configured
-        ? `${status!.model} · your schema's table and column names are sent with each question; row data never is.`
-        : "No API key set. Add one in Settings to use the assistant.";
-      deps.send.disabled = !configured;
-      deps.input.disabled = !configured;
+      const config = deps.config();
+      const status = await api
+        .assistantStatus(config.provider, config.baseUrl)
+        .catch(() => null);
+      const ready = (status?.ready ?? false) && config.model.trim() !== "";
+
+      deps.note.textContent = !ready
+        ? status && !status.ready
+          ? "No API key set. Add one in Settings to use the assistant."
+          : "No model set. Choose one in Settings."
+        : `${config.model} · ` +
+          (status?.local
+            ? "this model runs on your machine — nothing leaves it."
+            : "your schema's table and column names are sent with each question; row data never is.");
+
+      deps.send.disabled = !ready;
+      deps.input.disabled = !ready;
       deps.dialog.showModal();
-      if (configured) deps.input.focus();
+      if (ready) deps.input.focus();
     },
   };
 }

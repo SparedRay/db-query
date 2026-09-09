@@ -12,7 +12,7 @@
 //!
 //! It costs a few cents to run.
 
-use db_query_lib::assistant::{self, ChatMessage, StreamEvent};
+use db_query_lib::assistant::{self, ChatMessage, Provider, StreamEvent};
 
 fn key() -> String {
     std::env::var("ANTHROPIC_API_KEY")
@@ -32,11 +32,16 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
     }];
 
     let response = reqwest::Client::new()
-        .post(assistant::API_URL)
+        .post(Provider::Anthropic.endpoint(assistant::ANTHROPIC_BASE))
         .header("x-api-key", key())
         .header("anthropic-version", assistant::API_VERSION)
         .header("content-type", "application/json")
-        .json(&assistant::request(assistant::MODEL, &system, &messages))
+        .json(&assistant::request(
+            Provider::Anthropic,
+            assistant::ANTHROPIC_MODEL,
+            &system,
+            &messages,
+        ))
         .send()
         .await
         .expect("request failed");
@@ -49,7 +54,7 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
     );
 
     let mut response = response;
-    let mut decoder = assistant::SseDecoder::default();
+    let mut decoder = assistant::SseDecoder::new(Provider::Anthropic);
     let mut answer = String::new();
     let mut done = false;
 
@@ -71,7 +76,10 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
         "expected SQL, got: {answer}"
     );
     // The prompt asks for fenced blocks, because the UI turns them into buttons.
-    assert!(answer.contains("```"), "expected a fenced block, got: {answer}");
+    assert!(
+        answer.contains("```"),
+        "expected a fenced block, got: {answer}"
+    );
 }
 
 /// A bad key must produce the message the settings dialog promises, not a raw
@@ -79,13 +87,21 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
 #[tokio::test]
 #[ignore]
 async fn a_bad_key_is_reported_readably() {
-    let messages = vec![ChatMessage { role: "user".into(), content: "hi".into() }];
+    let messages = vec![ChatMessage {
+        role: "user".into(),
+        content: "hi".into(),
+    }];
     let response = reqwest::Client::new()
-        .post(assistant::API_URL)
+        .post(Provider::Anthropic.endpoint(assistant::ANTHROPIC_BASE))
         .header("x-api-key", "sk-ant-obviously-not-valid")
         .header("anthropic-version", assistant::API_VERSION)
         .header("content-type", "application/json")
-        .json(&assistant::request(assistant::MODEL, "sys", &messages))
+        .json(&assistant::request(
+            Provider::Anthropic,
+            assistant::ANTHROPIC_MODEL,
+            "sys",
+            &messages,
+        ))
         .send()
         .await
         .expect("request failed");
@@ -95,4 +111,76 @@ async fn a_bad_key_is_reported_readably() {
     let message = assistant::http_error(status, &response.text().await.unwrap_or_default());
     assert!(message.contains("API key"), "{message}");
     assert!(message.contains("Settings"), "{message}");
+}
+
+/// The same flow against a **local** OpenAI-compatible server.
+///
+/// Ignored and opt-in, because it needs something listening. It is the cheapest
+/// possible proof that the second adapter is real rather than plausible:
+///
+///     ollama serve &
+///     ollama pull llama3.1
+///     OLLAMA_MODEL=llama3.1 cargo test --manifest-path src-tauri/Cargo.toml \
+///         --test assistant_live -- --ignored ollama --nocapture
+#[tokio::test]
+#[ignore]
+async fn a_local_openai_compatible_server_streams_back() {
+    let model = std::env::var("OLLAMA_MODEL")
+        .expect("set OLLAMA_MODEL to a model you have pulled, e.g. llama3.1");
+    let base =
+        std::env::var("OLLAMA_BASE").unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+
+    assert!(
+        assistant::is_local(&base),
+        "this test is for a local server"
+    );
+    assert!(
+        !Provider::OpenAiCompatible.requires_key(&base),
+        "a local server should not be asked for a key"
+    );
+
+    let system = assistant::system_prompt("8.4.0", Some("TABLE `users` (id int NOT NULL PK)"));
+    let messages = vec![ChatMessage {
+        role: "user".into(),
+        content: "Write a query counting the users. One sql block, no commentary.".into(),
+    }];
+
+    let response = reqwest::Client::new()
+        .post(Provider::OpenAiCompatible.endpoint(&base))
+        .header("content-type", "application/json")
+        .json(&assistant::request(
+            Provider::OpenAiCompatible,
+            &model,
+            &system,
+            &messages,
+        ))
+        .send()
+        .await
+        .expect("is the server running?");
+
+    let status = response.status();
+    assert!(
+        status.is_success(),
+        "{}",
+        assistant::http_error(status.as_u16(), &response.text().await.unwrap_or_default())
+    );
+
+    let mut response = response;
+    let mut decoder = assistant::SseDecoder::new(Provider::OpenAiCompatible);
+    let mut answer = String::new();
+    while let Ok(Some(bytes)) = response.chunk().await {
+        for event in decoder.push(&String::from_utf8_lossy(&bytes)) {
+            match event {
+                StreamEvent::Text { delta } => answer.push_str(&delta),
+                StreamEvent::Failed { message } => panic!("stream failed: {message}"),
+                _ => {}
+            }
+        }
+    }
+
+    println!("--- answer ---\n{answer}\n--------------");
+    assert!(
+        answer.to_ascii_lowercase().contains("select"),
+        "expected SQL, got: {answer}"
+    );
 }

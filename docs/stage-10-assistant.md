@@ -3,8 +3,8 @@
 **Goal:** ask a question in plain language and get SQL you can read, in the
 editor, ready to run yourself.
 **Builds on:** [Stage 9 — Query history](stage-9-query-history.md).
-**Status:** 🚧 Experimental — built 2026-09-08; never yet run against the real
-API from this machine (no key here).
+**Status:** 🚧 Experimental — built 2026-09-08, multi-provider the same day;
+never yet run against a real endpoint from this machine.
 
 ---
 
@@ -30,8 +30,10 @@ completion.
 
 - Executing anything. See above.
 - Sending row data. The schema's *shape* goes; its contents never do.
-- Choosing a provider. This talks to one API; a provider abstraction with one
-  implementation is a guess about a second one.
+- ~~Choosing a provider.~~ **Reversed the same day** — see §8. The reasoning
+  ("an abstraction with one implementation is a guess about a second one") was
+  right to wait and right to be abandoned the moment a real second and third
+  arrived.
 - Conversation persistence. Chats are per-session; history already records the
   statements that mattered.
 
@@ -57,8 +59,9 @@ is why the crate count is unchanged.
 
 ## 3. Decisions
 
-- **`claude-opus-5`.** Writing correct SQL against an unfamiliar schema is the
-  kind of task where model quality shows.
+- **`claude-opus-5` is the default**, not the only option — see §8. Writing
+  correct SQL against an unfamiliar schema is the kind of task where model
+  quality shows, so that is where the default sits.
 - **Streaming, with `thinking.display: "summarized"` set explicitly.** On this
   model thinking is on by default but its display defaults to omitted, which in
   a chat window is indistinguishable from the app having hung. The summary is
@@ -100,7 +103,7 @@ is why the crate count is unchanged.
 - [x] **A5 — The key is in the keychain**, never in a config file, never read back out.
 - [x] **A6 — A mid-stream failure keeps the partial answer.**
 - [x] **A7 — With no key the chat says so and cannot be used.**
-- [ ] **A8 — Confirmed against the real API.** `assistant_live.rs` exists and is ignored by default; there is no key on this machine to run it with.
+- [ ] **A8 — Confirmed against a real endpoint.** Three ignored tests in `assistant_live.rs`: Anthropic with a key, a rejected key, and a local Ollama needing no key at all. None has been run — there is no key and no local server on this machine.
 
 ---
 
@@ -115,7 +118,7 @@ is why the crate count is unchanged.
 - [x] `src/assistant.ts`, `#assistant-dialog`, a rail button and **Ctrl+K**
 - [x] Fence splitting that tolerates an unterminated block, which is what a cut-off reply looks like
 - [x] Settings: key field, save/forget, and a plain statement of what is sent
-- [x] **13 UI tests** on both engines
+- [x] **18 UI tests** on both engines, five of them covering provider choice
 
 ### Phase 3 — Verification
 - [x] `src-tauri/tests/assistant_live.rs` — two ignored tests: the API accepts our body and streams fenced SQL back; a bad key produces the message settings promises
@@ -166,3 +169,82 @@ largest single piece of work outside the feature.
   — no tools — so the worst case is a misleading answer rather than an action.
 - **The model can be confidently wrong about SQL.** That is precisely why it
   does not run it, and why the statement lands somewhere you read it first.
+
+---
+
+## 8. Any provider, including local — 2026-09-08
+
+> *"Could it accept local implementations? like Ollama? OpenAI? Or any other?
+> probably worth to make it configurable on settings isnt?"*
+
+Yes, and it cost less than the first provider did.
+
+### Two adapters, not five
+
+**Ollama, LM Studio, llama.cpp's server, vLLM, OpenRouter, Groq and Azure all
+expose the OpenAI Chat Completions shape.** So the axis is not "which vendor"
+but "which of two wire formats, and at which URL":
+
+| | Anthropic | OpenAI-compatible |
+|---|---|---|
+| Endpoint | `{base}/v1/messages` | `{base}/chat/completions` |
+| Auth | `x-api-key` + `anthropic-version` | `Authorization: Bearer` |
+| System prompt | a top-level field | the first message |
+| Text delta | `content_block_delta` → `delta.text` | `choices[0].delta.content` |
+| Thinking | `thinking_delta` | `delta.reasoning_content` (a convention) |
+| End of turn | `message_delta.stop_reason` | `choices[0].finish_reason` |
+| Terminator | — | `data: [DONE]` |
+
+**The SSE framing is identical**, so only payload decoding forks — which is the
+single fact that made a second provider cheap. A third adapter would need a
+provider speaking neither shape.
+
+Settings offers Anthropic, OpenAI, Ollama, LM Studio and "Other
+OpenAI-compatible"; the last is not an escape hatch but the general case, since
+a base URL is all that separates Ollama from Groq.
+
+### Decisions
+
+- **One keychain account per provider** (`assistant:anthropic`,
+  `assistant:openai`). Switching to a local model and back must not lose a cloud
+  key, and a keyless local setup must not shadow a stored one.
+- **A local server is not asked for a key.** `requires_key` is false for a local
+  base URL, and the request omits the auth header entirely when there is no key
+  — a local model given `Authorization: Bearer` is at best ignored.
+- **"Nothing leaves this machine" is said out loud** when the base URL is local.
+  That is the genuinely better property of running locally and the main reason
+  to support it; the schema-is-shared warning is replaced rather than repeated.
+- **Nothing Anthropic-specific is sent to an OpenAI-compatible server.** An
+  unknown parameter is a 400 on some servers and silently ignored on others, and
+  neither is worth risking for a field a local model would not honour.
+- **The model field is cleared, not guessed, when a preset cannot know it.**
+  Which models a machine has pulled is a property of that machine; a guess
+  produces a confident 404. The chat stays disabled with "No model set" until
+  one is chosen, and the field carries a per-preset placeholder.
+- **Provider, base URL and model live in `localStorage`**, with the settings.
+  None of it is secret — the key is the secret, and it is elsewhere.
+
+### A bug the tests caught
+
+`is_local` split the host on `:` to drop the port, which turns
+`http://[::1]:8080` into `[`. A perfectly ordinary local address would have been
+treated as remote: we would have demanded an API key it does not need, and
+warned that the schema was leaving a machine it never left. Bracketed IPv6 is
+now stripped before the port. There is also a test pinning the *other*
+direction — `https://localhost.example.com` and `http://evil.com/?x=localhost`
+must never be read as local, because that mistake suppresses a true warning.
+
+### Still unverified
+
+`assistant_live.rs` now has a third ignored test that runs the whole flow
+against a local Ollama:
+
+```
+ollama serve & ; ollama pull llama3.1
+OLLAMA_MODEL=llama3.1 cargo test --manifest-path src-tauri/Cargo.toml \
+    --test assistant_live -- --ignored ollama --nocapture
+```
+
+It needs nothing but a running server — no key, no account, no spend — which
+makes it the cheapest way to prove the second adapter is real rather than
+plausible. A8 now covers both.
