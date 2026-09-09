@@ -86,26 +86,6 @@ mise run test-ollama # the assistant against that local endpoint
 mise run ollama-down # tear it down
 ```
 
-## Releasing
-
-The version lives in `package.json`; `tauri.conf.json` reads it, and CI stamps
-it from the tag at build time. To cut a release, bump and tag in one step:
-
-```bash
-npm version patch     # or minor / major — writes package.json, the lockfile
-                      # AND src-tauri/Cargo.toml, commits, and tags vX.Y.Z
-git push --follow-tags
-```
-
-`npm version` owns the first two files; the `version` lifecycle script syncs
-`Cargo.toml` and stages it, so all three move together in one commit. Pushing
-the tag builds both installers and opens a **draft** release — publish it from
-the GitHub UI.
-
-Use `mise run set-version X.Y.Z` instead when you want to set the number without
-committing or tagging, such as bringing a tree back in line with a release CI
-stamped on its own.
-
 All three fixtures are rootless podman containers bound to localhost. See
 [dev/README.md](dev/README.md) for what each one seeds and why.
 
@@ -128,21 +108,47 @@ merely short.
 
 ## Releasing
 
+Four steps, every time.
+
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git push                 # 1. the tag must point at a commit the remote has
+npm version patch        # 2. or minor / major
+git push --follow-tags   # 3. pushing the tag is what starts the build
+                         # 4. publish the draft release on GitHub
 ```
 
-That is the whole flow. **The version comes from the tag**: CI stamps it into
-`package.json` — which `src-tauri/tauri.conf.json` reads, via
-`"version": "../package.json"` — and into `Cargo.toml`, so the installers and
-the updater manifest all call themselves what the tag says.
+**`npm version` does all the bookkeeping.** It writes `package.json` and the
+lockfile; the `version` lifecycle script then syncs `src-tauri/Cargo.toml` and
+stages it, so all three move in one commit tagged `vX.Y.Z`. It refuses to run on
+a dirty tree, so it cannot tag half-finished work.
 
-The build produces a **draft** release so the notes can be edited. **Publish it**
-before expecting anyone to receive it: the updater endpoint is
-`releases/latest/download/latest.json`, and a draft is not `latest`.
+**The version still comes from the tag.** CI re-stamps it at build time, so the
+installers and the updater manifest call themselves what the tag says even if
+the committed files disagree. `npm version` exists so they don't disagree —
+`v0.3.1` shipped while the tree still said `0.2.0`, because nothing wrote it
+back.
 
-To move the version in the working tree — so a checked-out tag builds the same
-number — `mise run set-version 0.2.0`.
+**Step 4 is not optional.** The build produces a *draft* so the notes can be
+edited, and the updater endpoint is `releases/latest/download/latest.json` — a
+draft is not `latest`, so an unpublished release reaches nobody.
+
+### Which bump
+
+`patch` for fixes and anything invisible. `minor` for a feature someone would
+notice — a new engine, a new panel. `major` is not in use: this is a POC below
+1.0, where `minor` already means "new capability".
+
+### Rehearsing without spending a tag
+
+Actions → Release → *Run workflow* with the **tag input empty**. It builds both
+installers from the current branch and publishes nothing. Use it rather than
+cutting a throwaway tag — a tag is the one thing you cannot cleanly undo once
+someone has fetched it.
+
+### Setting the version without releasing
+
+`mise run set-version X.Y.Z` writes all three files and neither commits nor
+tags. For bringing a tree back in line with a release CI stamped on its own.
 
 ## Targets
 
