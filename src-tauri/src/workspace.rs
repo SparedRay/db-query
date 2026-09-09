@@ -60,6 +60,16 @@ pub struct StoredTab {
     pub active_db: Option<String>,
     #[serde(default)]
     pub untitled_number: Option<u32>,
+    /// This tab arrived through the MCP server rather than being opened by the
+    /// person at the keyboard.
+    ///
+    /// Stored, so the mark survives a restart. Provenance that lasts only until
+    /// the app is closed is provenance you cannot rely on, and the whole reason
+    /// the mark exists is that a tab which appeared unbidden must not look like
+    /// one you opened. `#[serde(default)]` so every session file written before
+    /// Stage 13 loads unchanged and means "mine".
+    #[serde(default)]
+    pub external: bool,
 }
 
 /// One connection's tabs. Keyed by profile id, because a tab belongs to a
@@ -293,6 +303,48 @@ mod tests {
         let out = load(&dir);
         assert!(out.warning.is_none());
         assert_eq!(out.session.connections[0].tabs[0].title, "a");
+    }
+
+    /// A session file written before Stage 13 has no `external` key at all,
+    /// and the answer for every tab in it is "the user opened this". Getting
+    /// this wrong would put a provenance mark on everyone's existing tabs the
+    /// first time they ran a new build.
+    #[test]
+    fn a_session_from_before_provenance_existed_means_the_tabs_are_yours() {
+        let dir = tmp();
+        fs::write(
+            path_in(&dir),
+            br#"{"version":1,"connections":[{"connectionId":"c1","tabs":[{"title":"a","text":"SELECT 1;"}],"activeIndex":0}]}"#,
+        )
+        .unwrap();
+
+        let out = load(&dir);
+        assert!(out.warning.is_none());
+        assert!(!out.session.connections[0].tabs[0].external);
+    }
+
+    #[test]
+    fn an_external_tab_stays_external_across_a_save_and_load() {
+        let dir = tmp();
+        let mut marked = tab("from-a-client");
+        marked.external = true;
+        save(
+            &dir,
+            &SessionStore {
+                version: FILE_VERSION,
+                connections: vec![StoredWorkspace {
+                    connection_id: "c1".into(),
+                    tabs: vec![tab("mine"), marked],
+                    active_index: 0,
+                }],
+            },
+        )
+        .unwrap();
+
+        let back = load(&dir);
+        let tabs = &back.session.connections[0].tabs;
+        assert!(!tabs[0].external, "an ordinary tab was marked");
+        assert!(tabs[1].external, "the mark did not survive the round trip");
     }
 
     #[cfg(unix)]

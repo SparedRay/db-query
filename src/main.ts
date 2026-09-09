@@ -4,6 +4,8 @@ import type { SQLNamespace } from "@codemirror/lang-sql";
 import {
   api,
   defaultCsvOptions,
+  MCP_PUT_QUERY_EVENT,
+  type McpPutQuery,
   type ConnProfile,
   type TableRef,
   type RoutineRef,
@@ -37,6 +39,7 @@ import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
 import { createHistory } from "./history";
 import { createAssistant } from "./assistant";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -1572,6 +1575,7 @@ conns = new ConnectionManager($("rail"), {
     showTree(entry.profile.id);
     tabs.setActiveConnection(entry.profile.id);
     connected = entry.connected;
+    setMcpFocus(entry.profile.id);
     markActiveDb(tabs.active()?.activeDb ?? null);
     syncBusy();
   },
@@ -1656,6 +1660,7 @@ conns = new ConnectionManager($("rail"), {
     trees.delete(entry.profile.id);
     for (const t of tabs.forConnection(entry.profile.id)) tabs.discard(t.id);
     session.forget(entry.profile.id);
+    if (conns.active()?.profile.id === entry.profile.id) setMcpFocus(null);
   },
   notify: (m) => results.setMessage(m),
 }, openConnectionEditor);
@@ -2211,3 +2216,61 @@ applyLintSetting(true);
 
 results.setMessage("No connection. Use + in the left rail to add one.");
 syncBusy();
+
+// --------------------------------------------------------------- MCP server
+//
+// A tool outside this app can put a query in the editor. It cannot run one —
+// see `src-tauri/src/mcp.rs`, where the absence of an execute tool is the
+// design rather than a gap.
+
+/**
+ * Tell the backend which connection an MCP client sees.
+ *
+ * The backend deliberately holds no ambient "current connection" — a command
+ * that resolves its own target can be raced onto the wrong server by a UI
+ * switch. This is the exception, and it is narrow: nothing that executes reads
+ * it, and it is pushed from here because the visible workspace is a fact only
+ * the UI has.
+ *
+ * Fire and forget. The MCP server is off unless someone turned it on, so the
+ * command failing means nothing was listening anyway.
+ */
+function setMcpFocus(connectionId: string | null) {
+  void api.mcpSetFocus(connectionId).catch(() => {});
+}
+
+/**
+ * A query arrived from an MCP client: a new tab, focused, **never run**.
+ *
+ * The connection id travels with the payload rather than being assumed, so a
+ * query aimed at one server cannot land in another's workspace because the user
+ * switched while the tool was thinking. If that connection is gone the query is
+ * not silently dropped — it is reported, since the client has already been told
+ * it was placed.
+ */
+void listen<McpPutQuery>(MCP_PUT_QUERY_EVENT, (event) => {
+  const { sql, connectionId } = event.payload;
+  const target = conns.get(connectionId);
+  if (!target) {
+    results.setMessage(
+      "A query arrived from an MCP client for a connection that is no longer open.",
+    );
+    return;
+  }
+
+  const tab = tabs.create({ connectionId, contents: sql, external: true });
+  const visible = tabs.activeConnection() === connectionId;
+  if (visible) {
+    view.focus();
+    results.setMessage(
+      `${tab.title} was added by an MCP client. Nothing has been run — read it first.`,
+    );
+  } else {
+    // Created on the right connection regardless, so switching there finds it.
+    results.setMessage(
+      `An MCP client added a query to ${target.profile.name}, which is not the ` +
+        "workspace on screen.",
+    );
+  }
+  session.schedule();
+});

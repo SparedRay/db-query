@@ -347,6 +347,10 @@ export const schemaBackend: Backend = {
   list_routines: () => SCHEMA.routines,
   refresh_schema: () => null,
   use_database: () => null,
+  // Pushed on every connection switch. Inert unless the MCP server is running,
+  // which it never is in a test — but it is a real command, so an unstubbed one
+  // would make every connect log a rejected promise.
+  mcp_set_focus: () => null,
   // Text generation lives in Rust and is tested there. What these stubs make
   // checkable is the *arguments* — that the tree asked for the right thing.
   generate_select: (a) =>
