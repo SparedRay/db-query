@@ -71,35 +71,114 @@ So the work is concentrated in four files, and nothing above them has to move.
 
 ## 3. The seam
 
-**An enum, not a trait.** There are exactly two backends and there is no plan
-for a third; an `enum Backend { MySql(..), Elastic(..) }` with match dispatch
-needs no `async_trait` dependency, no boxing, and no object-safety contortions
-around async methods. If a third engine ever arrives and the matches get
-tiresome, converting an enum to a trait is mechanical — converting a premature
-trait back is not. (The same reasoning that made the assistant wait for its
-second provider before abstracting; see Stage 10 §8.)
+> *"even when no further engines are planned we could still need more
+> integrations in future like Snowflake or other DBs so lets not block
+> ourselves"*
+
+**This reverses the first draft of this section**, which recommended an
+`enum Backend` with two variants on the grounds that there was no third engine
+planned. That reasoning was answered directly: a third *is* plausible, so the
+design target is N, not 2.
+
+### What actually blocks a third engine — and it is not the dispatch
+
+The dispatch mechanism is the least important part of this. What decides whether
+engine #3 is a weekend or a rewrite is:
+
+1. **Whether the interface is defined by capabilities or by MySQL's habits.**
+2. **Whether engine differences live in data or in scattered conditionals.**
+
+The second is the one that bites. Write `if backend.is_elastic() { refuse writes }`
+in `exec.rs` and Snowflake needs a new conditional *there*, and in the tree, and
+in the assistant, and in export. Write `if !caps.writes { refuse }` and Snowflake
+declares `writes: true` and none of those files are touched.
+
+So the plan carries **a capability descriptor** as a first-class thing:
 
 ```
-ServerConn                  ->  ServerConn { profile, backend: Backend, .. }
-Backend::MySql(MySqlServer)     meta/killer connections, schema cache
-Backend::Elastic(EsServer)      base URL, auth, http client, catalog
+Capabilities {
+    writes, transactions, multi_statement, delimiter_blocks,
+    routines, cancellation, streaming_export,
+    row_cap: RowCap::{ClientLimit, ServerFetchSize},
+    namespace_label: "database" | "catalog" | "schema",
+}
 ```
 
-`TabSession.exec: Mutex<Option<MySqlConnection>>` becomes backend-specific too —
-**Elasticsearch needs no per-tab connection at all**, which deletes the lazy
-connect, the connection count and the `KILL` machinery for that side rather than
-reimplementing them.
+It is returned with `ConnInfo`, so **the frontend consults it too** — an index
+should not offer "Drop table…", and a cluster should not offer `BEGIN`. Today
+those menus are unconditional because there has only ever been one engine.
+
+### A trait, with capabilities as data
+
+With N ≥ 3 expected, each engine should be **one file implementing one
+interface**, so that adding one is an addition rather than a hunt for every
+match arm.
+
+```
+trait Engine {
+    fn capabilities(&self) -> &Capabilities;
+    async fn connect(...) -> Result<ConnInfo>;
+    async fn namespaces(...) -> Result<Vec<String>>;
+    async fn tables(...) / columns(...) / routines(...)
+    async fn run(&self, stmt: &Statement, budget: RowBudget, cancel: &CancelToken)
+        -> Result<Outcome>;
+    async fn cancel(...);
+}
+```
+
+`Outcome`, `CellValue` and `ColumnMeta` are already engine-neutral (§2), so the
+trait returns the types the app already speaks.
+
+**Cost of dynamic dispatch, measured rather than assumed:** `dyn Trait` with
+async methods is not object-safe natively, so it needs `async_trait`.
+`async-trait 0.1.92` is **already in the Linux tree** via
+`keyring -> secret-service -> zbus`, and **absent from the Windows tree** — so
+the true cost is one crate on Windows. It is `MIT OR Apache-2.0`, it is a
+**proc macro**, so it runs at build time and contributes **zero bytes to the
+binary**; it appears in the attribution manifest as one more build-time entry
+the file already documents as an over-listed superset. That is a small enough
+price that it should not have been the deciding argument in the first place.
+
+### Two families, not N unrelated engines
+
+The engines worth anticipating fall into two shapes, and noticing this changes
+how Phase 2 is written:
+
+| Family | Transport | Examples |
+|---|---|---|
+| Wire protocol | `sqlx` | MySQL, PostgreSQL, MariaDB |
+| HTTP + JSON SQL API | `reqwest` | **Elasticsearch**, **Snowflake** (`POST /api/v2/statements`), Databricks, BigQuery |
+
+Snowflake's REST API has the same shape as Elasticsearch's: post a statement,
+receive columns and rows and a pagination handle. So `elastic.rs` should be
+**a thin engine over a shared "HTTP SQL API" helper** — request, poll or page,
+map columns, map errors — rather than a bespoke module. That helper is the part
+Snowflake would reuse, and building it now costs almost nothing while
+retrofitting it later costs the whole file.
+
+### The order that keeps this honest
+
+`ServerConn` becomes `{ profile, engine: Box<dyn Engine>, .. }`, and
+`TabSession.exec: Mutex<Option<MySqlConnection>>` moves behind the engine —
+Elasticsearch needs no per-tab connection at all, which *deletes* the lazy
+connect and the `KILL` machinery for that side rather than reimplementing it.
+
+**MySQL is ported to the trait first, with no second engine present.** If the
+existing suite still passes against a `MysqlEngine` behind `dyn Engine`, the
+seam is real; if it needed changes to accommodate Elasticsearch, the seam was
+shaped by the second engine and would be shaped again by the third.
 
 ---
 
 ## 4. Decisions to make before writing code
 
-- **D1 — Refuse what the engine cannot do, before sending it.** `classify()`
-  already sorts statements into Select / RowReturning / Modify / Session / Other.
-  For Elasticsearch, anything but Select and RowReturning is rejected with
-  *"Elasticsearch SQL is read-only — SELECT, SHOW and DESCRIBE."* Better than
-  forwarding an `UPDATE` and relaying a parser error, and it is a fact from the
-  API reference rather than a guess.
+- **D1 — Refuse what the engine cannot do, before sending it — from
+  capabilities, never from the engine's name.** `classify()` already sorts
+  statements into Select / RowReturning / Modify / Session / Other; the refusal
+  reads `caps.writes` and `caps.transactions`, so a future engine that allows
+  writes needs no change here. The message names the engine and what it does
+  support. Better than forwarding an `UPDATE` and relaying a parser error, and
+  read-only is a fact from the API reference rather than a guess.
 - **D2 — `fetch_size`, not auto-LIMIT.** Auto-LIMIT rewrites the user's SQL,
   which Stage 9 established we must not record as theirs. Elasticsearch has a
   first-class row cap, so use it: `fetch_size` = our row budget, take the first
@@ -107,14 +186,19 @@ reimplementing them.
   grid already renders. Then **close the cursor** (`POST /_sql/close`) rather
   than leaking server-side state — the one piece of cleanup this engine needs
   that MySQL does not.
-- **D3 — Catalogs are the databases.** Elasticsearch has no schemas, but it has
-  catalogs, a `SHOW CATALOGS` command and a `catalog` request field. Mapping
-  them onto the existing database concept is honest, and `use_database` becomes
-  "set this tab's catalog". The alternative — inventing a fake database name —
-  would put a lie in the tree.
+- **D3 — Catalogs are the databases, and the label is data.** `namespace_label`
+  comes from the capabilities so the UI can say "catalog" where that is the true
+  word — Snowflake would say "schema" — instead of every engine borrowing
+  MySQL's vocabulary.
+  Elasticsearch has no schemas, but it has catalogs, a `SHOW CATALOGS` command
+  and a `catalog` request field. Mapping them onto the existing namespace concept
+  is honest, and `use_database` becomes "set this tab's catalog". The
+  alternative — inventing a fake database name — would put a lie in the tree.
 - **D4 — Indices are tables; there are no routines.** `SHOW TABLES` gives name
   and type, `DESCRIBE` gives columns. The tree already **omits empty groups**,
-  so Procedures and Functions simply will not render. No frontend change.
+  so Procedures and Functions will not render — but the *context menus* are
+  unconditional today and must start reading capabilities, or an index will
+  offer "Drop table…".
 - **D5 — Cancellation is dropping the request.** No second connection, no
   `KILL`. The tab's existing `cancel_requested` flag gates it; the work is a
   cancellation token the HTTP call selects on.
@@ -161,13 +245,16 @@ reimplementing them.
 
 ## 6. Task tracker
 
-### Phase 1 — The seam
-- [ ] `Backend` enum; move MySQL specifics behind `Backend::MySql`
-- [ ] `ConnProfile.kind` + `url`, defaulted; connection dialog grows the Elasticsearch shape
-- [ ] Route `connect` / `disconnect` / `tab_status` / `use_database` through the enum, with the existing MySQL tests still passing at every step
+### Phase 1 — The seam, proved on MySQL alone
+- [ ] `Capabilities`, returned with `ConnInfo`; MySQL declares everything it already does
+- [ ] `trait Engine`; `MysqlEngine` implements it; `ServerConn` holds `Box<dyn Engine>`
+- [ ] Replace the unconditional menus and refusals with capability checks — **with no second engine present**, so the seam cannot be shaped by one
+- [ ] `ConnProfile.kind` + `url`, defaulted; connection dialog grows a second shape
+- [ ] **Gate:** the whole existing suite passes unchanged. If it needed edits, the seam is wrong
 
 ### Phase 2 — The engine
-- [ ] `src-tauri/src/elastic.rs`: `POST /_sql`, `fetch_size`, cursor detection, `/_sql/close`, auth shapes, error mapping
+- [ ] A shared **HTTP SQL API** helper — request, page, map columns, map errors — the part Snowflake would reuse
+- [ ] `src-tauri/src/elastic.rs` on top of it: `POST /_sql`, `fetch_size`, cursor detection, `/_sql/close`, auth shapes
 - [ ] Map `columns[].type` onto `TypeHint`; decode JSON scalars into `CellValue`
 - [ ] `SHOW TABLES` / `DESCRIBE` into the existing `TableRef` / `ColumnInfo`
 - [ ] Read-only refusal (D1), cancellation token (D5)
@@ -182,8 +269,9 @@ reimplementing them.
 
 ## 7. What this stage is *not*
 
-- Not a general "any database" abstraction. Two engines, two enum variants, and
-  a third one is a decision to take when there is a third — not now.
+- Not every engine at once. The seam is built for N and the *second* one is
+  built now; Snowflake and PostgreSQL are the cases it is shaped to accept, not
+  cases it delivers.
 - Not OpenSearch. Similar, different endpoint and response shape.
 - Not writes to Elasticsearch through some other API. The engine's SQL surface
   is read-only and this follows it.
@@ -206,3 +294,7 @@ reimplementing them.
   parser's message is the only guidance the user gets.
 - **A second engine doubles the hands-on surface** for every future stage, and
   the release loop (Stage 8) has still never been exercised end to end.
+- **A seam designed for three engines and tested against two can still be
+  wrong.** The mitigation is the Phase 1 gate — port MySQL first and require the
+  existing suite to pass untouched — plus writing the HTTP helper as if
+  Snowflake were next, because on this plan it is.
