@@ -109,18 +109,28 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           # `apt-get update` fails the whole step if *any* configured repository
-          # is unhappy, including ones this build never installs from. The
-          # runner image configures Google's Chrome repo, and on 2026-09-09 its
-          # index was being republished while we fetched it — a hash-sum
-          # mismatch on a repo we do not read failed the Linux build.
+          # is unhappy, including ones this build never installs from. Google's
+          # Chrome repo republished its index while we were fetching it, and the
+          # resulting hash-sum mismatch failed the Linux build.
           #
-          # Everything below comes from Ubuntu's own archive, so the third-party
-          # lists are dropped first. `rm -f` on names that may not be there is
-          # deliberate: this must not become a second thing that can fail.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                     /etc/apt/sources.list.d/microsoft-prod.list
-          # For the transient kind, which retrying does fix.
-          sudo apt-get update -o Acquire::Retries=3
+          # Third-party sources are matched by **content, not by filename**. The
+          # first attempt at this removed `google-chrome.list`, which is the
+          # 22.04 spelling; on 24.04 the same repository is
+          # `google-chrome.sources` in deb822 format, so nothing was removed and
+          # the build failed again in exactly the same way.
+          for f in /etc/apt/sources.list.d/*; do
+            [ -f "$f" ] || continue
+            if grep -qE 'dl\.google\.com|packages\.microsoft\.com' "$f"; then
+              echo "Dropping third-party apt source: $f"
+              sudo rm -f "$f"
+            fi
+          done
+          # Everything installed below comes from Ubuntu's own archive, and the
+          # runner image ships with its indexes already populated. So if the
+          # update still reports a problem, say so and let `apt-get install` be
+          # the gate — it is the step that actually has to succeed.
+          sudo apt-get update -o Acquire::Retries=3 \
+            || echo "::warning::apt-get update reported an error; continuing, the install below is the real gate."
           sudo apt-get install -y \
             build-essential curl wget file pkg-config patchelf \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
