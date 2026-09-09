@@ -395,9 +395,7 @@ impl<R: Runtime> Tools<R> {
             .filter(|d| !d.is_empty())
             .ok_or_else(|| {
                 ErrorData::invalid_request(
-                    "This connection has no default database. Call list_databases and \
-                     pass one."
-                        .to_string(),
+                    no_default_namespace(&server.capabilities.namespace_label),
                     None,
                 )
             })
@@ -516,6 +514,22 @@ impl<R: Runtime> Tools<R> {
                 .to_string(),
         })
     }
+}
+
+/// What to say when the caller named no namespace and the connection has no
+/// default one.
+///
+/// **In the engine's own word.** `namespace_label` exists precisely so MySQL's
+/// vocabulary is not put in front of every engine, and Elasticsearch — which
+/// says "catalog" and has no default one — is where that shows: this is the
+/// message its users see on the first call every time.
+///
+/// A free function so the property is testable without a live connection.
+fn no_default_namespace(label: &str) -> String {
+    format!(
+        "This connection has no default {label}. Call list_databases and pass one \
+         as `database`."
+    )
 }
 
 fn structured<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
@@ -906,6 +920,22 @@ mod tests {
         ] {
             assert!(!origin_is_local(bad), "{bad} should not be local");
         }
+    }
+
+    /// The engine's word, not MySQL's. Elasticsearch is the case that made this
+    /// visible: it calls them catalogs and has no default one, so this message
+    /// is the first thing an MCP client sees on that connection.
+    #[test]
+    fn the_missing_namespace_message_uses_the_engines_own_word() {
+        assert!(no_default_namespace("catalog").contains("no default catalog"));
+        assert!(no_default_namespace("database").contains("no default database"));
+        // And it says which argument to pass, since the argument is called
+        // `database` whatever the engine calls the thing.
+        assert!(no_default_namespace("catalog").contains("`database`"));
+        assert!(
+            !no_default_namespace("catalog").contains("no default database"),
+            "MySQL's word leaked into another engine's message"
+        );
     }
 
     #[test]

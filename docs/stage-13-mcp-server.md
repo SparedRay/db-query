@@ -130,9 +130,7 @@ answer was asked for and this may not have been.
       `list_tables` returned the seven objects in `poc` with `VIEW` distinguished
       from `BASE TABLE`, and `describe_table` returned real types, keys and
       nullability (`varchar(190)` `UNI`, `decimal(12,2)`, `int` `PRI`).
-      **Elasticsearch is still unchecked** — it is a different `Engine`
-      implementation of the same three calls, so it is a real gap, not a
-      formality.
+      **Live Elasticsearch, same day** — see §15.
 - [x] **M3 — `put_query` lands in the editor**, in a new tab, focused, **not
       run**, and visibly marked as external. Asserted in `tests/ui/mcp.spec.ts`,
       where the load-bearing assertion is the negative one: `run_script` never
@@ -550,3 +548,50 @@ That one covers a **different** race: a new process binding a port the previous
 process has not yet released, which no amount of correctness inside one process
 can prevent. This section is the half that was ours to fix, and it should have
 been fixed here rather than papered over there.
+
+---
+
+## 15. Elasticsearch, and the word this engine uses — 2026-09-09
+
+The other half of M2, and the half that mattered: the three schema tools go
+through the `Engine` trait, and until now only MySQL's implementation had ever
+been reached through MCP.
+
+With the Elasticsearch connection in front, and **nothing else changed**:
+
+    list_databases  -> { connection: "Elastic", engine: "elasticsearch",
+                         label: "catalog", databases: ["docker-cluster"],
+                         defaultDatabase: null }
+    list_tables     -> { database: "docker-cluster",
+                         tables: [{ name: "orders", kind: "TABLE" }] }
+    describe_table  -> user VARCHAR, total DOUBLE, created_at TIMESTAMP
+
+Three things worth naming. The **focus followed the window** — the server
+reported the connection the user was looking at, with no client involvement,
+which is §3.3's whole claim and had never been tested with two engines open.
+The **vocabulary followed the engine**: `label: "catalog"`, not "database". And
+the **types are the engine's own**, mapped from the index mapping to SQL types
+rather than approximated.
+
+`put_query` then took a `GROUP BY` written from that mapping — double-quoted
+identifiers, because this is Elasticsearch SQL and backticks are a syntax error
+there — and it arrived in the window like the MySQL one did.
+
+### One bug, found by reading the output
+
+Elasticsearch has no default catalog, so the first `list_tables` returns an
+error — and that error said:
+
+> This connection has no default **database**. Call list_databases and pass one.
+
+`namespace_label` exists precisely so that MySQL's word is not put in front of
+every engine. Putting it in the one message an Elasticsearch user is guaranteed
+to see, on their first call, every time, is the exact failure the capability was
+introduced to prevent — §3 of the Stage 11 tracker, arriving back as a bug.
+
+Now built from the engine's own label, and pulled out into
+`no_default_namespace(label)` so it can be asserted without a live connection.
+The test also checks MySQL's word cannot leak back into another engine's
+message, which is the thing that would silently regress.
+
+**M2 is done.** M4 and M7 remain.
