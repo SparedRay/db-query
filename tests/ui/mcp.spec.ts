@@ -426,6 +426,81 @@ test("a boot that cannot bind reports it and keeps the preference", async ({ pag
   expect(await commandNames(page)).toContain("mcp_start");
 });
 
+/**
+ * Restarting the app races its own previous process for the port. The old one
+ * has been told to quit and has not yet released the socket, so the first bind
+ * fails — and because a boot failure keeps the preference rather than clearing
+ * it, nothing retried and the server stayed down until somebody toggled it by
+ * hand. Reported from real use, which is where it was found.
+ */
+test("a boot retries a port that is busy for a moment", async ({ page }) => {
+  let attempts = 0;
+  let running = false;
+  await withServer(page, {
+    mcp_status: () => ({
+      running,
+      port: running ? 49731 : null,
+      url: running ? URL_49731 : null,
+    }),
+    mcp_start: (a) => {
+      attempts++;
+      // 1 is the user turning it on, which has to succeed or the preference
+      // would be cleared and there would be no boot to test. 2 is the boot
+      // losing the race with the process that has not let go of the port yet;
+      // 3 is the retry finding it free — the shape of the race.
+      if (attempts === 2) throw new Error("address in use");
+      running = true;
+      return { running: true, port: Number(a.port), url: `http://127.0.0.1:${a.port}/mcp` };
+    },
+  });
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").check();
+  await expect(page.locator("#set-mcp-status")).toContainText("49731");
+  await page.click("#set-close");
+
+  // A restart is a fresh process: nothing is listening until boot binds again.
+  running = false;
+  await page.reload();
+
+  await expect.poll(async () => attempts, { timeout: 5000 }).toBeGreaterThanOrEqual(3);
+  await openIntegrations(page);
+  await expect(page.locator("#set-mcp-on")).toBeChecked();
+  await expect(page.locator("#set-mcp-status")).toContainText("49731");
+});
+
+/** A toggle must not pause: the user is watching it. */
+test("turning it on by hand fails at once rather than retrying", async ({ page }) => {
+  let attempts = 0;
+  await withServer(page, {
+    mcp_start: () => {
+      attempts++;
+      throw new Error("address in use");
+    },
+  });
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").click();
+
+  await expect(page.locator("#set-mcp-status")).toContainText("address in use");
+  expect(attempts).toBe(1);
+});
+
+/** The reason has to outlive the moment it happened. */
+test("reopening Settings still says why it did not start", async ({ page }) => {
+  await withServer(page, {
+    mcp_start: () => {
+      throw new Error("Could not listen on 127.0.0.1:49731 (address in use).");
+    },
+  });
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").click();
+  await expect(page.locator("#set-mcp-status")).toContainText("address in use");
+  await page.click("#set-close");
+
+  // Reopening repaints from a fresh mcp_status, which knows only "not running".
+  await openIntegrations(page);
+  await expect(page.locator("#set-mcp-status")).toContainText("address in use");
+});
+
 /** A fresh install listens on nothing, which is the only acceptable default. */
 test("a fresh install starts nothing", async ({ page }) => {
   await withServer(page);
