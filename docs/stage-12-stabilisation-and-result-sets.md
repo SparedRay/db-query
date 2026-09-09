@@ -821,9 +821,14 @@ cursor to 0 reddens the cursor test. 288 Rust unit tests and 534 UI tests pass.
 ## 19. The editor's selection was never visible on the dark theme — 2026-09-09
 
 Reported as a Windows problem: Ctrl+A "seems weird", the text does not look
-highlighted, and it is fine on Linux. **It is not a Windows problem.** It is a
-dark-theme problem, and the platform was a coincidence of which theme each
-machine happened to be on.
+highlighted, and it is fine on Linux.
+
+**The first diagnosis was wrong and is left here rather than tidied away.** It
+said: not a platform problem, a dark-theme one, and the platforms differ only in
+which theme each machine is on. Both machines are on the **light** theme, so
+that explanation is dead. What is left is simpler and less satisfying — the same
+colour, at 1.44:1, on two different displays, visible on one and not on the
+other. Contrast that low is not a colour choice, it is a coin flip.
 
 ### What was wrong
 
@@ -859,6 +864,14 @@ this is a band behind body text on `--bg` — and reusing the header colour scor
 only 1.56:1. Chosen by measurement: **2.20:1** against the editor background,
 with `--fg` still at 5.76:1 on top of it, which is the constraint that stops
 "make it brighter" from being the whole answer.
+
+**The light theme was raised a second time**, and that is the part worth
+remembering. The first attempt took it from 1.44 to 1.65 — a measurable
+improvement, chosen because the dark theme was assumed to be the real problem.
+It was still the faint end of the scale, on the only display anyone had checked
+it on. Both themes now sit at ~2.1:1 (`#8ab4f8` on white, `#35507f` on
+`#16181d`), and the test's bar moved from 1.6 to **2.0** so that the earlier
+"improvement" would not pass it either.
 
 ### The test asserts a contrast ratio, not a colour
 

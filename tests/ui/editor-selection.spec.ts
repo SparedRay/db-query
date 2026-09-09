@@ -80,10 +80,12 @@ for (const theme of ["dark", "light"] as const) {
     const band = rgb(c.selection);
 
     // Not a colour, a visible difference. CodeMirror's own default scores 1.35
-    // here on the dark theme, which is the bug this guards.
+    // here on the dark theme, which is the bug this guards. The bar is 2.0
+    // rather than "better than that": a first fix at 1.65 measured as an
+    // improvement and was still reported as invisible on another display.
     const seen = contrast(band, ground);
     expect(seen, `selection ${c.selection} on ${ground.join(",")} is ${seen.toFixed(2)}:1`)
-      .toBeGreaterThan(1.6);
+      .toBeGreaterThan(2);
 
     // And the text has to stay readable on top of it, which is the constraint
     // that stops "make it brighter" from being the whole answer.
