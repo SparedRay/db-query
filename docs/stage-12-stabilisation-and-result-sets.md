@@ -744,3 +744,74 @@ fine. A build that fails is the only version of this that stays fixed.
 I destroyed `about.toml` mid-edit with `open(p, "w").write(open(p).read() ...)`,
 which truncates the file before the read runs. It was rebuilt from `git` plus
 the generated checksums, and every edit after that read first and wrote once.
+
+---
+
+## 18. A Format action for the editor — 2026-09-09
+
+`Ctrl+Shift+F`, and a **Format** button in the editor header. The selection if
+there is one, otherwise the whole tab.
+
+**The formatter already existed** — `sqlfmt::tidy`, written for the
+one-lined view definitions `SHOW CREATE VIEW` hands back. What it needed was to
+drop rule 1. `tidy` returns its input untouched when every line is already
+narrower than 120 characters, which is exactly right when it is guessing whether
+to act and exactly wrong when the user pressed a button. So the layout moved
+into a new `format()` that always acts, and `tidy` is now `format()` guarded by
+rule 1. Rule 2 — re-lex the output and compare token for token, returning the
+original if anything differs — is untouched, and here it becomes the interface:
+`format` returns `None`, the command returns an error, and the UI says so.
+
+### `DELIMITER` would have corrupted scripts, silently
+
+The first thing the new entry point met was the shape this app generates itself:
+
+    DELIMITER $$
+    CREATE PROCEDURE p() BEGIN SELECT 1; END$$
+    DELIMITER ;
+
+laid out as `END$$ DELIMITER;` — one line, **token for token identical to the
+input**, so rule 2 could not see it, and no longer a script that runs.
+`DELIMITER` is a *client* directive that owns its whole line; the server has
+never understood it.
+
+The fix is to split the text on those lines, lay out each run between them, and
+copy the directives across verbatim. The rule for recognising one is
+`split.rs`'s, quoted rather than reinvented: two modules disagreeing about what
+a directive is would be a bug neither could show you. `chunks()` does not track
+strings or comments the way `split.rs` does; the consequence is bounded and in
+the safe direction, and is written down where it happens — a `DELIMITER` opening
+a line *inside* a string would split a run, and rule 2 then refuses the whole
+request. Refusing to format is a worse outcome than formatting. It is not a
+wrong one.
+
+A second, smaller thing fell out: `$` is a word byte, because MySQL identifiers
+may contain one, so `END$$` lexes as a **single word** and the block closer
+hides inside it — leaving every routine body indented one level too deep.
+Trailing `$` is now stripped when matching keywords, and only when matching; the
+token is still emitted exactly as it came.
+
+### Two decisions in the UI
+
+**The cursor keeps its place, exactly.** Its position is found by counting the
+non-whitespace characters in front of it and finding the same count in the
+result. That is exact rather than approximate — and it is exact *because* the
+formatter only moves whitespace. The rule that makes the feature safe is the
+same rule that makes the cursor land where it was.
+
+**The edit is isolated in the undo history.** Found by a test, not by reasoning:
+"one undo puts the buffer back" failed, because CodeMirror groups nearby edits
+by time and a format arriving within half a second of the last keystroke merged
+into that typing — so Ctrl+Z threw away both. For an action people reach for
+speculatively, that is the wrong answer twice over. `isolateHistory` fixes it
+and the test now means what it says.
+
+Statements also gained a blank line between them at the top level, and only at
+the top level: the `;`s inside a routine body belong to one statement and must
+not be spread apart.
+
+### Proved
+
+9 UI tests (both engines), 8 new Rust tests. Three confirmed able to fail before
+being trusted: dropping the `DELIMITER` chunking reddens two, and pinning the
+cursor to 0 reddens the cursor test. 288 Rust unit tests and 534 UI tests pass.

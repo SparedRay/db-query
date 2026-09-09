@@ -7,7 +7,9 @@ import {
   EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, dropCursor,
   rectangularSelection, crosshairCursor, highlightSpecialChars,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab, redo } from "@codemirror/commands";
+import {
+  defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory, redo,
+} from "@codemirror/commands";
 import { autocompletion, completionKeymap, closeBrackets } from "@codemirror/autocomplete";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import {
@@ -76,6 +78,8 @@ const themeCompartment = new Compartment();
 export interface EditorHooks {
   onRunStatement: () => void;
   onRunAll: () => void;
+  /** Lay the buffer — or the selection — out. Never runs anything. */
+  onFormat: () => void;
   /** Fired on every document change, so the tab bar can refresh its dirty dot. */
   onDocChanged?: () => void;
 }
@@ -117,6 +121,10 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
   const runKeys = keymap.of([
     { key: "Mod-Enter", preventDefault: true, run: () => (hooks.onRunStatement(), true) },
     { key: "Mod-Shift-Enter", preventDefault: true, run: () => (hooks.onRunAll(), true) },
+    // What every other editor calls Format Document. `Mod-Shift-f` is free:
+    // CodeMirror's search keymap binds Mod-f, Mod-g, Mod-d and Mod-Shift-l,
+    // and nothing here binds this.
+    { key: "Mod-Shift-f", preventDefault: true, run: () => (hooks.onFormat(), true) },
   ]);
 
   const extensions: Extension[] = [
@@ -172,7 +180,7 @@ export const STARTER_DOC =
   "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n" +
   "-- Ctrl+Shift+Enter runs the whole buffer.\n" +
   "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n" +
-  "-- Ctrl+F find · Ctrl+Z undo · Ctrl+Shift+Z redo\n\n" +
+  "-- Ctrl+F find · Ctrl+Shift+F format · Ctrl+Z undo · Ctrl+Shift+Z redo\n\n" +
   "SELECT 1;\n";
 
 export type LintSource = (view: EditorView) => Promise<CmDiagnostic[]>;
@@ -249,6 +257,27 @@ export function cursorByteOffset(view: EditorView): number {
   const head = view.state.selection.main.head;
   const prefix = view.state.sliceDoc(0, head);
   return new TextEncoder().encode(prefix).length;
+}
+
+/**
+ * Replace a range as **one undo step of its own**.
+ *
+ * `isolateHistory` is the whole point. CodeMirror groups nearby edits by time,
+ * so a reformat arriving within half a second of the last keystroke merges into
+ * that typing — and Ctrl+Z then throws away both, which for an action people
+ * reach for speculatively is the wrong answer twice over. Isolating it makes
+ * "one undo puts it back" true, and a test says so.
+ */
+export function replaceRange(
+  view: EditorView,
+  range: { from: number; to: number; insert: string; cursor: number },
+) {
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert: range.insert },
+    selection: { anchor: range.cursor },
+    annotations: isolateHistory.of("full"),
+  });
+  view.focus();
 }
 
 export function insertAtCursor(view: EditorView, text: string) {
