@@ -297,7 +297,42 @@ input.num {
 .node { display: flex; align-items: center; gap: 5px; padding: 3px 10px; cursor: pointer; white-space: nowrap; font-size: 12.5px; }
 .node:hover { background: var(--bg-hover); }
 .node .twisty { width: 12px; color: var(--fg-dim); flex: 0 0 auto; font-size: 10px; }
-.node .icon { color: var(--fg-dim); flex: 0 0 auto; }
+/* --- schema tree quick filter ------------------------------------------- */
+
+.tree-filter { display: flex; align-items: center; gap: 6px; padding: 5px 8px; }
+.tree-filter input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 3px 7px; font-size: 12px; font-family: inherit;
+  color: var(--fg); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.tree-filter input:focus { outline: none; border-color: var(--accent); }
+.filter-count { color: var(--fg-dim); font-size: 11px; flex: 0 0 auto; }
+.filter-count.none { color: var(--warn); }
+
+/* Presentation only — the filter never touches `hidden`, so clearing it
+   restores exactly the tree that was there before.
+
+   `!important` because this file sets `[hidden] { display: none !important }`
+   above, for reasons worth keeping. Revealing a collapsed container without
+   un-hiding it is precisely the case that has to win over it. */
+.tree .filtered-out { display: none !important; }
+.tree.filtering .children { display: block !important; }
+.tree.filtering .node.filter-hit > .label { color: var(--fg-strong); font-weight: 600; }
+/* A twisty still pointing right at a revealed container would be a lie about
+   the state we deliberately did not change; while filtering it says nothing. */
+.tree.filtering .twisty { visibility: hidden; }
+
+/* A fixed box, so every label starts at the same x whatever its icon.
+   Before this each icon contributed its own advance width and the Tables /
+   Views / Procedures column visibly failed to line up. */
+.node .icon {
+  color: var(--fg-dim); flex: 0 0 auto;
+  width: 14px; height: 14px; display: inline-flex;
+  align-items: center; justify-content: center;
+}
+.node .icon svg { width: 14px; height: 14px; display: block; }
+.node.db > .icon { color: var(--accent); }
 .node.db-active > .label { font-weight: 600; color: var(--fg-strong); }
 .node .meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; padding-left: 8px; }
 /* Loading a node's children replaces its caret with a spinner. The state was

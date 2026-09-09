@@ -353,3 +353,56 @@ Then it threw on the connect path, because the test fixture's `ConnInfo` has no
 `capabilities` and the new code read one. Optional-chained, like `engineLabel`
 in `connections.ts`, which had already learned this: **a cosmetic status line
 must not be able to take down connecting.**
+
+
+---
+
+## 13. Tree icons and a quick filter — 2026-09-09
+
+Added after Stage 12's tracker was already complete, from hands-on use.
+
+### The icons were half emoji
+
+The tree mixed **emoji** — `🗄` database, `👁` view, `🔑` key — with **text
+glyphs** — `▦` `ƒ` `⚙` `·`. Three consequences, none fixable by choosing
+different characters:
+
+- Emoji render in colour from the system emoji font, so they ignored
+  `color: var(--fg-dim)` and half the tree was grey while half was not.
+- Each character has its own advance width, and `.node .icon` had no fixed
+  size — so **the labels beside them started at different x positions**. The
+  Tables / Views / Procedures column visibly failed to line up, which is what
+  reads as "weird" before you can name it.
+- Availability and text-vs-emoji presentation differ by platform. `⚙` in
+  particular flips to a colour emoji on some systems and not others.
+
+**No icon pack.** Seven shapes did not justify a dependency and a licence
+obligation, so `src/icons.ts` draws them: one 16-unit grid, one stroke width,
+`currentColor` throughout, in a fixed 14px box. They inherit the theme, scale
+with the font, and every label now starts at the same x.
+
+### A quick filter over what is loaded
+
+`src/treefilter.ts`, an input above the tree, `Ctrl+P` to focus, Escape to
+clear, and a count beside it. Scope is deliberately **already-loaded nodes**:
+the tree is lazy, so searching the server would be a different feature with a
+round trip and a spinner. This one is for "I know the name, get me there".
+
+**Filtering is presentation only.** The obvious implementation walks the tree
+setting `hidden = false` along the path to each match and puts it back
+afterwards — which makes the filter an owner of the expansion state, and the
+moment a lazy load finishes or the user clicks mid-filter, the two disagree.
+Instead a class on the root reveals collapsed containers for as long as the
+filter is on, and clearing it gives back exactly the tree that was there,
+because nothing about it was changed. A test pins that: collapse a group,
+filter to reveal something inside it, clear — the group is collapsed again.
+
+Two things the tests found:
+
+- **The filter searched nothing.** Each connection's tree lives in a container
+  inside `#tree`, so the walk hit a non-wrapper element first and stopped. The
+  count read "none of 0" beside a full tree.
+- **A database must never be filtered out.** Typing before expanding anything
+  emptied the panel completely — including the one node that could have loaded
+  the tables the filter was looking for. A filter that hides the only control
+  you can click has not focused the tree, it has broken it.

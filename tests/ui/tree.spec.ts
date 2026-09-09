@@ -116,7 +116,15 @@ test("a single click still expands the table's columns", async ({ page }) => {
   await page.locator('.node.table:has-text("users")').click();
   await expect(page.locator('.node.column:has-text("email")')).toBeVisible();
   // The primary key is marked, which is the point of showing keys at all.
-  await expect(page.locator('.node.column:has-text("id") .icon')).toHaveText("🔑");
+  // By icon identity rather than by glyph: these are SVG now, and a test that
+  // pinned the emoji was pinning the bug — it rendered in colour and ignored
+  // the theme, unlike every other icon in the tree.
+  await expect(
+    page.locator('.node.column:has-text("id") .icon svg'),
+  ).toHaveAttribute("data-icon", "key");
+  await expect(
+    page.locator('.node.column:has-text("email") .icon svg'),
+  ).toHaveAttribute("data-icon", "column");
 });
 
 // --------------------------------------------------------------------- E2

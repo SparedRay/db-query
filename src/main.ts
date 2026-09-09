@@ -25,6 +25,8 @@ import {
   AI_PRESETS, FONTS, applyAppearance, load as loadSettings, save as saveSettings,
 } from "./settings";
 import { contextMenu } from "./menu";
+import { icon, type IconName } from "./icons";
+import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
 import { TabManager, clearResult, type ScriptTab } from "./tabs";
 import {
@@ -45,6 +47,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const els = {
   sidebar: $("sidebar"), main: $("main"), tree: $("tree"),
+  treeFilter: $<HTMLInputElement>("tree-filter"),
+  treeFilterCount: $<HTMLSpanElement>("tree-filter-count"),
   connLabel: $<HTMLSpanElement>("conn-label"),
   connDot: $<HTMLSpanElement>("conn-dot"),
   btnConnect: $<HTMLButtonElement>("btn-connect"),
@@ -603,7 +607,7 @@ els.form.addEventListener("submit", async (e) => {
 
 // -------------------------------------------------------------- schema tree
 
-function node(cls: string, label: string, twisty: string, icon: string) {
+function node(cls: string, label: string, twisty: string, name: IconName) {
   const n = document.createElement("div");
   n.className = `node ${cls}`;
   const t = document.createElement("span");
@@ -611,7 +615,7 @@ function node(cls: string, label: string, twisty: string, icon: string) {
   t.textContent = twisty;
   const ic = document.createElement("span");
   ic.className = "icon";
-  ic.textContent = icon;
+  ic.append(icon(name));
   const lb = document.createElement("span");
   lb.className = "label";
   lb.textContent = label;
@@ -698,11 +702,57 @@ function renderDatabases(connId: string, dbs: string[]) {
 function showTree(connId: string) {
   const host = trees.get(connId);
   els.tree.replaceChildren(...(host ? [host] : []));
+  // Whatever is in the box applies to whatever tree is now on screen.
+  refilterTree();
 }
+
+/**
+ * Re-apply the filter to the tree as it currently stands.
+ *
+ * Called after anything that changes the tree's contents, because the filter
+ * searches the DOM: a lazily-loaded group that arrived after the last keystroke
+ * would otherwise appear unfiltered in the middle of a filtered tree.
+ */
+function refilterTree() {
+  const q = els.treeFilter.value;
+  const { matches, searched } = applyTreeFilter(els.tree, q);
+  const on = q.trim() !== "";
+  els.treeFilterCount.hidden = !on;
+  els.treeFilterCount.classList.toggle("none", on && matches === 0);
+  els.treeFilterCount.textContent = !on
+    ? ""
+    : matches === 0
+      ? `none of ${searched}`
+      : `${matches} of ${searched}`;
+}
+
+els.treeFilter.addEventListener("input", refilterTree);
+els.treeFilter.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // Escape clears rather than blurring: the filter is a mode, and leaving it on
+  // while the box no longer has focus is how a tree comes to look half-empty
+  // for no visible reason.
+  e.stopPropagation();
+  els.treeFilter.value = "";
+  refilterTree();
+});
+
+/**
+ * The tree loads lazily, so its contents change without the filter being
+ * touched. One observer beats threading a call through every load site — and
+ * beats missing one, which is what leaves an unfiltered group on screen.
+ *
+ * `childList` only: the filter's own work is class changes, so it cannot
+ * trigger itself.
+ */
+new MutationObserver(() => refilterTree()).observe(els.tree, {
+  childList: true,
+  subtree: true,
+});
 
 function buildDbNode(connId: string, db: string): HTMLElement {
   const wrap = document.createElement("div");
-  const { n, twisty } = node("db", db, "▸", "🗄");
+  const { n, twisty } = node("db", db, "▸", "database");
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -787,14 +837,14 @@ async function loadDbChildren(
     const funcs = routines.filter((r) => r.kind === "function");
 
     host.replaceChildren(
-      buildGroup("Tables", "\u25a6", baseTables.length, () =>
+      buildGroup("Tables", "table", baseTables.length, () =>
         baseTables.map((t) => buildTableNode(connId, db, t)),
       { open: true }),
-      buildGroup("Views", "\u{1f441}", views.length, () =>
+      buildGroup("Views", "view", views.length, () =>
         views.map((t) => buildTableNode(connId, db, t))),
-      buildGroup("Procedures", "\u2699", procs.length, () =>
+      buildGroup("Procedures", "procedure", procs.length, () =>
         procs.map((r) => buildRoutineNode(connId, db, r))),
-      buildGroup("Functions", "\u0192", funcs.length, () =>
+      buildGroup("Functions", "function", funcs.length, () =>
         funcs.map((r) => buildRoutineNode(connId, db, r))),
     );
     host.dataset.loaded = "1";
@@ -817,7 +867,7 @@ async function loadDbChildren(
 /** A collapsible "Tables (12)" style grouping. Empty groups are not rendered. */
 function buildGroup(
   label: string,
-  icon: string,
+  iconName: IconName,
   count: number,
   build: () => HTMLElement[],
   opts?: { open?: boolean },
@@ -825,7 +875,7 @@ function buildGroup(
   const wrap = document.createElement("div");
   if (count === 0) return wrap;
 
-  const { n, twisty } = node("group", `${label} (${count})`, "\u25b8", icon);
+  const { n, twisty } = node("group", `${label} (${count})`, "\u25b8", iconName);
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -870,7 +920,7 @@ function allowsWrites(connId: string): boolean {
 function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const wrap = document.createElement("div");
   const isView = t.kind.toUpperCase().includes("VIEW");
-  const { n, twisty, label } = node("table", t.name, "\u25b8", isView ? "\u{1f441}" : "\u25a6");
+  const { n, twisty, label } = node("table", t.name, "\u25b8", isView ? "view" : "table");
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -952,7 +1002,7 @@ function buildColumnNode(
   table: string,
   c: ColumnInfo,
 ): HTMLElement {
-  const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "\u{1f511}" : "\u00b7");
+  const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "key" : "column");
   const meta = document.createElement("span");
   meta.className = "meta";
   meta.textContent = c.dataType + (c.nullable ? "" : " \u00b7");
@@ -984,7 +1034,7 @@ function buildColumnNode(
 
 function buildRoutineNode(connId: string, db: string, r: RoutineRef): HTMLElement {
   const isFn = r.kind === "function";
-  const { n } = node("routine", r.name, "", isFn ? "\u0192" : "\u2699");
+  const { n } = node("routine", r.name, "", isFn ? "function" : "procedure");
 
   const meta = document.createElement("span");
   meta.className = "meta";
@@ -2036,7 +2086,11 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (e.key === "k" || e.key === "K") {
+  if (e.key === "p" || e.key === "P") {
+    e.preventDefault();
+    els.treeFilter.focus();
+    els.treeFilter.select();
+  } else if (e.key === "k" || e.key === "K") {
     e.preventDefault();
     void assistant.open();
   } else if (e.key === "h" || e.key === "H") {

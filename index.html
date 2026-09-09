@@ -22,6 +22,12 @@
           <button id="btn-connect" class="mini">Connect</button>
           <button id="btn-update" class="mini update" hidden></button>
         </div>
+        <div class="tree-filter">
+          <input id="tree-filter" type="search" placeholder="Filter loaded tables…"
+                 autocomplete="off" spellcheck="false"
+                 title="Filters what is already loaded (Ctrl+P). Escape clears." />
+          <span id="tree-filter-count" class="filter-count" hidden></span>
+        </div>
         <div id="tree" class="tree"></div>
       </aside>
 
