@@ -256,3 +256,15 @@ files = [{ path = "license-mit", checksum = "c2cfccb812fe482101a8f04597dfc5a9991
 [windows_x86_64_msvc.clarify]
 license = "MIT"
 files = [{ path = "license-mit", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+# schemars reaches the binary for the first time in Stage 13, via `rmcp`, and
+# arrived scanned as **source code**: an "MIT License" block whose body was
+# `pub fn ...` from src/. It ships a perfectly ordinary MIT `LICENSE`; the
+# scanner simply never chose it.
+#
+# One entry covers all three versions in the lockfile (0.8.22 via tauri, 0.9.0,
+# 1.2.2 via rmcp) — a clarification is keyed by crate name, and all three ship
+# byte-identical files, which is why the one checksum matches every one of them.
+[schemars.clarify]
+license = "MIT"
+files = [{ path = "LICENSE", checksum = "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30" }]

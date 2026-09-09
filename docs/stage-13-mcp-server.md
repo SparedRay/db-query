@@ -1,6 +1,6 @@
 # Stage 13 — Letting other tools in: an MCP server
 
-**Status:** 📋 Planned 2026-09-09.
+**Status:** 🚧 In progress. Planned 2026-09-09; Phase 1 done the same day.
 
 The first stage where db-query **listens**. Everything until now dialled out —
 to a database, to a model, to a release endpoint. This opens a door, and the
@@ -129,23 +129,31 @@ answer was asked for and this may not have been.
       the tree shows.
 - [ ] **M3 — `put_query` lands in the editor**, in a new tab, focused, **not
       run**, and visibly marked as external.
-- [ ] **M4 — Off means off.** With the switch off, nothing is listening on the
+- [x] **M4 — Off means off.** With the switch off, nothing is listening on the
       port: proved by connecting to it and failing, not by reading the code.
-- [ ] **M5 — The door is locked.** A request with no token, a wrong token, or a
-      foreign `Origin` is refused, and the refusal says which.
-- [ ] **M6 — Nothing can execute.** A test asserts the advertised tool list is
-      exactly the four in §3.3.
+      `off_means_nothing_is_listening`, and `restarting_releases_the_previous_port`
+      for the case where the port changes. Both were **confirmed to go red** by
+      making `stop` a no-op.
+- [x] **M5 — The door is locked.** A request with no token, a wrong token, or a
+      foreign `Origin` is refused, and the refusal says which — asserted over
+      the socket, not just over a `HeaderMap`.
+- [x] **M6 — Nothing can execute.** Twice: over the router
+      (`advertises_exactly_the_four_tools`) and over the wire
+      (`a_client_handshake_lists_exactly_the_four_tools`).
 - [ ] **M7 — Nothing regressed.** Every suite, both engines, both platforms.
 
 ---
 
 ## 6. Task tracker
 
-### Phase 1 — The server
-- [ ] `rmcp` dependency, MSRV bump, licence check recorded (§8)
-- [ ] `src-tauri/src/mcp.rs`: the four tools over `schema.rs`
-- [ ] Streamable HTTP on 127.0.0.1, started and stopped by a setting
-- [ ] Token in the keychain; `Origin` and bearer checks with their own tests
+### Phase 1 — The server ✅ 2026-09-09
+- [x] `rmcp` dependency, MSRV bump, licence check recorded (§8, corrected)
+- [x] `src-tauri/src/mcp.rs`: the four tools over `schema.rs`
+- [x] Streamable HTTP on 127.0.0.1, started and stopped by a command
+      (the *setting* that calls it is Phase 3)
+- [x] Token in the keychain; `Origin` and bearer checks with their own tests
+- [x] `tests/mcp_http.rs`: seven tests over a real socket — pulled forward from
+      Phase 4 because a listening socket should not be committed unproven
 
 ### Phase 2 — Reaching the editor
 - [ ] `put_query` emits to the frontend; a new tab, focused, never run
@@ -156,8 +164,10 @@ answer was asked for and this may not have been.
 - [ ] The exact client config snippet, copyable, with the URL and token in it
 
 ### Phase 4 — Proving it
-- [ ] Unit tests: tool list, auth, origin, and the schema shape each tool returns
-- [ ] A live test that drives the server over HTTP as a client would
+- [x] Unit tests: tool list, auth, origin (11, in `mcp.rs`)
+- [x] A live test that drives the server over HTTP as a client would
+      (`tests/mcp_http.rs`, done in Phase 1)
+- [ ] The schema shape each tool returns, against a live MySQL and Elasticsearch
 - [ ] M1-M7 by hand
 
 ---
@@ -167,12 +177,12 @@ answer was asked for and this may not have been.
 - **A listening socket is a new class of bug for this codebase.** Mitigated by
   §3.2 and by there being nothing to execute; not eliminated. This is the reason
   the stage exists as a stage rather than as a commit.
-- **`rmcp` 3.x requires Rust 1.88** and we declare 1.82. CI builds with stable,
-  so this is a declaration change, not a toolchain one — but it is a real bump
-  and belongs in the same commit as the dependency.
-- **Two `schemars` versions** will be in the tree (0.8 via tauri, 1.x via rmcp).
-  Harmless to the build; it will change the licence manifest, and Stage 12 §17's
-  guard will say so rather than letting it slip.
+- ~~**`rmcp` 3.x requires Rust 1.88** and we declare 1.82.~~ Done, in the same
+  commit as the dependency. Note the trap it hides: until the declaration moved,
+  `cargo add` silently installed 2.2.0 instead — see §8.
+- ~~**Two `schemars` versions** will be in the tree.~~ Three already were,
+  before this stage. It did change the licence manifest, Stage 12 §17's guard
+  did say so, and §8 records the fix.
 - **The MCP spec revises.** Pin `rmcp` and record the protocol version the tests
   negotiate, so a client that speaks a newer one fails loudly rather than half-working.
 - **An agent proposing a destructive query** is the residual risk, and it is the
@@ -181,17 +191,103 @@ answer was asked for and this may not have been.
 
 ---
 
-## 8. What it costs
+## 8. What it costs — measured on the way in
 
-Measured, not estimated: `cargo add rmcp --features server,macros,
-transport-streamable-http-server` adds **10 crates** to a tree of 524, because
-tokio, serde, futures, hyper and chrono are already there.
+**The figure planned above was wrong, and the correction is instructive.** It
+said 10 crates, with `schemars` and `ref-cast` among them. It was measured
+against `rmcp` **2.2.0**, because `cargo add` had silently resolved down from
+3.2.0 to respect the then-declared `rust-version = "1.82"` — it says so in a
+warning that is easy to read past:
 
-| Crate | Licence |
-|---|---|
-| `rmcp`, `rmcp-macros` | Apache-2.0 |
-| `schemars`, `schemars_derive` | MIT |
-| `futures`, `pastey`, `ref-cast`, `ref-cast-impl`, `serde_derive_internals`, `sse-stream` | MIT OR Apache-2.0 |
+    warning: ignoring rmcp@3.2.0 (which requires rustc 1.88) to maintain
+    db-query's rust-version of 1.82
 
-Every one is already in `about.toml`'s `accepted` list. Checked against
-crates.io on 2026-09-09, not from memory.
+Bumping the declaration first and re-measuring gives the real number.
+
+**12 packages, on a tree that goes from 596 to 608.** Every licence below read
+from the crate's own vendored `Cargo.toml` on 2026-09-09, not from memory:
+
+| Package | Licence | Comes from |
+|---|---|---|
+| `rmcp` 3.2.0, `rmcp-macros` 3.2.0 | Apache-2.0 | the SDK |
+| `darling`, `darling_core`, `darling_macro` 0.24.1 | MIT | `rmcp-macros` |
+| `schemars_derive` 1.2.2 | MIT | `rmcp`'s tool schemas |
+| `serde_derive_internals` 0.30.0 | MIT OR Apache-2.0 | `schemars_derive` |
+| `futures` 0.3.34, `pastey` 0.2.3, `sse-stream` 0.2.6, `base64` 0.23.1 | MIT OR Apache-2.0 | `rmcp` |
+| `httpdate` 1.0.3 | MIT OR Apache-2.0 | hyper's **server** half |
+
+Every one is in `about.toml`'s `accepted` list already.
+
+Three things the plan expected that did not happen. `schemars` itself is **not
+new** — 0.8.22, 0.9.0 and 1.2.2 were all in the lockfile before this stage, so
+the "two versions will coexist" risk was already three versions of reality;
+`rmcp` links the 1.2.2 that was there. `ref-cast` was likewise already present.
+And the HTTP layer — hyper, hyper-util, http-body-util, bytes, tokio-util,
+rand — cost **one** package between them, `httpdate`, because everything else
+was already linked through `reqwest`.
+
+### The licence manifest did change, and the guard caught it
+
+Exactly as this plan predicted, and worth writing down because it is Stage 12
+§17 doing its job rather than a surprise. `schemars` reaches the binary for the
+first time in this stage, and cargo-about scanned it as **source code** — an
+"MIT License" heading over a block of `pub fn`. `npm run attribution` refused to
+write the file and named the defect.
+
+Fixed with a `[schemars.clarify]` naming its real `LICENSE`. One entry covers
+all three versions: a clarification is keyed by crate name, and all three ship a
+byte-identical file, so the single checksum matches each of them.
+
+---
+
+## 9. What Phase 1 actually built, and what it decided
+
+`src-tauri/src/mcp.rs` (~700 lines with its tests), `src-tauri/tests/mcp_http.rs`
+(7 tests over a real socket), six commands in `lib.rs`, and `McpState` beside
+`AppState`. Nothing is on: no frontend calls any of it yet, which is Phase 3.
+
+**The four decisions worth arguing with later:**
+
+**1. The active connection lives in `McpState`, not `AppState`.** `session.rs`
+opens with a heading that says *there is no "active connection" here*, and the
+reason is good: a command that resolves its own target can be raced onto the
+wrong server by a UI switch mid-query. This stage needs exactly that ambient
+fact, so it is held **where nothing that executes can reach it** — a `Focus`
+inside the MCP server's own state, read by the three read-only tools and by
+`put_query`, which writes text. Every existing command still names the
+connection it acts on. The frontend pushes it with `mcp_set_focus`.
+
+**2. `start_with_token` exists so the socket tests need no keychain.** `start`
+reads the token and refuses to bind without one — a machine with no credential
+store should fail closed rather than listen open. But a test of the lock that CI
+cannot run is not a test of the lock, so the token is injectable and
+`tests/mcp_http.rs` runs everywhere, unignored, needing no database, no keychain
+and no network.
+
+**3. `Tools` is generic over the Tauri runtime.** Only so the tests can drive it
+against `tauri::test::mock_app()`. `Clone` is written out by hand rather than
+derived, because `#[derive(Clone)]` would demand `R: Clone` and a runtime is not.
+
+**4. `rmcp` validates `Origin` only if you ask it to.** Its
+`StreamableHttpServerConfig::allowed_origins` defaults to an **empty list, which
+means no validation at all** — so accepting the default would have silently
+skipped the spec's one MUST for this transport. Both are set now: our own `gate`
+refuses first, and rmcp refuses again. That was verified rather than assumed —
+deleting our check leaves the 403 in place and changes only the message, which
+is why `a_foreign_origin_is_refused_even_with_the_right_token` asserts the
+wording and says in a comment why.
+
+**Proving the tests can fail.** Two were confirmed red before being trusted:
+making `stop` a no-op fails `off_means_nothing_is_listening` and
+`restarting_releases_the_previous_port`; removing the `Origin` check fails the
+origin test. The tool-list test over the wire caught its own first draft — it
+searched the raw body for the word "execute", which appears in every
+description, in the sentence *promising the query is not executed*. It parses
+tool names now.
+
+**Still open, and deliberately:** the port default (49731, from IANA's
+dynamic/private range) is a guess about what is free on someone's machine, which
+is why it is configurable. `put_query` emits its event today and nothing
+listens — a tool that reports success into the void until Phase 2 lands. And
+`rust-version` moved 1.82 → 1.88: a declaration catching up with what mise and
+CI have always built with (`stable`), not a toolchain change.

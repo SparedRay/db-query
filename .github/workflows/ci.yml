@@ -163,6 +163,11 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
       - name: Packaging invariants (version source, updater endpoint)
         run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
+      # Binds port 0 on loopback; no database, no keychain, no network. It is
+      # the only proof that the MCP server's "off" switch actually closes the
+      # port, which is not a property any amount of reading establishes.
+      - name: MCP server over a real socket
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mcp_http
 
       # The release stamps the version on both platforms, so this runs on both.
       # It is the step that failed v0.3.4 — after the tag had been pushed, which
@@ -289,6 +294,11 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
       - name: Packaging invariants (version source, updater endpoint)
         run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
+      # Binds port 0 on loopback; no database, no keychain, no network. It is
+      # the only proof that the MCP server's "off" switch actually closes the
+      # port, which is not a property any amount of reading establishes.
+      - name: MCP server over a real socket
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test mcp_http
 
       # The release stamps the version on both platforms, so this runs on both.
       # It is the step that failed v0.3.4 — after the tag had been pushed, which

@@ -10,6 +10,7 @@ pub mod files;
 pub mod history;
 pub mod httpsql;
 pub mod lint;
+pub mod mcp;
 pub mod mysql;
 pub mod profiles;
 pub mod schema;
@@ -1198,6 +1199,61 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+// -------------------------------------------------------------------- MCP server
+//
+// Everything here is off until the user turns it on. See `mcp.rs` for why a
+// listening socket is acceptable in an app whose oldest rule is that nothing
+// runs without the person at the keyboard pressing run.
+
+/// Start or restart the MCP server on `port`.
+///
+/// Fails loudly on a busy port rather than logging: the switch in Settings has
+/// to be able to say why it did not turn on.
+#[tauri::command]
+async fn mcp_start(
+    app: tauri::AppHandle,
+    state: State<'_, mcp::McpState>,
+    port: u16,
+) -> Result<mcp::McpStatus, String> {
+    mcp::start(&app, &state, port).await
+}
+
+#[tauri::command]
+async fn mcp_stop(state: State<'_, mcp::McpState>) -> Result<mcp::McpStatus, String> {
+    mcp::stop(&state).await;
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+async fn mcp_status(state: State<'_, mcp::McpState>) -> Result<mcp::McpStatus, String> {
+    Ok(state.status().await)
+}
+
+/// Which connection an MCP client sees. Pushed by the frontend when the user
+/// switches, because "the connection you are looking at" is a fact only the UI
+/// holds — see the `Focus` docs for why no other command works this way.
+#[tauri::command]
+async fn mcp_set_focus(
+    state: State<'_, mcp::McpState>,
+    connection_id: Option<String>,
+) -> Result<(), String> {
+    state.set_focus(connection_id).await;
+    Ok(())
+}
+
+/// The bearer token, minted on first read. Returned so Settings can show it
+/// and copy it into a client's config — it is a credential for this machine's
+/// own loopback port, and the user is the only one who can put it anywhere.
+#[tauri::command]
+fn mcp_token() -> Result<String, String> {
+    mcp::token()
+}
+
+#[tauri::command]
+fn mcp_regenerate_token() -> Result<String, String> {
+    mcp::regenerate()
+}
+
 pub fn run() {
     // Before any client is built, by anything.
     install_tls();
@@ -1206,6 +1262,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
+        .manage(mcp::McpState::default())
         .invoke_handler(tauri::generate_handler![
             connect,
             connect_saved,
@@ -1252,6 +1309,12 @@ pub fn run() {
             save_file_dialog,
             update_check,
             update_install,
+            mcp_start,
+            mcp_stop,
+            mcp_status,
+            mcp_set_focus,
+            mcp_token,
+            mcp_regenerate_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
