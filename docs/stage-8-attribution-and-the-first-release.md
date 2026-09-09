@@ -36,15 +36,17 @@ a hard gate, deliberately.
 
 ## 2. Milestones
 
-- [ ] **R1 — A release is published**, with `.deb` *and* `-setup.exe` *and* `latest.json` attached. (Stage 6's U2, Stage 5's P4.)
+- [x] **R1 — A release is published**, with `.deb` *and* `-setup.exe` *and* `latest.json` attached. (Stage 6's U2, Stage 5's P4.)
 - [ ] **R2 — The double-click install is confirmed.** `setup.exe` on a Windows machine with no toolchain: no Administrator prompt, a Start Menu entry, then a connection whose password survives a relaunch. (U1, and Stage 5's P5b before it.)
-- [ ] **R3 — It updates itself.** Publish `x.y.z+1`; the installed copy offers it, the user accepts, and it comes back **reporting the new version**. That last clause is the part the version-from-tag fix was for. (U3.)
-- [ ] **R4 — An update signed with the wrong key is refused**, and says so. The half of an updater that matters, and today asserted only at the UI layer. (U4.)
+- [x] **R3 — It updates itself.** Publish `x.y.z+1`; the installed copy offers it, the user accepts, and it comes back **reporting the new version**. That last clause is the part the version-from-tag fix was for. (U3.)
+- [x] **R4 — An update signed with the wrong key is refused**, and says so. The half of an updater that matters, and today asserted only at the UI layer. (U4.)
 - [x] **A1 — Attribution ships in the bundle** and is reachable from inside the app. (U5.)
 - [ ] **A2 — The audit covers the Windows tree**, not just Linux. (U6.)
-- [ ] **S9 — The real app is quit with tabs open and reopened**, on both platforms. Stage 7 proved this in a browser; nobody has proved the file lands where `app_config_dir()` says.
-- [ ] **C1 — Export and the grid agree about binary values.**
-- [ ] **N1 — Nothing regressed.** Stages 0-7 suites pass on both platforms.
+- [x] **S9 — The real app is quit with tabs open and reopened**, on both platforms. Stage 7 proved this in a browser; nobody has proved the file lands where `app_config_dir()` says.
+- [x] **C1 — Export and the grid agree about binary values.** Confirmed as Stage 12's B5, which is the same milestone stated twice.
+- [ ] **N1 — Nothing regressed.** Stages 0-7 suites pass on both platforms. CI
+      runs them on both on every push and is green; left open because that is
+      not the same statement as someone having used the built app on both.
 
 ---
 
@@ -53,14 +55,14 @@ a hard gate, deliberately.
 ### Phase 1 — Unblock the release
 - [ ] **`TAURI_SIGNING_PRIVATE_KEY` as a repo secret** ← *the one step that is not mine to do*. The value is the private key generated in Stage 6, at `~/.tauri/db-query-updater.key`
 - [ ] **Dry run first** (Actions → Release → empty tag). It proves signing works on both platforms and exercises the tag-stamping path, and spends no tag doing it
-- [ ] Tag, then **publish** the draft — the updater endpoint is `releases/latest/download/latest.json`, and a draft is not `latest` (R1)
+- [x] Tag, then **publish** the draft — the updater endpoint is `releases/latest/download/latest.json`, and a draft is not `latest` (R1)
 - [ ] Install from `setup.exe` on a clean Windows machine (R2)
 - [ ] Remove the stray local `1.0.0` tag — it is not on the remote and means nothing
 
 ### Phase 2 — Prove the updater
-- [ ] Publish a second release and watch an install take it (R3). Confirm the version it reports afterwards, which is what Stage 6's version-from-tag fix was for
-- [ ] Serve a manifest signed with a different key and confirm the refusal, and that it says why (R4)
-- [ ] Confirm S9 on the updated install: **an update must not lose the open tabs**. Stage 7 stores them outside the app directory, so it should not — untested across an actual install
+- [x] Publish a second release and watch an install take it (R3). Confirm the version it reports afterwards, which is what Stage 6's version-from-tag fix was for
+- [x] Serve a manifest signed with a different key and confirm the refusal, and that it says why (R4)
+- [x] Confirm S9 on the updated install: **an update must not lose the open tabs**. Stage 7 stores them outside the app directory, so it should not — untested across an actual install
 
 ### Phase 3 — Attribution — built 2026-09-08
 - [x] `src-tauri/about.toml` + `about.hbs`; `scripts/attribution.mjs` assembles both halves into `THIRD-PARTY-LICENSES.txt`
@@ -154,3 +156,57 @@ generator is exercised in CI on both platforms rather than merely configured.
 - **`cargo about` needs every licence file to resolve**, and crates with unusual
   or missing `license-file` entries will stall it. Budget for a handful of
   manual clarifications rather than assuming it runs clean first time.
+
+
+---
+
+## 6. The updater, confirmed — 2026-09-09
+
+**R1, R3, R4 and S9 all pass**, by hand, against real published releases. The
+updater has now run: an installed copy was offered a newer version, took it, and
+came back **reporting the new number** — which is the clause Stage 6's
+version-from-tag fix existed for and the one nobody could check until a release
+existed. A manifest signed with the wrong key is refused and says so. Tabs
+survive the update, which Stage 7 predicted from where the file is stored and
+nobody had watched happen.
+
+That closes a debt carried since **Stage 5**, through three freezes.
+
+### It could not have worked before v0.3.6
+
+Worth writing down, because every release before it looked complete.
+`bundle.createUpdaterArtifacts` was never set, and Tauri v2 produces signatures
+only when it is — so `tauri-action` had nothing to put in `latest.json` and
+attached none. `v0.3.5` is published with the `.deb` and the `-setup.exe` and no
+manifest at all. The signing key was configured, the workflow asked for the
+manifest, the guard that refuses a keyless release passed, and CI was green.
+Nothing failed. Two packaging tests now pin it (`8ce5112`).
+
+### R2 is still not reported
+
+Not "failed" — not reported. R3 needed an install to update, so an install
+exists; what R2 asks specifically is the *first* double-click on a machine with
+no toolchain: no Administrator prompt, a Start Menu entry, and a saved
+connection whose password survives a relaunch.
+
+### A2 — where the licence file is
+
+The generated `THIRD-PARTY-LICENSES.txt` is a **bundle resource**, resolved at
+runtime through `BaseDirectory::Resource`, so it ships inside the installer and
+sits beside the executable. Three ways to reach it, in order of what A2 is
+actually asking:
+
+1. **In the installed app: Settings → About → "Third-party licences".** On the
+   Windows install this reads the file generated *by the Windows job for
+   `x86_64-pc-windows-msvc`* — which is A2 exactly. The Linux `.deb` shows its
+   own, resolved for `x86_64-unknown-linux-gnu`.
+2. **On disk**, next to `db-query.exe` in the install directory (and under the
+   package's resource directory on Linux).
+3. **From a source tree**, `npm run attribution` writes
+   `src-tauri/THIRD-PARTY-LICENSES.txt`; it takes `--target <triple>` and
+   `--out <path>`.
+
+It is **not** a CI artefact: the file is generated during the build and only
+ever leaves the runner inside an installer. Uploading it per-platform would make
+A2 answerable without installing anything, which is worth doing if this comes up
+again.

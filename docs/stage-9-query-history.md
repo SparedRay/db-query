@@ -102,7 +102,7 @@ server's own error is on the row.
 - [x] **H5 — The list is searchable**, scoped to the active connection by default, newest first, repeats collapsed.
 - [x] **H6 — Choosing a statement puts it in the editor and runs nothing.** Asserted in every picking test.
 - [x] **H7 — History can be cleared**, after asking, scoped the way the list is scoped.
-- [ ] **H8 — Confirmed by hand** against a real database on both platforms.
+- [x] **H8 — Confirmed by hand** against a real database on both platforms. Confirmed 2026-09-09, on the installed app.
 
 ---
 

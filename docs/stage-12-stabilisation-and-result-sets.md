@@ -229,19 +229,19 @@ Deleting is the recommendation; each is reconstructible from git if wanted.
 
 ## 5. Milestones
 
-- [ ] **B1 — A result can be closed**, one statement or all, and the pane
+- [x] **B1 — A result can be closed**, one statement or all, and the pane
       returns to the state a fresh tab is in.
-- [ ] **B2 — Disconnecting clears the results it invalidated.** No stale grid
+- [x] **B2 — Disconnecting clears the results it invalidated.** No stale grid
       survives a tab switch, and export cannot act on one.
-- [ ] **B3 — An idle connection heals itself.** Leave a connection past the
+- [x] **B3 — An idle connection heals itself.** Leave a connection past the
       server's `wait_timeout`, then expand the tree: it works, with no error and
       no reconnect ceremony.
-- [ ] **B4 — A replaced exec connection says so**, once, where the user will see
+- [x] **B4 — A replaced exec connection says so**, once, where the user will see
       it, because session state was lost.
-- [ ] **B5 — Binary and text agree.** A binary-collation `VARCHAR` that the grid
+- [x] **B5 — Binary and text agree.** A binary-collation `VARCHAR` that the grid
       shows as text exports as text; a real BLOB is still refused.
-- [ ] **B6 — A cluster is not offered an export it cannot perform.**
-- [ ] **B7 — Nothing regressed.** Every suite, both engines, both live backends.
+- [x] **B6 — A cluster is not offered an export it cannot perform.**
+- [x] **B7 — Nothing regressed.** Every suite, both engines, both live backends.
 
 ## 6. Task tracker
 
@@ -622,3 +622,30 @@ grid are visibly the same sheet. A test asserts the separation exists in both
 themes — as "differs from the page ground", not as a hex value, because the
 point is the contrast and pinning the colour would fail on the next palette
 change for no reason.
+
+---
+
+## 16. Confirmed by hand — 2026-09-09
+
+**B1-B7 all verified** against the installed app, and the §15 changes with
+them. Everything this stage set out to fix has now been used, not only tested:
+results close, disconnecting takes its stale grid with it, an idle connection
+heals itself without ceremony, the replacement says so once, binary and text
+agree, and a cluster is not offered an export it cannot perform.
+
+B5 is also Stage 8's C1, stated twice in two trackers — carried since Stage 5
+and closed here.
+
+Confirmed in the same pass, and recorded in their own trackers: **R1, R3, R4 and
+S9** (Stage 8 §6 — the updater has now actually run, against real published
+releases) and **H8** (Stage 9).
+
+Still open, and honestly so:
+
+- **R2** — the first double-click install on a clean Windows machine. Not
+  failed; not reported. An install exists, since R3 updated one.
+- **A2** — the Windows licence file is readable at Settings → About →
+  "Third-party licences" on the Windows install; nobody has read it yet. See
+  Stage 8 §6 for where it lives and why it is not a CI artefact.
+- **N1** — CI runs every suite on both platforms and is green, which is not the
+  same statement as someone having used the built app on both.

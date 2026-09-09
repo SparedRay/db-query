@@ -14,11 +14,11 @@ decisions that were corrected along the way.
 | 5 | [Packaging & distribution](stage-5-packaging.md) | 🔒 **Frozen** — public repo, MIT, CI green on both platforms, installers built; updater and attribution carried to Stage 6 |
 | 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 🔒 **Frozen** — updater built and version taken from the tag; never run against a published release, attribution still not shipped |
 | 7 | [Session persistence](stage-7-session-persistence.md) | 🔒 **Frozen** — tabs restore on connect, S1-S8 tested; hands-on confirmation carried to Stage 8 |
-| 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 🚧 **In progress** — licence notices ship and are readable in-app; publishing and proving the updater still open |
-| 9 | [Query history](stage-9-query-history.md) | 🚧 **In progress** — recorded, searchable and safe; hands-on confirmation pending |
+| 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 🚧 **In progress** — R1/R3/R4/S9 confirmed by hand 2026-09-09: the updater runs, reports the new version and refuses a wrong key. R2 and A2 outstanding (§6) |
+| 9 | [Query history](stage-9-query-history.md) | ✅ **Complete** — recorded, searchable and safe; H8 confirmed by hand 2026-09-09 |
 | 10 | [An assistant that writes SQL](stage-10-assistant.md) | 🚧 **Experimental** — proposes SQL, never runs it; Anthropic or any OpenAI-compatible server, local included; verified against a local model; schema is loaded before the question so the model does not guess |
 | 11 | [A second engine: Elasticsearch SQL](stage-11-elasticsearch.md) | 🚧 **Built** — engine trait + capabilities; Elasticsearch runs end to end against a live cluster; reviewed hands-on 2026-09-09 (§11) |
-| 12 | [Stabilisation: result sets, idle connections, carried bugs](stage-12-stabilisation-and-result-sets.md) | 📋 **Planned** — closing results, self-healing idle connections, and the bugs carried since Stage 5 |
+| 12 | [Stabilisation: result sets, idle connections, carried bugs](stage-12-stabilisation-and-result-sets.md) | ✅ **Built and confirmed** — B1-B7 verified by hand 2026-09-09 (§16); also tree/type icons, a schema filter, tabbed settings, formatted definitions and a dialect-aware linter (§13-15) |
 
 ## Rules
 
