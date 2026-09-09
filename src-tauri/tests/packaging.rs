@@ -1,0 +1,92 @@
+//! What the release depends on being true about the configuration.
+//!
+//! These are one-line facts that no other test would notice breaking, and each
+//! one has already cost a release:
+//!
+//!   * `v0.2.0` shipped a build calling itself `0.1.0`, because the version was
+//!     a literal in `tauri.conf.json` that tagging did not touch. Since
+//!     `latest.json` takes its version from the build rather than from the tag,
+//!     every install was told it was already current.
+//!   * The updater reads a URL that only resolves for **published** releases,
+//!     which is easy to change to something that looks equivalent and is not.
+
+use std::path::Path;
+
+fn config() -> serde_json::Value {
+    let text =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+            .expect("tauri.conf.json must be readable");
+    serde_json::from_str(&text).expect("tauri.conf.json must be valid JSON")
+}
+
+/// The version must be a *reference*, not a number.
+///
+/// A literal here builds and passes every other test — and quietly breaks
+/// updates for everyone, because CI's tag stamp writes `package.json` and this
+/// file would stop reading it.
+#[test]
+fn the_app_version_is_read_from_package_json() {
+    let cfg = config();
+    let version = cfg["version"]
+        .as_str()
+        .expect("tauri.conf.json must set `version`");
+    assert_eq!(
+        version, "../package.json",
+        "the app version must point at package.json, which is what CI stamps \
+         from the release tag (scripts/set-version.mjs). A literal version here \
+         means every release advertises whatever number was last committed."
+    );
+
+    // And the file it points at has to be there, relative to this manifest.
+    let pkg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../package.json");
+    assert!(pkg.exists(), "{} must exist", pkg.display());
+}
+
+/// package.json is the source of truth, but a crate that disagrees with the app
+/// it builds is a trap for whoever reads it next. `set-version` moves both.
+#[test]
+fn the_crate_version_agrees_with_the_app_version() {
+    let pkg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../package.json"))
+            .expect("package.json must be readable"),
+    )
+    .expect("package.json must be valid JSON");
+
+    assert_eq!(
+        pkg["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "package.json and Cargo.toml disagree about the version. \
+         Run `mise run set-version <x.y.z>` rather than editing either by hand."
+    );
+}
+
+/// The updater endpoint must be the *published*-release URL.
+///
+/// `releases/latest/download/...` resolves only for a published release; a
+/// draft is not `latest`, and the check fails with a 404 that reaches the user
+/// as an error rather than as "there is nothing new".
+#[test]
+fn the_updater_reads_published_releases() {
+    let cfg = config();
+    let endpoints = cfg["plugins"]["updater"]["endpoints"]
+        .as_array()
+        .expect("the updater must have endpoints");
+    assert!(!endpoints.is_empty(), "at least one endpoint is required");
+
+    let first = endpoints[0].as_str().unwrap_or_default();
+    assert!(
+        first.contains("/releases/latest/download/latest.json"),
+        "unexpected updater endpoint: {first}"
+    );
+}
+
+/// A build with no public key cannot be told to trust one later — those installs
+/// are simply not updatable, and every one has to be replaced by hand.
+#[test]
+fn the_updater_has_a_public_key() {
+    let cfg = config();
+    let pubkey = cfg["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(!pubkey.trim().is_empty(), "the updater needs a pubkey");
+}

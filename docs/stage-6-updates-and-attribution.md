@@ -46,7 +46,7 @@ Two of the items below are not polish:
 - [ ] Publish a release rather than leaving it a draft; confirm `.deb` **and** `-setup.exe` are both attached
 - [ ] Install from `setup.exe` on a Windows machine with no toolchain (U1)
 - [ ] Remove the stray local `1.0.0` tag — it is not on the remote and means nothing
-- [ ] Decide the versioning story: `npm version` currently leaves `Cargo.toml` and `tauri.conf.json` untouched, so three files can disagree about what a release is
+- [x] **The versioning story is decided** — see *Why "check for updates" found nothing* below
 
 ### Phase 2 — Updater — built 2026-09-08
 - [x] `tauri signer generate`; public key in `tauri.conf.json`. **The private key is at `~/.tauri/db-query-updater.key`, mode 600, outside the repository** — it was never written into the tree and never printed
@@ -304,6 +304,80 @@ menu entry.
   Restricting it to views would have needed *extra* code to take it away.
 - Like every other generated-SQL action, it opens a tab and **runs nothing**;
   both tests assert that.
+
+---
+
+### Why "check for updates" found nothing — 2026-09-08
+
+> *"the check for updates didnt work … builds still say 0.1.0 even when we
+> publish the new tag"*
+
+**Two independent faults, and the second is the one that would have survived
+fixing the first.** What the repository actually shows:
+
+| Checked | Result |
+|---|---|
+| Tags on the remote | `v0.1.0`, `v0.1.1`, `v0.2.0` |
+| `GET /repos/SparedRay/db-query/releases` (unauthenticated) | `[]` |
+| `releases/latest/download/latest.json` | **HTTP 404** |
+
+#### Fault 1 — nothing is published
+
+The unauthenticated releases API lists every published release, prereleases
+included, and it is **empty**. Drafts are invisible to it, and the endpoint the
+updater reads is `releases/latest/download/latest.json` — a draft is not
+`latest`, so that URL 404s and the check fails rather than reporting "nothing
+new". The workflow creates drafts on purpose; publishing is still a manual step.
+
+The likeliest reason there is not even a complete draft is the outstanding
+secret. **`TAURI_SIGNING_PRIVATE_KEY` still is not set**, and NSIS *is* an
+updater target, so the Windows job cannot sign and fails — while the Linux job
+succeeds and leaves a draft that looks nearly right. The workflow now **refuses
+the release up front** if that secret is missing, on both platforms, rather than
+producing a half-release whose updater manifest is silently absent.
+
+#### Fault 2 — the tag never reached the build
+
+`tauri.conf.json` carried `"version": "0.1.0"` as a literal, and tagging touched
+nothing. So `v0.2.0` built an app that called itself `0.1.0` — and since
+`latest.json` takes its version **from the build, not from the tag**, every
+install would have been told it was already current even once the release was
+published. The updater was working the whole time; it was being handed the wrong
+number.
+
+This is exactly the "three manifests can disagree" debt Phase 1 carried, cashed
+in by a real release.
+
+#### The fix: one source, stamped from the tag
+
+- `tauri.conf.json` now reads **`"version": "../package.json"`**. Tauri supports
+  a path there and falls back to `Cargo.toml` if the key is absent; pointing it
+  at `package.json` makes one file decide.
+- **`scripts/set-version.mjs`** moves `package.json`, its lockfile and
+  `Cargo.toml` together. `mise run set-version 0.2.0` locally; a leading `v` is
+  accepted, and anything that is not semver is refused *there* rather than as an
+  unrelated bundler failure on Windows an hour later.
+- The release workflow **stamps the version from the tag** before building, so
+  the installers and `latest.json` call themselves what the tag says and nothing
+  has to be committed first. If you would rather the tagged commit also carry the
+  number, run `set-version` and commit before tagging — CI then stamps the same
+  value and changes nothing.
+
+Verified rather than assumed: with `Cargo.toml` at `0.1.0` and `package.json` at
+`0.3.0`, the compiled binary carries **0.3.0** — so the app version really does
+come from `package.json`, and the crate version is now kept in step only so that
+a reader is not misled.
+
+#### `tests/packaging.rs`
+
+Four assertions no other test would notice breaking, each of which has already
+cost a release: the version is a *reference* and not a literal, `Cargo.toml`
+agrees with `package.json`, the updater endpoint is the published-release URL,
+and a public key exists. Run on both platforms in CI.
+
+A literal version in `tauri.conf.json` builds cleanly and passes everything else
+while quietly breaking updates for every install — which is precisely the kind
+of thing that needs a test rather than a note.
 
 ---
 

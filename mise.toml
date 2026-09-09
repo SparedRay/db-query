@@ -28,6 +28,7 @@ description = "Offline tests: Rust unit + fixture. See test-ui for the frontend.
 run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --lib",
   "cargo test --manifest-path src-tauri/Cargo.toml --test sample_files",
+  "cargo test --manifest-path src-tauri/Cargo.toml --test packaging",
 ]
 
 [tasks.test-ui]
@@ -48,6 +49,10 @@ run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --test live_mysql -- --ignored --test-threads=1",
   "cargo test --manifest-path src-tauri/Cargo.toml --test keychain -- --ignored",
 ]
+
+[tasks.set-version]
+description = "Set the app version everywhere (package.json, lockfile, Cargo.toml)"
+run = "node scripts/set-version.mjs"
 
 [tasks.db-up]
 description = "Start the MySQL 8 fixture container and seed it"

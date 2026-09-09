@@ -94,6 +94,8 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Sample-file fixtures
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
+      - name: Packaging invariants (version source, updater endpoint)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
 
       # --- the live suite: the half of `mise run test-live` that can run here ---
       # The keychain half cannot: a Linux runner has no D-Bus secret service.
@@ -159,6 +161,8 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Sample-file fixtures
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
+      - name: Packaging invariants (version source, updater endpoint)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
 
       # E0 / C3w, carried since Stage 2 and unanswerable until now: does the
       # keychain layer actually work against Windows Credential Manager?

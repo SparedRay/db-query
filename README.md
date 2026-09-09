@@ -80,6 +80,24 @@ mise run test-live  # tests needing the fixture and a keychain
 mise run db-down    # tear the fixture down
 ```
 
+## Releasing
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+That is the whole flow. **The version comes from the tag**: CI stamps it into
+`package.json` — which `src-tauri/tauri.conf.json` reads, via
+`"version": "../package.json"` — and into `Cargo.toml`, so the installers and
+the updater manifest all call themselves what the tag says.
+
+The build produces a **draft** release so the notes can be edited. **Publish it**
+before expecting anyone to receive it: the updater endpoint is
+`releases/latest/download/latest.json`, and a draft is not `latest`.
+
+To move the version in the working tree — so a checked-out tag builds the same
+number — `mise run set-version 0.2.0`.
+
 ## Targets
 
 MySQL **8.0+**. TLS verifies the CA chain and hostname by default; the
