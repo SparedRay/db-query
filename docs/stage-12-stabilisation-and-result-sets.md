@@ -246,14 +246,17 @@ Deleting is the recommendation; each is reconstructible from git if wanted.
 ## 6. Task tracker
 
 ### Phase 1 — Result sets
-- [ ] `clearResult(tab)` in `tabs.ts`, one definition, used by every caller
-- [ ] "Close result" and "Close all results" — result bar, cell menu, per-tab `✕`
-- [ ] `onDisconnected` clears rather than merely repainting (B2)
-- [ ] UI tests: closed by each route; survives a tab switch; export and copy go
-      disabled; a disconnect leaves nothing to repaint
+- [x] `clearResult(tab)` + `emptyResultState()` in `tabs.ts`, spread by `create` and `restore` so the three cannot drift
+- [x] "Close results" button, a `✕` per statement tab, and a `danger` cell-menu item
+- [x] `onDisconnected` clears rather than merely repainting (B2)
+- [x] **14 UI tests** on both engines: each route; survives a tab switch; export
+      and copy go disabled; the strip hides at one statement; the active
+      statement is preserved when an earlier one closes; a disconnect leaves
+      nothing to repaint; the script is never touched
 
 ### Phase 2 — Connections
-- [ ] `mysql_meta()` / `mysql_killer()` become ping-and-reopen (B3)
+- [x] `mysql_meta()` / `mysql_killer()` hand back a **locked, checked** guard,
+      and the fields are now private — so there is no unchecked way in
 - [ ] `ensure_exec` reports whether it replaced a connection; a chip says so (B4)
 - [ ] Live test: reap the connection server-side with `KILL`, then introspect —
       the honest reproduction, and it needs no eight-hour wait

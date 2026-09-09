@@ -179,7 +179,7 @@ pub(crate) async fn mysql_list_tables(
     }
 
     let rows = {
-        let mut meta = server.mysql_meta()?.lock().await;
+        let mut meta = server.mysql_meta().await?;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(
             "SELECT table_name AS name, table_type AS kind \
@@ -232,7 +232,7 @@ pub(crate) async fn mysql_list_columns(
     }
 
     let rows = {
-        let mut meta = server.mysql_meta()?.lock().await;
+        let mut meta = server.mysql_meta().await?;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(
             "SELECT column_name AS name, column_type AS data_type, \
@@ -299,7 +299,7 @@ pub(crate) async fn mysql_list_routines(
     }
 
     let (routine_rows, param_rows) = {
-        let mut meta = server.mysql_meta()?.lock().await;
+        let mut meta = server.mysql_meta().await?;
         server.introspection_count.fetch_add(2, Ordering::SeqCst);
         let routines = sqlx::query(
             "SELECT routine_name AS name, routine_type AS kind, \
@@ -396,7 +396,7 @@ pub(crate) async fn mysql_table_ddl(
     let qualified = crate::sqlgen::qualify(db, table)?;
 
     let row = {
-        let mut meta = server.mysql_meta()?.lock().await;
+        let mut meta = server.mysql_meta().await?;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SHOW CREATE TABLE {qualified}"
@@ -434,7 +434,7 @@ pub(crate) async fn mysql_routine_ddl(
     let sql = format!("SHOW CREATE {kw} {qualified}");
 
     let row = {
-        let mut meta = server.mysql_meta()?.lock().await;
+        let mut meta = server.mysql_meta().await?;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&mut *meta)

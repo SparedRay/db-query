@@ -53,6 +53,12 @@ export interface ResultsFor {
   onSelect: (index: number) => void;
   onScrolled: (scrollTop: number) => void;
   onSelectionChanged: () => void;
+  /**
+   * Discard one statement's result. The view reports the index and repaints
+   * nothing itself — the tab owns the result, so the tab decides what closing
+   * one means, including what happens when it was the last.
+   */
+  onCloseStatement: (index: number) => void;
 }
 
 export class ResultView {
@@ -66,6 +72,7 @@ export class ResultView {
   private onScrolled: (scrollTop: number) => void = () => {};
   private selection: GridSelection = emptySelection();
   private onSelectionChanged: () => void = () => {};
+  private onCloseStatement: (index: number) => void = () => {};
   /** Anchors for shift-click ranges. */
   private lastCol: number | null = null;
   private lastRow: number | null = null;
@@ -101,6 +108,7 @@ export class ResultView {
     this.result = null;
     this.onSelect = () => {};
     this.onScrolled = () => {};
+    this.onCloseStatement = () => {};
     this.selection = emptySelection();
     this.tabsEl.replaceChildren();
     this.gridEl.replaceChildren(el("div", "empty", html));
@@ -113,6 +121,7 @@ export class ResultView {
     this.onSelect = opts.onSelect;
     this.onScrolled = opts.onScrolled;
     this.onSelectionChanged = opts.onSelectionChanged;
+    this.onCloseStatement = opts.onCloseStatement;
     this.widths = opts.widths;
     this.selection = opts.selection;
 
@@ -164,6 +173,21 @@ export class ResultView {
         t.classList.add("errored");
       }
       t.append(badge);
+
+      // Its own element rather than a click zone inside the tab: closing is
+      // destructive and selecting is not, and the two must not be a few pixels
+      // apart with nothing to tell them apart.
+      const close = el("span", "tab-close");
+      close.textContent = "\u00d7";
+      close.title = `Close result ${i + 1}`;
+      close.setAttribute("role", "button");
+      close.onclick = (e) => {
+        // Or selecting the tab we are closing repaints it on the way out.
+        e.stopPropagation();
+        this.onCloseStatement(i);
+      };
+      t.append(close);
+
       if (i === this.active) t.classList.add("active");
       t.onclick = () => {
         this.active = i;
@@ -363,6 +387,12 @@ export class ResultView {
       // selection alone.
       { label: "Copy", run: () => this.onCopy(false) },
       { label: "Copy with headers", run: () => this.onCopy(true) },
+      // Last, and flagged: the only item here that destroys something.
+      {
+        label: "Close this result",
+        danger: true,
+        run: () => this.onCloseStatement(this.active),
+      },
     ]);
   }
 

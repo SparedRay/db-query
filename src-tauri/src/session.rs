@@ -41,7 +41,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 use sqlx::{Connection, MySqlConnection, Row};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::schema::DbSchema;
 
@@ -181,8 +181,13 @@ pub struct ServerConn {
     password: String,
     /// The two shared MySQL connections. `None` for engines that hold nothing
     /// open — HTTP is stateless, so there is nothing to keep or to leak.
-    pub killer: Option<Mutex<MySqlConnection>>,
-    pub meta: Option<Mutex<MySqlConnection>>,
+    ///
+    /// **Private**, so `mysql_meta`/`mysql_killer` are the only way to reach
+    /// one. That is what makes the liveness check unskippable rather than
+    /// merely conventional — the whole idle-disconnect bug was one pair of
+    /// connections that nobody had remembered to check.
+    killer: Option<Mutex<MySqlConnection>>,
+    meta: Option<Mutex<MySqlConnection>>,
     pub schema_cache: Mutex<HashMap<String, DbSchema>>,
     /// Everything that differs between engines. MySQL's implementation is a
     /// dispatch vtable over the code that has always been here; see `mysql.rs`.
@@ -202,16 +207,46 @@ impl ServerConn {
     /// A `Result` rather than a panic: reaching these on a connection that has
     /// none means a MySQL-only path was called for another engine, which is a
     /// bug worth a message rather than a crash in someone's session.
-    pub(crate) fn mysql_meta(&self) -> Result<&Mutex<MySqlConnection>, String> {
-        self.meta
-            .as_ref()
-            .ok_or_else(|| "This operation needs a MySQL connection.".to_string())
+    ///
+    /// # These heal themselves
+    ///
+    /// Both hand back a **locked, checked** connection rather than the mutex,
+    /// so there is no way to reach one of these without the liveness check.
+    /// That is the point of the shape: the exec connection has pinged and
+    /// reopened since Stage 2 (`ensure_exec`), and these two did not, so a
+    /// connection left past the server's `wait_timeout` could still run a query
+    /// while the schema tree answered "Cannot reach the server".
+    ///
+    /// Reopened from the connection profile, which is exactly how they were
+    /// opened in the first place. Deliberately **not** from a tab's current
+    /// database: every introspection query names its schema explicitly, and a
+    /// reconnect that inherited one would be a behaviour change wearing a bug
+    /// fix's clothes.
+    pub async fn mysql_meta(&self) -> Result<MutexGuard<'_, MySqlConnection>, String> {
+        self.checked(self.meta.as_ref()).await
     }
 
-    pub(crate) fn mysql_killer(&self) -> Result<&Mutex<MySqlConnection>, String> {
-        self.killer
-            .as_ref()
-            .ok_or_else(|| "This operation needs a MySQL connection.".to_string())
+    /// The connection `KILL` is issued on.
+    ///
+    /// Reconnecting is still correct when this one has died: `KILL` needs *a*
+    /// live connection, not the original one, and the id it kills is held on
+    /// the tab.
+    pub async fn mysql_killer(&self) -> Result<MutexGuard<'_, MySqlConnection>, String> {
+        self.checked(self.killer.as_ref()).await
+    }
+
+    async fn checked<'a>(
+        &'a self,
+        slot: Option<&'a Mutex<MySqlConnection>>,
+    ) -> Result<MutexGuard<'a, MySqlConnection>, String> {
+        let mut guard = slot
+            .ok_or_else(|| "This operation needs a MySQL connection.".to_string())?
+            .lock()
+            .await;
+        if guard.ping().await.is_err() {
+            *guard = open(&self.profile, &self.password).await?;
+        }
+        Ok(guard)
     }
 
     pub fn id(&self) -> &str {
@@ -604,7 +639,7 @@ async fn kill_on(server: &ServerConn, conn_id: u64) -> Result<(), String> {
     if conn_id == 0 {
         return Ok(()); // this tab has never opened a connection
     }
-    let mut killer = server.mysql_killer()?.lock().await;
+    let mut killer = server.mysql_killer().await?;
     sqlx::query(sqlx::AssertSqlSafe(format!("KILL QUERY {conn_id}")))
         .execute(&mut *killer)
         .await
@@ -630,7 +665,7 @@ pub(crate) async fn mysql_cancel_query(state: &AppState, tab_id: &str) -> Result
 /// The databases on a MySQL server. Split out so `MysqlEngine` can offer it as
 /// `namespaces` without `connect` and the engine trait duplicating the query.
 pub(crate) async fn mysql_databases(server: &ServerConn) -> Result<Vec<String>, String> {
-    let mut meta = server.mysql_meta()?.lock().await;
+    let mut meta = server.mysql_meta().await?;
     let rows = sqlx::query(
         "SELECT schema_name AS name FROM information_schema.schemata ORDER BY schema_name",
     )

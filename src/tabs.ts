@@ -107,6 +107,41 @@ export interface TabHooks {
 
 let idSeq = 0;
 
+/**
+ * The result-shaped half of a tab, in its empty state.
+ *
+ * One definition because three places need it — creating a tab, restoring one,
+ * and closing its results — and three hand-written copies of the same six
+ * fields is how one of them ends up forgetting `colWidths` and a closed result
+ * comes back wearing the old column widths.
+ *
+ * `sourceTable` is deliberately **not** here. It describes where this tab's SQL
+ * came from, not what the last run returned, so closing a result must not throw
+ * away the fidelity a browse action gave the next export.
+ */
+export function emptyResultState() {
+  return {
+    result: null as ScriptResult | null,
+    error: null as string | null,
+    activeResultIndex: 0,
+    colWidths: new Map<string, number>(),
+    colSelection: emptySelection(),
+    scrollTop: 0,
+  };
+}
+
+/**
+ * Discard everything a tab is holding about its last run.
+ *
+ * The rows are the reason this exists rather than tidiness: every statement's
+ * `CellValue[][]` is retained in full, for every tab, until the tab closes.
+ * Before this there was no way to release that memory except by closing the
+ * tab, which also threw away the script the user was writing.
+ */
+export function clearResult(tab: ScriptTab) {
+  Object.assign(tab, emptyResultState());
+}
+
 export class TabManager {
   private tabs: ScriptTab[] = [];
   private activeId: string | null = null;
@@ -231,13 +266,8 @@ export class TabManager {
       mtimeMs: opts?.mtimeMs ?? null,
       baseline: state.doc,
       state,
-      result: null,
-      error: null,
-      activeResultIndex: 0,
-      colWidths: new Map(),
-      colSelection: emptySelection(),
+      ...emptyResultState(),
       sourceTable: opts?.sourceTable ?? null,
-      scrollTop: 0,
       busy: false,
       activeDb: null,
       serverConnId: 0,
@@ -359,13 +389,8 @@ export class TabManager {
         // disk, so `isDirty` still answers the question it always answered.
         baseline: createEditorState(spec.baseline).doc,
         state,
-        result: null,
-        error: null,
-        activeResultIndex: 0,
-        colWidths: new Map(),
-        colSelection: emptySelection(),
+        ...emptyResultState(),
         sourceTable: null,
-        scrollTop: 0,
         busy: false,
         activeDb: spec.activeDb,
         serverConnId: 0,

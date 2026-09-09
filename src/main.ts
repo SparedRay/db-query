@@ -26,7 +26,7 @@ import {
 } from "./settings";
 import { contextMenu } from "./menu";
 import { ResultView } from "./grid";
-import { TabManager, type ScriptTab } from "./tabs";
+import { TabManager, clearResult, type ScriptTab } from "./tabs";
 import {
   ConnectionManager, COLOURS, newConnectionId, type ConnectionEntry,
 } from "./connections";
@@ -64,6 +64,7 @@ const els = {
   btnCopy: $<HTMLButtonElement>("btn-copy"),
   btnCopyHead: $<HTMLButtonElement>("btn-copy-head"),
   btnExport: $<HTMLButtonElement>("btn-export"),
+  btnCloseResults: $<HTMLButtonElement>("btn-close-results"),
   btnUpdate: $<HTMLButtonElement>("btn-update"),
   btnSettings: $<HTMLButtonElement>("btn-settings"),
   btnHistory: $<HTMLButtonElement>("btn-history"),
@@ -1078,6 +1079,11 @@ function refreshExportBar() {
   els.btnCopyHead.title = what
     ? `Copy the selected ${what} with headers (Ctrl+Shift+C)`
     : "Copy every row and column with headers (Ctrl+Shift+C)";
+
+  // Driven by whether the *tab* is holding anything, not by the selection:
+  // an errored run has no selectable data and is still something to dismiss.
+  const tab = tabs?.active();
+  els.btnCloseResults.disabled = !tab || (!tab.result && !tab.error);
 }
 
 async function copySelection(headers: boolean) {
@@ -1326,7 +1332,44 @@ function showResultsInner(tab: ScriptTab) {
     onSelect: (i) => { tab.activeResultIndex = i; },
     onScrolled: (top) => { tab.scrollTop = top; },
     onSelectionChanged: () => refreshExportBar(),
+    onCloseStatement: (i) => closeStatement(tab, i),
   });
+}
+
+/**
+ * Discard one statement's result from a multi-statement run.
+ *
+ * Removing it from the array is what actually frees the rows — the view holds a
+ * reference to this same object, not a copy. Closing the last one is a
+ * `clearResult`, because a `ScriptResult` with no statements would render as an
+ * empty grid with a live export bar rather than as "no results".
+ */
+function closeStatement(tab: ScriptTab, index: number) {
+  const result = tab.result;
+  if (!result || index < 0 || index >= result.statements.length) return;
+
+  result.statements.splice(index, 1);
+  if (result.statements.length === 0) {
+    clearResult(tab);
+  } else {
+    // Shift *before* clamping, or closing an earlier statement moves the
+    // active one twice and lands on a neighbour. Closing the active statement
+    // keeps the index, which now addresses the one that followed it.
+    let next = tab.activeResultIndex;
+    if (index < next) next -= 1;
+    tab.activeResultIndex = Math.min(Math.max(next, 0), result.statements.length - 1);
+    // A different statement has different rows and columns, so indices from the
+    // old one would highlight the wrong things.
+    tab.colSelection.rows.clear();
+    tab.colSelection.cols.clear();
+  }
+  showResults(tab);
+}
+
+/** Discard everything this tab is holding about its last run. */
+function closeAllResults(tab: ScriptTab) {
+  clearResult(tab);
+  showResults(tab);
 }
 
 async function run(sql: string) {
@@ -1497,13 +1540,20 @@ conns = new ConnectionManager($("rail"), {
   },
   onDisconnected: (entry) => {
     trees.delete(entry.profile.id);
+    // Discard the results before repainting, not after: `setMessage` is
+    // view-only, so a disconnect used to leave `tab.result` in place and the
+    // next tab switch repainted rows fetched from a server we had left —
+    // with Copy and Export live on them.
+    for (const t of tabs.forConnection(entry.profile.id)) {
+      t.serverConnId = 0;
+      clearResult(t);
+    }
     if (conns.active()?.profile.id === entry.profile.id) {
       showTree(entry.profile.id);
       connected = false;
       results.setMessage(`Disconnected from ${entry.profile.name}.`);
       syncBusy();
     }
-    for (const t of tabs.forConnection(entry.profile.id)) t.serverConnId = 0;
     session.schedule();
   },
   onRemoved: (entry) => {
@@ -1987,6 +2037,11 @@ window.addEventListener("keydown", (e) => {
     void (e.shiftKey ? files.saveAs(t) : files.save(t));
   }
 });
+
+els.btnCloseResults.onclick = () => {
+  const tab = tabs.active();
+  if (tab) closeAllResults(tab);
+};
 
 els.lintOn.onchange = () => applyLintSetting(true);
 applyLintSetting(true);

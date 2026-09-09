@@ -67,12 +67,7 @@ async fn connected() -> AppState {
 /// prove tab connections are lazy and are actually released on close.
 async fn server_conn_count(state: &AppState) -> i64 {
     let server = session::server(state, C).await.unwrap();
-    let mut meta = server
-        .meta
-        .as_ref()
-        .expect("a MySQL connection")
-        .lock()
-        .await;
+    let mut meta = server.mysql_meta().await.expect("a MySQL connection");
     sqlx::query(
         "SELECT COUNT(*) AS n FROM information_schema.processlist \
          WHERE user = ? AND id <> CONNECTION_ID()",
@@ -774,12 +769,7 @@ async fn a_reaped_tab_connection_is_reopened_transparently() {
     // KILL (not KILL QUERY) drops the whole connection, exactly as wait_timeout would.
     {
         let server = session::server(&state, C).await.unwrap();
-        let mut meta = server
-            .meta
-            .as_ref()
-            .expect("a MySQL connection")
-            .lock()
-            .await;
+        let mut meta = server.mysql_meta().await.expect("a MySQL connection");
         sqlx::query(sqlx::AssertSqlSafe(format!("KILL {old_id}")))
             .execute(&mut *meta)
             .await
@@ -1275,12 +1265,7 @@ async fn examining_a_routine_produces_a_script_that_recreates_it_exactly() {
 /// the comparison above cannot be fooled by a bug shared with it.
 async fn body_of(state: &AppState, name: &str) -> String {
     let server = session::server(state, C).await.unwrap();
-    let mut meta = server
-        .meta
-        .as_ref()
-        .expect("a MySQL connection")
-        .lock()
-        .await;
+    let mut meta = server.mysql_meta().await.expect("a MySQL connection");
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SHOW CREATE PROCEDURE `poc`.`{name}`"
     )))
@@ -2075,4 +2060,96 @@ async fn warming_a_second_time_costs_nothing() {
         after_first,
         "the second warm-up went back to the server"
     );
+}
+
+/// **The idle-disconnect bug.**
+///
+/// `wait_timeout` defaults to eight hours, so the honest reproduction is to do
+/// what the server does at the end of it: `KILL` the connection out from under
+/// ourselves and then use it.
+///
+/// Before this, the exec connection healed (`ensure_exec` has pinged since
+/// Stage 2) and the shared `meta` connection did not — so a session left alone
+/// overnight could still run a query while the schema tree answered "Cannot
+/// reach the server". That asymmetry is what this pins.
+#[tokio::test]
+#[ignore]
+async fn the_meta_connection_heals_after_the_server_drops_it() {
+    let state = connected().await;
+    let server = session::server(&state, C).await.unwrap();
+
+    // Warm it, so the failure below cannot be "it was never connected".
+    let before = schema::list_tables(&state, C, "poc").await.unwrap();
+    assert!(!before.is_empty());
+
+    // The id of the meta connection itself, then kill it from another one.
+    let victim: u64 = {
+        let mut meta = server.mysql_meta().await.unwrap();
+        sqlx::query("SELECT CONNECTION_ID() AS id")
+            .fetch_one(&mut *meta)
+            .await
+            .unwrap()
+            .try_get("id")
+            .unwrap()
+    };
+    {
+        let mut killer = server.mysql_killer().await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("KILL {victim}")))
+            .execute(&mut *killer)
+            .await
+            .ok();
+    }
+
+    // Cache-busting: `list_tables` would answer from memory and prove nothing.
+    schema::refresh(&state, C, "poc").await.unwrap();
+
+    let after = schema::list_tables(&state, C, "poc")
+        .await
+        .expect("introspection must reconnect rather than report the server unreachable");
+    assert_eq!(before.len(), after.len());
+
+    // A new connection, not the corpse.
+    let mut meta = server.mysql_meta().await.unwrap();
+    let now: u64 = sqlx::query("SELECT CONNECTION_ID() AS id")
+        .fetch_one(&mut *meta)
+        .await
+        .unwrap()
+        .try_get("id")
+        .unwrap();
+    assert_ne!(now, victim, "the dead connection was handed back");
+}
+
+/// The same for the killer, because a cancel that cannot connect is a cancel
+/// button that does nothing.
+#[tokio::test]
+#[ignore]
+async fn the_killer_connection_heals_too() {
+    let state = connected().await;
+    let server = session::server(&state, C).await.unwrap();
+
+    let victim: u64 = {
+        let mut killer = server.mysql_killer().await.unwrap();
+        sqlx::query("SELECT CONNECTION_ID() AS id")
+            .fetch_one(&mut *killer)
+            .await
+            .unwrap()
+            .try_get("id")
+            .unwrap()
+    };
+    {
+        let mut meta = server.mysql_meta().await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("KILL {victim}")))
+            .execute(&mut *meta)
+            .await
+            .ok();
+    }
+
+    let mut killer = server.mysql_killer().await.expect("killer must reconnect");
+    let now: u64 = sqlx::query("SELECT CONNECTION_ID() AS id")
+        .fetch_one(&mut *killer)
+        .await
+        .unwrap()
+        .try_get("id")
+        .unwrap();
+    assert_ne!(now, victim);
 }

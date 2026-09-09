@@ -388,6 +388,16 @@ input.num {
 .tab.errored { color: var(--danger-fg); border-color: var(--danger); }
 .tab.truncated .badge::after { content: " ⚠"; color: var(--warn); }
 
+/* Dim until the tab is hovered: closing is destructive, and a row of ✕ marks
+   competing with the labels invites the wrong one. Padded so the hit area is a
+   target rather than a glyph. */
+.tab .tab-close {
+  margin-left: 6px; padding: 0 3px; border-radius: 3px;
+  color: var(--fg-dim); opacity: 0; transition: opacity 90ms linear;
+}
+.tab:hover .tab-close, .tab.active .tab-close { opacity: 0.75; }
+.tab .tab-close:hover { opacity: 1; background: var(--danger); color: var(--danger-fg); }
+
 .grid-host { flex: 1; min-height: 0; overflow: auto; position: relative; }
 
 table.rs {
