@@ -283,7 +283,7 @@ pub fn split(sql: &str) -> SplitOutput {
 /// `LIMIT` would match a column named `` `limit` ``, the word inside
 /// `'no limit'`, or a note in a comment. Searching the mask cannot.
 pub fn mask_noncode(sql: &str) -> String {
-    mask_impl(sql, false)
+    mask_impl(sql, None)
 }
 
 /// Like [`mask_noncode`], but keeps the *contents* of backtick-quoted
@@ -293,10 +293,21 @@ pub fn mask_noncode(sql: &str) -> String {
 /// whereas auto-LIMIT detection must NOT see a column called `` `limit` ``.
 /// Two different questions, so two different masks — sharing one scanner.
 pub fn mask_keep_idents(sql: &str) -> String {
-    mask_impl(sql, true)
+    mask_impl(sql, Some(b'`'))
 }
 
-fn mask_impl(sql: &str, keep_idents: bool) -> String {
+/// The same, for an engine that does not quote identifiers with backticks.
+///
+/// Elasticsearch SQL — and standard SQL generally — uses `"`, which MySQL
+/// reads as a string. Handed the wrong quote, the mask blanks out every
+/// identifier in the statement and the schema checks silently see an empty
+/// query: no false warnings, but no lint either.
+pub fn mask_keep_idents_quoted(sql: &str, quote: char) -> String {
+    mask_impl(sql, u8::try_from(quote).ok())
+}
+
+/// `keep` is the quote character whose *contents* survive, if any.
+fn mask_impl(sql: &str, keep: Option<u8>) -> String {
     let b = sql.as_bytes();
     let mut out = vec![b' '; b.len()];
     let mut mode = Mode::Normal;
@@ -334,7 +345,7 @@ fn mask_impl(sql: &str, keep_idents: bool) -> String {
                     } else {
                         mode = Mode::Normal;
                     }
-                } else if keep_idents && mode == Mode::Backtick {
+                } else if keep == Some(q) {
                     out[i] = c;
                 }
             }

@@ -589,10 +589,18 @@ async fn lint_uses_the_live_schema_cache() {
 
     let cached = schema::lint_schema(&session::server(&state, C).await.unwrap(), Some("poc")).await;
 
-    let good = db_query_lib::lint::lint("SELECT email FROM users", &cached);
+    let good = db_query_lib::lint::lint(
+        "SELECT email FROM users",
+        &cached,
+        db_query_lib::lint::Dialect::mysql(),
+    );
     assert!(good.is_empty(), "real column flagged: {good:?}");
 
-    let bad = db_query_lib::lint::lint("SELECT emial FROM users", &cached);
+    let bad = db_query_lib::lint::lint(
+        "SELECT emial FROM users",
+        &cached,
+        db_query_lib::lint::Dialect::mysql(),
+    );
     assert_eq!(bad.len(), 1, "{bad:?}");
     assert!(bad[0].message.contains("no column `emial`"));
 }

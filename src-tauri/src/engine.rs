@@ -172,6 +172,16 @@ pub trait Engine: Send + Sync {
     /// the engine, not to a shared generator that happened to be written first.
     fn quote_ident(&self, name: &str) -> Result<String, String>;
 
+    /// The character [`Engine::quote_ident`] wraps a name in.
+    ///
+    /// Defaulted to the standard `"`, which is what Elasticsearch uses and what
+    /// MySQL reads as a *string* — so an engine that disagrees must say so. The
+    /// linter needs the character rather than the quoting function: it works on
+    /// a masked copy of the buffer and has to know which quotes hold names.
+    fn ident_quote(&self) -> char {
+        '"'
+    }
+
     /// How a table is named when a namespace is in play.
     ///
     /// Defaulted to `ns.table` because that is what most engines do. An engine

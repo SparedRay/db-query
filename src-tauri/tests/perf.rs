@@ -72,7 +72,7 @@ fn measure_scan_costs_across_buffer_sizes() {
             std::hint::black_box(split::mask_noncode(&sql));
         });
         let t_lint = ms(|| {
-            std::hint::black_box(lint::lint(&sql, &schema));
+            std::hint::black_box(lint::lint(&sql, &schema, lint::Dialect::mysql()));
         });
 
         println!(

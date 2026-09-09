@@ -20,6 +20,39 @@ use crate::split;
 /// Lowercased table name -> lowercased column names.
 pub type LintSchema = HashMap<String, Vec<String>>;
 
+/// What the connected driver does, as far as linting is concerned.
+///
+/// Taken from the engine rather than from its *name*: the rule in this codebase
+/// is that behaviour branches on a capability, never on `engine == "mysql"`.
+/// Both fields here are dialect primitives the `Engine` trait already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dialect {
+    /// The character that quotes an identifier: `` ` `` for MySQL, `"` for
+    /// Elasticsearch and for standard SQL, which reads a backtick as nothing at
+    /// all.
+    pub ident_quote: char,
+    /// Whether `DELIMITER $$` redefines the statement terminator. Where it does
+    /// not, the word is just a word, and finding it must not blank the lint.
+    pub delimiter_blocks: bool,
+}
+
+impl Dialect {
+    pub fn mysql() -> Self {
+        Dialect {
+            ident_quote: '`',
+            delimiter_blocks: true,
+        }
+    }
+}
+
+/// MySQL, because that is what a tab with no connection has always been
+/// written in — the editor's own dialect falls back the same way.
+impl Default for Dialect {
+    fn default() -> Self {
+        Dialect::mysql()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -69,16 +102,45 @@ fn tokenize(masked: &str, base: usize) -> Vec<Tok> {
 
         if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
             // Read a possibly dotted identifier: `u.email`, `db.tbl.col`.
-            while i < b.len()
-                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] == b'.')
-            {
-                i += 1;
+            //
+            // **The dots may have spaces around them.** Masking replaces each
+            // quote character with a space, so `` `poc`.`users` `` arrives here
+            // as ` poc . users `; writing it that way by hand is legal SQL too.
+            // Reading only the unspaced form made the linter take `poc` for the
+            // table and report the *database* as an unknown table — a squiggle
+            // under correct, fully-qualified SQL, which is the one kind of noise
+            // this linter must not produce.
+            let mut text = String::new();
+            loop {
+                let seg = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$')
+                {
+                    i += 1;
+                }
+                text.push_str(&masked[seg..i]);
+
+                // A following `. name` continues the same identifier. A
+                // following `.` that is not followed by a name — `t.*` — does
+                // not: the star belongs to the next token, as it always has.
+                let mut dot = i;
+                while dot < b.len() && b[dot].is_ascii_whitespace() {
+                    dot += 1;
+                }
+                if b.get(dot) != Some(&b'.') {
+                    break;
+                }
+                let mut next = dot + 1;
+                while next < b.len() && b[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                match b.get(next) {
+                    Some(&n) if n.is_ascii_alphanumeric() || n == b'_' || n == b'$' => {
+                        text.push('.');
+                        i = next;
+                    }
+                    _ => break,
+                }
             }
-            // A trailing dot belongs to the next token (e.g. `t.*`).
-            if b[i - 1] == b'.' {
-                i -= 1;
-            }
-            let text = masked[start..i].to_string();
             toks.push(Tok {
                 start: base + start,
                 end: base + i,
@@ -278,12 +340,15 @@ fn is_keyword(upper: &str) -> bool {
 
 // ------------------------------------------------------------------- checks
 
-pub fn lint(sql: &str, schema: &LintSchema) -> Vec<Diagnostic> {
+pub fn lint(sql: &str, schema: &LintSchema, dialect: Dialect) -> Vec<Diagnostic> {
     let out = split::split(sql);
 
     // A DELIMITER block redefines the terminator, so our statement boundaries
-    // are meaningless inside it. Suppress everything rather than guess.
-    if out.delimiter_detected {
+    // are meaningless inside it. Suppress everything rather than guess — but
+    // only where the engine has such blocks. On one that does not, the word is
+    // an ordinary identifier and blanking the lint would be giving up for no
+    // reason.
+    if out.delimiter_detected && dialect.delimiter_blocks {
         return Vec::new();
     }
 
@@ -301,13 +366,19 @@ pub fn lint(sql: &str, schema: &LintSchema) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     for span in &out.statements {
         let text = &sql[span.start..span.end];
-        lint_statement(text, span.start, schema, &mut diags);
+        lint_statement(text, span.start, schema, dialect, &mut diags);
     }
     diags
 }
 
-fn lint_statement(text: &str, base: usize, schema: &LintSchema, diags: &mut Vec<Diagnostic>) {
-    let masked = split::mask_keep_idents(text);
+fn lint_statement(
+    text: &str,
+    base: usize,
+    schema: &LintSchema,
+    dialect: Dialect,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let masked = split::mask_keep_idents_quoted(text, dialect.ident_quote);
     let toks = tokenize(&masked, base);
     if toks.is_empty() {
         return;
@@ -583,14 +654,14 @@ mod tests {
     }
 
     fn msgs(sql: &str) -> Vec<String> {
-        lint(sql, &schema())
+        lint(sql, &schema(), Dialect::mysql())
             .into_iter()
             .map(|d| d.message)
             .collect()
     }
 
     fn none(sql: &str) {
-        let d = lint(sql, &schema());
+        let d = lint(sql, &schema(), Dialect::mysql());
         assert!(d.is_empty(), "expected silence for {sql:?}, got {d:?}");
     }
 
@@ -630,7 +701,11 @@ mod tests {
 
     #[test]
     fn flags_unterminated_quote_as_an_error_and_nothing_else() {
-        let d = lint("SELECT * FROM users WHERE email = 'oops", &schema());
+        let d = lint(
+            "SELECT * FROM users WHERE email = 'oops",
+            &schema(),
+            Dialect::mysql(),
+        );
         assert_eq!(d.len(), 1, "should not cascade: {d:?}");
         assert_eq!(d[0].severity, Severity::Error);
         assert!(d[0].message.contains("Unterminated string literal"));
@@ -638,12 +713,12 @@ mod tests {
 
     #[test]
     fn flags_unbalanced_parens() {
-        let d = lint("SELECT (1 + 2 FROM users", &schema());
+        let d = lint("SELECT (1 + 2 FROM users", &schema(), Dialect::mysql());
         assert!(
             d.iter().any(|x| x.message.contains("Unclosed parenthesis")),
             "{d:?}"
         );
-        let d = lint("SELECT 1) FROM users", &schema());
+        let d = lint("SELECT 1) FROM users", &schema(), Dialect::mysql());
         assert!(
             d.iter().any(|x| x.message.contains("Unmatched closing")),
             "{d:?}"
@@ -652,7 +727,7 @@ mod tests {
 
     #[test]
     fn select_star_without_limit_is_info_only() {
-        let d = lint("SELECT * FROM users", &schema());
+        let d = lint("SELECT * FROM users", &schema(), Dialect::mysql());
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].severity, Severity::Info);
     }
@@ -705,13 +780,13 @@ mod tests {
     #[test]
     fn stays_quiet_when_the_schema_cache_is_empty() {
         let empty = LintSchema::new();
-        assert!(lint("SELECT emial FROM custmers", &empty).is_empty());
+        assert!(lint("SELECT emial FROM custmers", &empty, Dialect::mysql()).is_empty());
     }
 
     #[test]
     fn suppresses_everything_inside_a_delimiter_block() {
         let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN DELETE FROM users; END $$";
-        assert!(lint(sql, &schema()).is_empty());
+        assert!(lint(sql, &schema(), Dialect::mysql()).is_empty());
     }
 
     // ---- false-positive guards: these must all stay silent
@@ -758,21 +833,125 @@ mod tests {
     #[test]
     fn diagnostic_offsets_land_on_the_right_text() {
         let sql = "SELECT emial FROM users";
-        let d = lint(sql, &schema());
+        let d = lint(sql, &schema(), Dialect::mysql());
         assert_eq!(&sql[d[0].start..d[0].end], "emial");
     }
 
     #[test]
     fn offsets_are_absolute_across_multiple_statements() {
         let sql = "SELECT 1;\nSELECT emial FROM users";
-        let d = lint(sql, &schema());
+        let d = lint(sql, &schema(), Dialect::mysql());
         assert_eq!(&sql[d[0].start..d[0].end], "emial");
     }
 
     #[test]
     fn multibyte_text_does_not_shift_offsets() {
         let sql = "SELECT 'héllo → x', emial FROM users";
-        let d = lint(sql, &schema());
+        let d = lint(sql, &schema(), Dialect::mysql());
         assert_eq!(&sql[d[0].start..d[0].end], "emial");
+    }
+
+    // ------------------------------------------- qualified names and dialects
+
+    /// The false positive that prompted all of this: a fully-qualified name is
+    /// correct SQL, and the linter drew a warning under it.
+    ///
+    /// Masking replaces each quote with a space, so `` `poc`.`users` `` reaches
+    /// the tokenizer as ` poc . users `. Reading only the unspaced form, it took
+    /// `poc` for the table and reported the *database* as unknown.
+    #[test]
+    fn a_fully_qualified_name_is_not_an_unknown_table() {
+        for sql in [
+            "SELECT * FROM poc.users",
+            "SELECT * FROM `poc`.`users`",
+            "SELECT `poc`.`users`.`email` FROM `poc`.`users`",
+            "SELECT u.email FROM `poc`.`users` u",
+            "SELECT o.total FROM `poc`.`orders` o JOIN `poc`.`users` u ON u.id = o.user_id",
+            // Spaces around the dot are legal SQL in their own right.
+            "SELECT * FROM poc . users",
+        ] {
+            let d = lint(sql, &schema(), Dialect::mysql());
+            assert!(
+                !d.iter().any(|x| x.message.contains("Unknown table")),
+                "{sql} -> {:?}",
+                d.iter().map(|x| &x.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Joining across the dot must not swallow the star: `t.*` is a token and a
+    /// star, and always was.
+    #[test]
+    fn a_qualified_star_still_ends_the_identifier() {
+        let d = lint("SELECT u.* FROM users u", &schema(), Dialect::mysql());
+        // The `SELECT *` note is expected — `u.*` is every column of `u`. What
+        // must not appear is a name check on a token that swallowed the star.
+        assert!(
+            d.iter().all(|x| x.severity == Severity::Info),
+            "{:?}",
+            d.iter().map(|x| &x.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// An unqualified name is still checked — the fix must not have bought
+    /// silence by giving up.
+    #[test]
+    fn an_unknown_unqualified_table_is_still_reported() {
+        let d = lint("SELECT * FROM custmers", &schema(), Dialect::mysql());
+        assert!(
+            d.iter()
+                .any(|x| x.message.contains("Unknown table `custmers`")),
+            "{d:?}"
+        );
+        let d = lint("SELECT emial FROM users", &schema(), Dialect::mysql());
+        assert!(d.iter().any(|x| x.message.contains("no column")), "{d:?}");
+    }
+
+    /// A driver that quotes with `"` had every identifier masked away, so the
+    /// schema checks saw an empty statement and said nothing at all.
+    #[test]
+    fn a_standard_dialect_reads_double_quoted_identifiers() {
+        let standard = Dialect {
+            ident_quote: '"',
+            delimiter_blocks: false,
+        };
+        let d = lint(r#"SELECT "emial" FROM "users""#, &schema(), standard);
+        assert!(
+            d.iter().any(|x| x.message.contains("no column")),
+            "a double-quoted identifier was not read: {d:?}"
+        );
+
+        // And the same text under MySQL's dialect is a *string*, so there is
+        // nothing to check and nothing to say.
+        let d = lint(
+            r#"SELECT "emial" FROM "users""#,
+            &schema(),
+            Dialect::mysql(),
+        );
+        assert!(
+            !d.iter().any(|x| x.message.contains("no column")),
+            "a MySQL string was linted as an identifier: {d:?}"
+        );
+    }
+
+    /// `DELIMITER` blanks the lint on MySQL because it moves the statement
+    /// boundaries. On an engine without them the word means nothing, and giving
+    /// up would be giving up for no reason.
+    #[test]
+    fn delimiter_only_silences_an_engine_that_has_delimiter_blocks() {
+        let sql = "SELECT * FROM custmers;\nDELIMITER $$";
+        assert!(
+            lint(sql, &schema(), Dialect::mysql()).is_empty(),
+            "MySQL must stay quiet: the boundaries are no longer ours to trust"
+        );
+
+        let standard = Dialect {
+            ident_quote: '"',
+            delimiter_blocks: false,
+        };
+        assert!(
+            !lint(sql, &schema(), standard).is_empty(),
+            "an engine with no DELIMITER blocks gave up its lint over a word"
+        );
     }
 }

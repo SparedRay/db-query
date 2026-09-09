@@ -576,12 +576,26 @@ async fn lint_sql(
 ) -> Result<Vec<Diagnostic>, String> {
     let Some(tab) = session::tab_if_open(&state, &tab_id).await else {
         // An unattached tab still gets Tier 1 checks; only the schema-aware
-        // ones need a connection.
-        return Ok(lint::lint(&sql, &lint::LintSchema::new()));
+        // ones need a connection. `Dialect::default()` is MySQL, which is also
+        // what the editor highlights an unattached tab as — the two fall back
+        // together rather than each guessing.
+        return Ok(lint::lint(
+            &sql,
+            &lint::LintSchema::new(),
+            lint::Dialect::default(),
+        ));
+    };
+    // From the engine, not from its name: a driver that quotes identifiers with
+    // `"` had every identifier masked away and was silently linted as an empty
+    // statement.
+    let engine = &tab.server.engine;
+    let dialect = lint::Dialect {
+        ident_quote: engine.ident_quote(),
+        delimiter_blocks: engine.capabilities().delimiter_blocks,
     };
     let db = tab.current_db.lock().await.clone();
     let schema = schema::lint_schema(&tab.server, db.as_deref()).await;
-    Ok(lint::lint(&sql, &schema))
+    Ok(lint::lint(&sql, &schema, dialect))
 }
 
 // ------------------------------------------------------- schema (meta connection)

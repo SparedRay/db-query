@@ -108,3 +108,40 @@ test("the settings cog survives the rail being rebuilt", async ({ page }) => {
   await expect(page.locator(".rail-item")).toHaveCount(1);
   await expect(page.locator("#btn-settings")).toBeVisible();
 });
+
+/**
+ * The results pane must be a painted surface, not a hole.
+ *
+ * Every part of it was transparent — pane, tab strip, grid host, table and
+ * cells — so rows sat directly on the window's own ground, the same colour as
+ * the gap between the panes, and the grid read as floating rather than as
+ * filling its panel. Only the sticky header and the bottom bar were painted,
+ * which is why it looked *nearly* right.
+ *
+ * Asserted as "differs from the page ground", not as a hex value: the point is
+ * the separation, and pinning the colour would fail on the next palette change
+ * for no reason.
+ */
+for (const scheme of ["light", "dark"] as const) {
+  test(`the results pane is painted, and its tab strip is not the same sheet (${scheme})`, async ({
+    page,
+  }) => {
+    await boot(page, scheme);
+
+    const painted = await page.evaluate(() => {
+      const of = (sel: string) =>
+        getComputedStyle(document.querySelector(sel)!).backgroundColor;
+      return {
+        ground: getComputedStyle(document.body).backgroundColor,
+        pane: of("#results-pane"),
+        tabs: of("#results-pane .tabs"),
+      };
+    });
+
+    const transparent = /rgba\(0, 0, 0, 0\)|transparent/;
+    expect(painted.pane).not.toMatch(transparent);
+    expect(painted.tabs).not.toMatch(transparent);
+    expect(painted.pane).not.toBe(painted.ground);
+    expect(painted.tabs).not.toBe(painted.pane);
+  });
+}

@@ -555,3 +555,70 @@ is the half that would have been easy to break quietly.
 
 The first draft of that live test asserted a `WHERE` clause the view does not
 have. The server said so.
+
+---
+
+## 15. The linter learns which driver it is talking to — 2026-09-09
+
+Three reports, two of them the same underlying mistake: the linter assumed
+MySQL, and the results pane assumed it would be painted by something else.
+
+### A fully-qualified name was reported as an unknown table
+
+`SELECT * FROM `poc`.`users`` drew a warning saying `poc` was an unknown table
+— a squiggle under correct SQL, which is precisely the noise this linter's
+opening comment says it must never produce.
+
+The cause is a seam between two pieces that were each right. Masking replaces
+every quote character with a **space** so byte offsets survive, so
+`` `poc`.`users` `` reaches the tokenizer as ` poc . users `. The tokenizer read
+a dotted identifier as an unbroken run of word characters and dots, so it saw
+`poc`, then a stray dot, then `users` — and `collect_tables` took the first
+token after `FROM` as the table name. The database was reported as the table.
+
+The unquoted form `poc.users` was handled correctly all along, which is why this
+survived: the check that skips qualified tables was working, and simply never
+ran. The tokenizer now continues an identifier across a dot **with whitespace on
+either side** — which is also legal SQL written by hand — and `t.*` still ends
+the identifier before the star, as it always did.
+
+### It only spoke MySQL
+
+Masking keeps the contents of backtick-quoted identifiers and blanks
+double-quoted ones, because in MySQL a double quote is a string. Elasticsearch —
+and standard SQL — is the other way round. So on a cluster connection **every
+identifier in the statement was masked away**, and the schema checks quietly ran
+against what looked like an empty query.
+
+That is the worst kind of failure this codebase has a rule about: nothing was
+wrong on screen, so nothing prompted anyone to look.
+
+`lint::Dialect` now carries the two facts the checks actually need — the
+identifier quote, and whether `DELIMITER` blocks exist — and `lint_sql` builds
+it from **the engine, not its name**, per the standing rule that behaviour
+branches on a capability. The quote comes from a new `Engine::ident_quote`,
+which sits beside the `quote_ident` the trait already had; `delimiter_blocks` is
+an existing capability. A tab with no connection gets MySQL, which is what the
+editor already highlights it as — the two fall back together rather than each
+guessing separately.
+
+The `DELIMITER` rule earned its own test. Finding that word blanks the entire
+lint, because the statement boundaries stop being ours to trust — but only on an
+engine that has such blocks. On one that does not, it is an ordinary word, and
+giving up the whole lint over it is giving up for nothing.
+
+### The results pane was never painted
+
+Reported as "the table background uses the same colour, so it looks weird", and
+measuring it said why: `#results-pane`, the statement tab strip, the grid host,
+the table and its cells were **all transparent**. Every row sat directly on the
+window's own ground — the same colour as the gap between the panes. Only the
+sticky header and the bottom bar had a surface, which is what made it look
+*nearly* right rather than obviously broken.
+
+It uses the two tokens the script tab strip above it already uses: `--bg-tabs`
+behind the tabs, `--bg` on the surface they open onto, so an active tab and its
+grid are visibly the same sheet. A test asserts the separation exists in both
+themes — as "differs from the page ground", not as a hex value, because the
+point is the contrast and pinning the colour would fail on the next palette
+change for no reason.

@@ -448,7 +448,21 @@ input.num {
 #editor .cm-scroller { font-family: var(--mono); font-size: var(--code-size); }
 
 /* --- results --- */
-.tabs { display: flex; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--border); overflow-x: auto; flex: 0 0 auto; }
+
+/* The results pane is a *surface*, and until now it was not one: pane, tab
+   strip, grid host, table and cells were all transparent, so every row sat
+   directly on the window's own ground — the same colour as the gap between the
+   panes. Only the sticky header and the bottom bar were painted, which is what
+   made the grid read as floating rather than as filling its panel.
+
+   The two tokens are the ones the script tab strip above already uses, for the
+   same reason: `--bg-tabs` behind the tabs, `--bg` on the surface they open
+   onto, so the active tab and its content are visibly the same sheet. */
+#results-pane { background: var(--bg); }
+.tabs {
+  display: flex; gap: 2px; padding: 4px 6px 0; overflow-x: auto; flex: 0 0 auto;
+  background: var(--bg-tabs); border-bottom: 1px solid var(--border);
+}
 .tabs:empty { display: none; }
 .tab {
   padding: 4px 10px; font-size: 12px; border: 1px solid var(--border); border-bottom: none;

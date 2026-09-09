@@ -100,6 +100,11 @@ impl Engine for MysqlEngine {
         crate::sqlgen::quote_ident(name)
     }
 
+    /// MySQL's own, and the reason this method exists: `"` here is a string.
+    fn ident_quote(&self) -> char {
+        '`'
+    }
+
     fn qualify(&self, ns: &str, table: &str) -> Result<String, String> {
         crate::sqlgen::qualify(ns, table)
     }
