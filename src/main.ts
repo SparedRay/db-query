@@ -563,6 +563,18 @@ els.form.addEventListener("submit", async (e) => {
   // Kept out of the profile on purpose — see ConnProfile's doc comment.
   const typed = String(fd.get("password") ?? "");
 
+  // "Remember" ticked, the box empty, and nothing stored to leave alone: the
+  // only thing that can mean is *there is no password*. Recorded as a fact of
+  // its own, because "nothing stored" cannot otherwise be told apart from
+  // "we never asked" — and that ambiguity is what made a passwordless account
+  // prompt on every connect.
+  //
+  // With something already stored, an empty box keeps its long-standing
+  // meaning: leave the stored one alone, so a port can be edited without
+  // retyping a password.
+  profile.noPassword =
+    els.connRemember.checked && !typed && !(editing?.profile.rememberPassword ?? false);
+
   const ok = $<HTMLButtonElement>("conn-ok");
   ok.disabled = true;
   ok.textContent = "Connecting…";
@@ -571,7 +583,12 @@ els.form.addEventListener("submit", async (e) => {
       // The best answer available before saving: what the keychain said when
       // this profile was loaded. Replaced below with what the save actually
       // achieved, which is the only claim worth keeping.
-      profile: { ...profile, rememberPassword: editing?.profile.rememberPassword ?? false },
+      profile: {
+        ...profile,
+        rememberPassword: editing?.profile.rememberPassword ?? false,
+        // Provisional; `save_profile` returns the authoritative answer below.
+        needsSecret: false,
+      },
       saved: wantSave,
       connected: false,
       serverVersion: null,
@@ -609,6 +626,10 @@ els.form.addEventListener("submit", async (e) => {
           : null;
       const outcome = await api.saveProfile(profile, password);
       entry.profile.rememberPassword = outcome.passwordStored;
+      // Rust decides this, from the profile it just wrote plus what the
+      // keychain actually accepted. Recomputing it here would be a second
+      // implementation of the same rule, free to disagree with the first.
+      entry.profile.needsSecret = outcome.profile.needsSecret;
       entry.saved = true;
       conns.upsert(entry);
       // Editing the active connection's colour must repaint the tab strip;

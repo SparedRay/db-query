@@ -85,6 +85,42 @@ pub struct ConnProfile {
     /// How to authenticate an HTTP engine. MySQL always uses user + password.
     #[serde(default)]
     pub auth: crate::httpsql::Auth,
+
+    /// This account authenticates with **no secret at all** — a MySQL user
+    /// whose password is empty.
+    ///
+    /// A separate fact from "no password is stored", which is what
+    /// `ProfileView::remember_password` reports and which cannot tell "there
+    /// isn't one" from "we don't know it". Without this the two are the same
+    /// state, and a passwordless account is asked for its password on every
+    /// single connect. `#[serde(default)]` so every existing file means
+    /// "we don't know", which is what it meant when it was written.
+    #[serde(default)]
+    pub no_password: bool,
+}
+
+impl ConnProfile {
+    /// Whether connecting needs a secret this app does not already hold.
+    ///
+    /// The question the rail should be asking when someone clicks a
+    /// connection. It is **not** "is a password remembered": a cluster with no
+    /// authentication has nothing to remember, and being asked for a password
+    /// that does not exist is the bug this replaces.
+    ///
+    /// This does match on the engine, which the capability rule normally
+    /// forbids — but the rule is about what an engine can *do*, and this is
+    /// about the shape of the profile itself. MySQL authenticates with a
+    /// user and a password, always; the HTTP engines declare a scheme, and
+    /// one of the schemes is "none".
+    pub fn needs_secret(&self) -> bool {
+        if self.no_password {
+            return false;
+        }
+        match self.kind {
+            EngineKind::Mysql => true,
+            EngineKind::Elasticsearch => !matches!(self.auth, crate::httpsql::Auth::None),
+        }
+    }
 }
 
 /// Which engine a profile names.
@@ -118,13 +154,19 @@ pub struct ProfileView {
     /// True when a secret exists in the keychain for this id. Never persisted,
     /// so a profile copied to another machine reports the truth there.
     pub remember_password: bool,
+    /// True when connecting needs a secret this app does not already hold —
+    /// i.e. when the UI has to ask. Derived, so the frontend never has to
+    /// reimplement the rule and then disagree with the backend about it.
+    pub needs_secret: bool,
 }
 
 impl ProfileView {
     pub fn new(profile: ConnProfile, remember_password: bool) -> Self {
+        let needs_secret = profile.needs_secret() && !remember_password;
         Self {
             profile,
             remember_password,
+            needs_secret,
         }
     }
 }
@@ -767,6 +809,7 @@ mod tests {
             kind: Default::default(),
             url: String::new(),
             auth: Default::default(),
+            no_password: false,
         }
     }
 

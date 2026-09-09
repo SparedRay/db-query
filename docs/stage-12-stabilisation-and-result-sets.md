@@ -950,3 +950,80 @@ reaches the text in the editor*. Reinstating `defaultHighlightStyle` leaves all
 they are simply not being used — and reddens that one alone. Checked by doing
 it. A guard on the values would have missed the entire defect it was written
 for.
+
+---
+
+## 21. A connection with nothing to remember — 2026-09-09
+
+Reported from use: an Elasticsearch cluster with no authentication opened the
+connect dialog on **every** click, forever, with no way to make it stop.
+
+The gate asked the wrong question:
+
+    if (entry.saved && entry.profile.rememberPassword) { connect } else { ask }
+
+`rememberPassword` means *a secret is in the keychain*. A cluster with no
+authentication has nothing to remember, so the answer was permanently no. The
+question that should have been asked is **"do we have what it takes"**, and
+there are two independent ways for that to be yes: a secret is stored, or none
+is needed.
+
+### `needs_secret`, decided in Rust
+
+`ConnProfile::needs_secret()` — false when the profile declares an auth scheme
+that carries no secret, and false when the account is known to have no password.
+It travels on `ProfileView` beside `remember_password`, so the frontend never
+reimplements the rule and then disagrees with the backend about it.
+
+It does match on the engine, which the capability rule normally forbids. The
+rule is about what an engine can *do*; this is the shape of the profile itself.
+MySQL authenticates with a user and a password, always. The HTTP engines declare
+a scheme, and one of the schemes is "none".
+
+### Telling "there isn't one" from "we don't know"
+
+MySQL has no declaration to read, and an account with an empty password is a
+real thing. "Nothing stored" could not be told apart from "never asked", and
+that ambiguity *is* the bug in its second form. So `ConnProfile.no_password`
+records the fact, set when the connect dialog is confirmed with **Remember
+ticked, the box empty, and nothing already stored** — the only reading of which
+is "there is no password". With something already stored, an empty box keeps its
+older meaning: leave it alone, so a port can be edited without retyping.
+
+### Two tests pushed back, and both were right
+
+`=== false`, not `!`: an absent `needsSecret` means "we do not know", and not
+knowing falls back to asking. A MySQL profile with no stored password still
+opens the dialog, which is correct — we do not know the password.
+
+And `rememberPassword` stays as an independent reason. Gating on `needsSecret`
+alone made **every remembered password prompt again** the moment the field was
+missing — which is exactly the Stage 2 bug that two tests in
+`regressions.spec.ts` exist to catch. They caught it. The gate is now either
+reason, so a missing field degrades to the old behaviour instead of regressing
+the oldest one.
+
+### And a guard that fired for the right reason on the wrong thing
+
+`profiles::the_file_contains_no_secret` hunted the config file for the substrings
+"password" and "secret". `noPassword` — a boolean saying an account *has* none —
+tripped it. A word filter cannot tell that from a field that holds one.
+
+Loosening the filter would have been the wrong repair. It now asserts **the
+exact set of keys written**, so any new field on `ConnProfile` fails until
+someone adds it to the list. That is a decision made on purpose, rather than a
+word nobody happened to choose.
+
+---
+
+## 22. The active result tab was white on white — 2026-09-09
+
+`.tab.active` said `background: var(--bg)` and nothing else. On the dark theme
+that reads; on the light theme `--bg` is `#ffffff` against `--bg-raised`
+`#f4f6f9`, which is one hairline of difference — no signal at all when a script
+ran four statements and you need to know which result you are looking at.
+
+It now carries an accent top border, which is the idiom the script-tab strip
+already uses for exactly the same question, so the two strips answer it the same
+way. The border is reserved as transparent on every tab, so selecting one cannot
+shift the row by a pixel.

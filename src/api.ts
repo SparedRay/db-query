@@ -46,6 +46,10 @@ export interface ConnProfile {
   /** Base URL, for engines addressed by one. MySQL uses host and port. */
   url?: string;
   auth?: HttpAuth;
+  /** This account authenticates with no secret at all — a MySQL user whose
+   *  password is empty. Distinct from "no password is stored", which cannot
+   *  tell "there isn't one" from "we don't know it". */
+  noPassword?: boolean;
 }
 
 export type EngineKind = "mysql" | "elasticsearch";
@@ -69,6 +73,11 @@ export type HttpAuth =
 export type ProfileView = ConnProfile & {
   /** Derived from the keychain, never persisted — true when a password is stored. */
   rememberPassword: boolean;
+  /** True when connecting needs a secret we do not already hold — i.e. when the
+   *  UI has to ask. A cluster with no authentication never does; nor does an
+   *  account whose password is empty and known to be. Derived in Rust so the
+   *  two sides cannot disagree about the rule. */
+  needsSecret: boolean;
 };
 
 /** Procedure or function. Mirrors Rust's `RoutineKind`. */

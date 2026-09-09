@@ -37,6 +37,7 @@ fn profile(id: &str) -> ConnProfile {
         kind: Default::default(),
         url: String::new(),
         auth: Default::default(),
+        no_password: false,
     }
 }
 
