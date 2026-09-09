@@ -7,7 +7,7 @@
 // exactly that, which is why the last test here exists.
 
 import { expect, test } from "@playwright/test";
-import { connect, editorText, installBackend, rowsResult, schemaBackend } from "./harness";
+import { connect, editorText, rowsResult } from "./harness";
 
 /** A run of three statements, so the statement strip is rendered. */
 function threeStatements() {
@@ -20,7 +20,7 @@ function threeStatements() {
   };
 }
 
-async function runScript(page: any, result: unknown) {
+async function runScript(page: any) {
   await page.locator("#editor .cm-content").click();
   await page.keyboard.press("Control+Shift+Enter");
   await page.waitForTimeout(150);
@@ -28,7 +28,7 @@ async function runScript(page: any, result: unknown) {
 
 test("the button discards the result and disables copy and export", async ({ page }) => {
   await connect(page, { run_script: () => rowsResult([{ name: "a" }], [["1"]]) });
-  await runScript(page, null);
+  await runScript(page);
 
   await expect(page.locator("#grid table.rs")).toBeVisible();
   await expect(page.locator("#btn-close-results")).toBeEnabled();
@@ -47,7 +47,7 @@ test("the button discards the result and disables copy and export", async ({ pag
 
 test("a closed result stays closed across a tab switch", async ({ page }) => {
   await connect(page, { run_script: () => rowsResult([{ name: "a" }], [["1"]]) });
-  await runScript(page, null);
+  await runScript(page);
   await page.click("#btn-close-results");
 
   await page.keyboard.press("Control+t");
@@ -59,7 +59,7 @@ test("a closed result stays closed across a tab switch", async ({ page }) => {
 
 test("one statement can be closed, leaving the others", async ({ page }) => {
   await connect(page, { run_script: () => threeStatements() });
-  await runScript(page, null);
+  await runScript(page);
 
   await expect(page.locator("#tabs .tab")).toHaveCount(3);
   await page.locator("#tabs .tab").nth(1).locator(".tab-close").click();
@@ -75,7 +75,7 @@ test("the strip disappears once one statement is left, and the button finishes i
   page,
 }) => {
   await connect(page, { run_script: () => threeStatements() });
-  await runScript(page, null);
+  await runScript(page);
 
   await page.locator("#tabs .tab").first().locator(".tab-close").click();
   await page.locator("#tabs .tab").first().locator(".tab-close").click();
@@ -93,7 +93,7 @@ test("the strip disappears once one statement is left, and the button finishes i
 
 test("closing a statement does not select the one being closed", async ({ page }) => {
   await connect(page, { run_script: () => threeStatements() });
-  await runScript(page, null);
+  await runScript(page);
 
   // Close the first while a later one is active: the active statement must
   // still be the same statement, not whatever slid into its index.
@@ -104,7 +104,7 @@ test("closing a statement does not select the one being closed", async ({ page }
 
 test("the cell menu closes the result", async ({ page }) => {
   await connect(page, { run_script: () => rowsResult([{ name: "a" }], [["1"]]) });
-  await runScript(page, null);
+  await runScript(page);
 
   await page.locator('#grid td[data-col="0"]').first().click({ button: "right" });
   await page.locator(".ctx-menu button", { hasText: "Close this result" }).click();
@@ -113,7 +113,7 @@ test("the cell menu closes the result", async ({ page }) => {
 
 test("disconnecting discards the results it invalidated", async ({ page }) => {
   await connect(page, { run_script: () => rowsResult([{ name: "a" }], [["1"]]) });
-  await runScript(page, null);
+  await runScript(page);
   await expect(page.locator("#grid table.rs")).toBeVisible();
 
   await page.locator(".rail-item").first().click({ button: "right" });

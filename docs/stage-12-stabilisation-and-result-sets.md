@@ -257,18 +257,36 @@ Deleting is the recommendation; each is reconstructible from git if wanted.
 ### Phase 2 — Connections
 - [x] `mysql_meta()` / `mysql_killer()` hand back a **locked, checked** guard,
       and the fields are now private — so there is no unchecked way in
-- [ ] `ensure_exec` reports whether it replaced a connection; a chip says so (B4)
-- [ ] Live test: reap the connection server-side with `KILL`, then introspect —
-      the honest reproduction, and it needs no eight-hour wait
-- [ ] Live test: the same for `killer`, and for a tab's `USE` surviving
+- [x] `ensure_exec` returns whether it **replaced** a dead connection (rather
+      than opening a first one); `ScriptResult.reconnected` carries it, and a
+      "reconnected" chip names what the new session cost (B4)
+- [x] Live test: `KILL` the connection server-side, then introspect — asserts
+      both that it works and that the id came back *different*
+- [x] Live test: the same for `killer`
 
 ### Phase 3 — The carried bugs
-- [ ] `CellValue::Binary`; `literal()` decides on the value (C1/B5)
-- [ ] Export dialog reads `streamingExport` (C2/B6)
-- [ ] New tabs take their dialect from the connection (C3)
-- [ ] Audit lint rules against Elasticsearch; record the outcome even if nil (C4)
-- [ ] Delete `split_sql`, `disconnect_all`, `has_stored_password` (C5)
-- [ ] D4, and the invisible "Connected to …" line (C6)
+- [x] `CellValue::Binary { bytes: Option<usize> }`; `literal()` refuses on the
+      **value**, and text under a binary-hinted column now exports as text.
+      Rendered in the grid and the viewer, with a UI test against
+      `[object Object]`
+- [x] Export dialog reads `streamingExport`, with its own reason string (C2/B6)
+- [x] New tabs take their dialect from the connection — **and the editor now
+      reads the field at all**: it had been written to the session file since
+      Stage 1 and consulted by nothing, with `MySQL` hardcoded in both places.
+      Non-MySQL engines get `StandardSQL`, so `"quoted"` identifiers highlight
+      correctly (C3)
+- [x] Lint audit (C4). **One finding, recorded not fixed:** `mask_impl` treats
+      `"` as a string delimiter — MySQL's default — so a cluster's quoted
+      identifiers are masked away and schema lint is silently inert for them.
+      It fails *safe* (silence, not false errors), and the same mask decides
+      statement boundaries and auto-LIMIT on the execution path, so making it
+      dialect-aware does not belong in a bugfix release. Pinned by a test in
+      `split.rs` that says so
+- [x] Deleted the `split_sql`, `disconnect_all` and `has_stored_password`
+      commands, their `api.ts` wrappers, and the `SplitOutput`/`StatementSpan`
+      types orphaned with them. `session::disconnect_all` stays: an internal
+      `pub fn` is not the frozen surface — the IPC command was (C5)
+- [x] C6, and **two reversals the tests forced** — see §12
 
 ## 7. What this stage is not
 
@@ -292,3 +310,46 @@ Deleting is the recommendation; each is reconstructible from git if wanted.
   to be plainly labelled and not adjacent enough to be hit by accident. This
   project has already had one bug where feedback destroyed the results it was
   describing (`main.ts:1053`).
+
+
+---
+
+## 12. Two things Phase 3 got wrong, and the tests that said so
+
+Both were written, run, and reverted. Recorded because the reasoning that
+produced them was plausible, which is the kind worth leaving a marker against.
+
+### D4 — pruning remembered workspaces was the wrong fix
+
+The plan called for dropping session entries whose connection no longer exists.
+Implemented at boot, then moved to save time when the first version broke
+restore. Both failed the same test:
+
+> *"connecting to one server does not forget another's tabs"*
+
+The invariant that test defends is already written at the top of `session.ts`:
+remembered workspaces are **written back untouched**. And the reasoning is
+better than mine was — **an id we do not recognise is not an id that is gone.**
+It is a profile this build has not read yet, or one whose connection is about to
+come up. Pruning on "not a saved profile" is precisely the bug that comment
+exists to prevent, and no signal in the session file distinguishes the two.
+
+**D4 is closed as won't-fix.** A profile removed through the UI is handled by
+`forget`, where the fact is actually known. The residual case — a file edited by
+hand, or a removal that crashed halfway — costs one unused object in a JSON
+file, which is a much smaller price than deleting someone's remembered tabs.
+
+### C6 — the "Connected to …" line *is* visible
+
+It was deleted on the grounds that the first tab activation overwrites it, so
+nobody had ever seen it. A test disagreed: **reconnecting to a connection whose
+tabs already exist activates nothing**, so the line stands — and it is the only
+confirmation that the reconnect worked.
+
+Restored, with the defect that was actually there fixed: it said "MySQL" on
+every connection, including a cluster. It now names the engine.
+
+Then it threw on the connect path, because the test fixture's `ConnInfo` has no
+`capabilities` and the new code read one. Optional-chained, like `engineLabel`
+in `connections.ts`, which had already learned this: **a cosmetic status line
+must not be able to take down connecting.**

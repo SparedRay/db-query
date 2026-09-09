@@ -13,13 +13,36 @@ import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/sea
 import {
   bracketMatching, syntaxHighlighting, defaultHighlightStyle, indentOnInput,
 } from "@codemirror/language";
-import { sql, MySQL, type SQLNamespace } from "@codemirror/lang-sql";
+import { sql, MySQL, StandardSQL, type SQLDialect, type SQLNamespace } from "@codemirror/lang-sql";
 import {
   forceLinting, linter, lintGutter, type Diagnostic as CmDiagnostic,
 } from "@codemirror/lint";
 import { Compartment } from "@codemirror/state";
 
 const schemaCompartment = new Compartment();
+
+/**
+ * The SQL configuration currently in force, remembered because the two things
+ * that change it arrive separately: the schema loads when the tree is expanded,
+ * and the dialect changes when the active tab does. Reconfiguring for one must
+ * not throw away the other.
+ */
+let sqlConfig: { dialect: SQLDialect; schema?: SQLNamespace; defaultTable?: string } = {
+  dialect: MySQL,
+};
+
+/**
+ * Which CodeMirror dialect an engine's name maps to.
+ *
+ * `StandardSQL` for anything that is not MySQL, because the difference that
+ * actually shows is quoting: MySQL highlights `` `backticks` `` as identifiers
+ * and Elasticsearch uses `"double quotes"`, which MySQL's dialect reads as a
+ * string. The tab has carried a `dialect` field since Stage 1 — it was written
+ * to the session file and restored, and then never read by anything.
+ */
+export function dialectFor(name: string | null | undefined): SQLDialect {
+  return name === "mysql" || name === undefined || name === null ? MySQL : StandardSQL;
+}
 const lintCompartment = new Compartment();
 
 /**
@@ -132,7 +155,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     keymap.of([
       ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab,
     ]),
-    schemaCompartment.of(sql({ dialect: MySQL, upperCaseKeywords: true })),
+    schemaCompartment.of(sql({ ...sqlConfig, upperCaseKeywords: true })),
     lintCompartment.of([]),
     themeCompartment.of(darkTheme),
     EditorView.lineWrapping,
@@ -181,10 +204,26 @@ export function refreshLint(view: EditorView) {
 
 /** Feed the schema cache into autocomplete as tables load in the sidebar. */
 export function setSchema(view: EditorView, schema: SQLNamespace, defaultTable?: string) {
+  sqlConfig = { ...sqlConfig, schema, defaultTable };
+  applySqlConfig(view);
+}
+
+/**
+ * Highlight this tab's SQL the way its engine writes it.
+ *
+ * Called on tab activation, so switching between a MySQL tab and a cluster tab
+ * changes the quoting rules with it.
+ */
+export function setDialect(view: EditorView, name: string | null | undefined) {
+  const dialect = dialectFor(name);
+  if (dialect === sqlConfig.dialect) return;
+  sqlConfig = { ...sqlConfig, dialect };
+  applySqlConfig(view);
+}
+
+function applySqlConfig(view: EditorView) {
   view.dispatch({
-    effects: schemaCompartment.reconfigure(
-      sql({ dialect: MySQL, upperCaseKeywords: true, schema, defaultTable }),
-    ),
+    effects: schemaCompartment.reconfigure(sql({ ...sqlConfig, upperCaseKeywords: true })),
   });
 }
 

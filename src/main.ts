@@ -38,7 +38,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, selectedText,
-  setEditorTheme, setLinting, setSchema,
+  setDialect, setEditorTheme, setLinting, setSchema,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -1134,14 +1134,22 @@ function openExportDialog() {
   // The unbounded path re-executes the statement, so it is only offered when
   // that can be done safely. Disabling it with a reason beats offering it and
   // being wrong once.
-  const rerunOk = sql !== null && results.isEverything();
+  //
+  // The engine gets a say. `streamingExport` has existed on `Capabilities`
+  // since Stage 11 and was read by nothing, so a cluster — which has no
+  // streaming path at all — was offered this and taken down a MySQL-only road.
+  // A declared capability that nobody consults is decoration.
+  const canStream = conns.active()?.capabilities?.streamingExport ?? true;
+  const rerunOk = sql !== null && results.isEverything() && canStream;
   const allOption = els.exportScope.options[1];
   allOption.disabled = !rerunOk;
   allOption.textContent = rerunOk
     ? "Re-run the query and export every row"
     : !results.isEverything()
       ? "Re-run the query \u2014 not available while a subset is selected"
-      : "Re-run the query \u2014 not available for this statement";
+      : !canStream
+        ? "Re-run the query \u2014 this engine cannot stream a whole result"
+        : "Re-run the query \u2014 not available for this statement";
   if (!rerunOk) els.exportScope.value = "shown";
   else if (data.truncated) els.exportScope.value = "all";
 
@@ -1516,7 +1524,22 @@ conns = new ConnectionManager($("rail"), {
       }
     }
 
-    results.setMessage(`Connected to ${entry.profile.name} — MySQL ${info.serverVersion}.`);
+    // Named from the engine, not the word "MySQL", which is what this line
+    // said on every connection including a cluster.
+    //
+    // Stage 12 first deleted this line on the grounds that the first tab
+    // activation overwrites it. A test disagreed: reconnecting to a connection
+    // whose tabs already exist activates nothing, so the line stands — and it
+    // is the only confirmation the user gets that the reconnect worked.
+    // Optional-chained like `engineLabel` in connections.ts, and for the same
+    // reason: this is a cosmetic line, and a missing field in it must not be
+    // able to throw on the connect path. It did, once, in the ten minutes
+    // between writing it and running the tests.
+    const engine = info.capabilities?.engine;
+    const label = !engine ? "Server" : engine === "mysql" ? "MySQL" : engine;
+    results.setMessage(
+      `Connected to ${entry.profile.name} — ${label} ${info.serverVersion}.`,
+    );
 
     // Restored tabs are their own evidence — they are on screen. A tab that did
     // *not* come back is the thing nothing on screen can tell you, so it gets a
@@ -1566,6 +1589,10 @@ conns = new ConnectionManager($("rail"), {
 
 tabs = new TabManager($("script-tabs"), view, {
   colourFor: (connectionId) => conns.get(connectionId)?.profile.colour ?? "var(--accent)",
+  // Capabilities come from the server on connect, so a tab opened before any
+  // connection falls back to MySQL — which is also what the field used to say
+  // unconditionally.
+  dialectForActiveConnection: () => conns.active()?.capabilities?.engine ?? null,
   onCreated: (tab) => {
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
@@ -1575,6 +1602,7 @@ tabs = new TabManager($("script-tabs"), view, {
   onActivate: (tab) => {
     // Compartment contents live in the EditorState, so a swapped-in state has
     // whatever config it was born with. Re-apply both after every switch.
+    setDialect(view, tab.dialect);
     setSchema(view, schemaMap);
     applyLintSetting(true);
     showResults(tab);

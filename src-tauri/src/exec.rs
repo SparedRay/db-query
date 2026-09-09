@@ -91,6 +91,14 @@ pub struct ScriptResult {
     /// The safety-net timeout fired. Distinct from `cancelled`, which means
     /// the user pressed the button.
     pub timed_out: bool,
+    /// This tab's connection had died and was replaced before the script ran.
+    ///
+    /// Surfaced because a new connection is a new **session**: temporary
+    /// tables, session variables and any open transaction are gone. The
+    /// reconnect itself is the right behaviour and needs no ceremony — losing
+    /// that state without being told is not.
+    #[serde(default)]
+    pub reconnected: bool,
 }
 
 /// Stream a single row-returning statement straight to a file, unbounded.
@@ -361,7 +369,7 @@ pub(crate) async fn mysql_run_script(
     let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
 
     let mut guard = tab.exec.lock().await;
-    session::ensure_exec(&mut guard, &tab).await?;
+    let reconnected = session::ensure_exec(&mut guard, &tab).await?;
     let conn = guard
         .as_mut()
         .expect("ensure_exec guarantees a live connection");
@@ -495,6 +503,7 @@ pub(crate) async fn mysql_run_script(
         delimiter_detected: split_out.delimiter_detected,
         cancelled,
         timed_out,
+        reconnected,
     })
 }
 

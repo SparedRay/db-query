@@ -580,14 +580,21 @@ pub async fn tab_status(state: &AppState, id: &str) -> Result<TabStatus, String>
 /// A replacement connection is a fresh session, so the tab's `USE` is
 /// re-applied. Temporary tables and session variables cannot be restored —
 /// that is inherent to losing the connection, not something we can paper over.
+/// Returns whether a **dead connection was replaced**, as opposed to this tab
+/// opening its first one. Only the first case costs the user anything: the
+/// replacement is a new session, so temporary tables, session variables and any
+/// open transaction are gone, and they should be told once rather than
+/// discovering it through a confusing error later.
 pub async fn ensure_exec(
     guard: &mut Option<MySqlConnection>,
     tab: &TabSession,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut replaced = false;
     if let Some(c) = guard.as_mut() {
         if c.ping().await.is_ok() {
-            return Ok(());
+            return Ok(false);
         }
+        replaced = true;
         *guard = None;
         tab.conn_id.store(0, Ordering::SeqCst);
     }
@@ -608,7 +615,7 @@ pub async fn ensure_exec(
 
     tab.conn_id.store(id, Ordering::SeqCst);
     *guard = Some(c);
-    Ok(())
+    Ok(replaced)
 }
 
 pub(crate) async fn mysql_use_database(

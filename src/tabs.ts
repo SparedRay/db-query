@@ -103,6 +103,11 @@ export interface TabHooks {
    * moment you want to be sure.
    */
   colourFor?: (connectionId: string) => string;
+  /**
+   * Which SQL dialect a new tab should be written in — the active connection's
+   * engine. Optional, so a `TabManager` in a test needs no connection at all.
+   */
+  dialectForActiveConnection?: () => string | null;
 }
 
 let idSeq = 0;
@@ -260,7 +265,10 @@ export class TabManager {
       connectionId,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
-      dialect: opts?.dialect ?? "mysql",
+      // From the connection, not a constant. This field has been written to
+      // the session file since Stage 1 and said "mysql" for every tab on every
+      // engine — and nothing read it, so nobody noticed.
+      dialect: opts?.dialect ?? this.hooks.dialectForActiveConnection?.() ?? "mysql",
       encoding: opts?.encoding ?? "utf-8",
       lineEnding: opts?.lineEnding ?? "lf",
       mtimeMs: opts?.mtimeMs ?? null,

@@ -369,3 +369,32 @@ test("the tab that opens is the last one with rows, not the last statement", asy
   await expect(page.locator("#tabs .tab.active")).toHaveText(/^1 ·/);
   await expect(page.locator("table.rs")).toBeVisible();
 });
+
+/**
+ * A replaced connection is a new session, and losing one silently is the half
+ * of auto-reconnect that is not a kindness.
+ *
+ * The reconnect itself is right — a connection the server reaped while the user
+ * was away should heal rather than break — but temporary tables, session
+ * variables and any open transaction go with the old session, and finding that
+ * out from a later confusing error is worse than being told once.
+ */
+test("a replaced connection is reported, with what it cost", async ({ page }) => {
+  await connect(page, {
+    run_script: () => ({ ...rowsResult([{ name: "a" }], [["1"]]), reconnected: true }),
+  });
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+Shift+Enter");
+
+  const chip = page.locator("#status .chip", { hasText: "reconnected" });
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("title", /transaction/);
+});
+
+test("an ordinary run says nothing about reconnecting", async ({ page }) => {
+  await connect(page, { run_script: () => rowsResult([{ name: "a" }], [["1"]]) });
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+Shift+Enter");
+  await expect(page.locator("#status .chip", { hasText: "1 row" })).toBeVisible();
+  await expect(page.locator("#status .chip", { hasText: "reconnected" })).toHaveCount(0);
+});

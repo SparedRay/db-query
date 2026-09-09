@@ -29,7 +29,6 @@ use lint::Diagnostic;
 use schema::{ColumnInfo, RoutineKind, RoutineRef, TableRef};
 use secrets::Secret;
 use session::{AppState, ConnInfo, ConnProfile, ConnectionStatus, ProfileView, TabStatus};
-use split::SplitOutput;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
@@ -163,11 +162,6 @@ fn delete_profile(app: tauri::AppHandle, id: String) -> Result<Option<String>, S
     Ok(secrets::delete(&id).err().map(|e| e.to_string()))
 }
 
-#[tauri::command]
-fn has_stored_password(id: String) -> Result<bool, String> {
-    Ok(secrets::has_stored(&id))
-}
-
 // ------------------------------------------------------------------ connections
 
 /// Open a connection. Ad hoc or from a saved profile — identical either way;
@@ -208,11 +202,6 @@ async fn connect_saved(
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>, connection_id: String) -> Result<(), String> {
     session::disconnect(&state, &connection_id).await
-}
-
-#[tauri::command]
-async fn disconnect_all(state: State<'_, AppState>) -> Result<(), String> {
-    session::disconnect_all(&state).await
 }
 
 #[tauri::command]
@@ -959,13 +948,6 @@ fn clipboard_text(result: export::ResultSet, options: export::CsvOptions) -> Str
 
 // ------------------------------------------------------------------- stateless
 
-/// The frontend never parses SQL. When it needs statement boundaries it asks
-/// here, so cursor detection and execution always agree.
-#[tauri::command]
-fn split_sql(sql: String) -> Result<SplitOutput, String> {
-    Ok(split::split(&sql))
-}
-
 /// Statement under the cursor, resolved entirely in Rust. The frontend sends a
 /// BYTE offset and gets back the statement text — it never slices the buffer or
 /// reimplements the boundary rules, so execution and cursor detection cannot
@@ -1213,12 +1195,10 @@ pub fn run() {
             connect,
             connect_saved,
             disconnect,
-            disconnect_all,
             list_connections,
             list_profiles,
             save_profile,
             delete_profile,
-            has_stored_password,
             open_tab,
             close_tab,
             use_database,
@@ -1249,7 +1229,6 @@ pub fn run() {
             export_inserts,
             clipboard_text,
             export_rerun,
-            split_sql,
             statement_at_cursor,
             supported_file_types,
             open_file_dialog,

@@ -38,6 +38,20 @@ pub struct ColumnMeta {
 
 /// Untagged in both directions. Deserialization tries the variants in order,
 /// which is why `Int` precedes `Float`: `1` must not become `1.0`.
+///
+/// # Why `Binary` is a variant and not a string
+///
+/// The bytes of a BLOB never reach a cell — the grid would only show a
+/// placeholder anyway — so what a cell holds is the *fact* that they were
+/// binary, plus how many there were. That fact used to be carried by the
+/// placeholder **text** `"<binary, 12 bytes>"`, which made a real string of
+/// those characters indistinguishable from a real BLOB.
+///
+/// Worse, nothing downstream could rely on it, so `sqlgen::literal` decided
+/// from the *column type* instead — and a `VARCHAR` with a binary collation is
+/// reported under the BLOB type names. Such a column decodes to real text and
+/// renders as text, and the SQL-INSERT export refused it as binary. Carrying
+/// the truth on the value is what lets both agree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CellValue {
@@ -46,6 +60,22 @@ pub enum CellValue {
     Float(f64),
     Bool(bool),
     Text(String),
+    /// Bytes that are not text. `None` when even the length is unknown, which
+    /// is what a failed `Vec<u8>` decode leaves us with.
+    Binary {
+        bytes: Option<usize>,
+    },
+}
+
+impl CellValue {
+    /// How a binary cell reads in the grid, and in anything that renders a row
+    /// as text. One definition, so the two cannot disagree about the wording.
+    pub fn binary_placeholder(bytes: Option<usize>) -> String {
+        match bytes {
+            Some(n) => format!("<binary, {n} bytes>"),
+            None => "<binary>".to_string(),
+        }
+    }
 }
 
 impl CellValue {
@@ -150,9 +180,11 @@ pub fn decode_cell(row: &MySqlRow, idx: usize) -> CellValue {
                 // reported under exactly these type names. See `bytes_as_text`.
                 Ok(b) => match bytes_as_text(&b) {
                     Some(s) => CellValue::Text(s),
-                    None => CellValue::Text(format!("<binary, {} bytes>", b.len())),
+                    None => CellValue::Binary {
+                        bytes: Some(b.len()),
+                    },
                 },
-                Err(_) => CellValue::Text("<binary>".into()),
+                Err(_) => CellValue::Binary { bytes: None },
             }
         }
         _ => text_fallback(row, idx),

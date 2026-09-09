@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, openDatabase, rowsResult } from "./harness";
+import { CONN_INFO, READ_ONLY_CAPS, calls, connect, openDatabase, rowsResult } from "./harness";
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
@@ -240,4 +240,44 @@ test("warnings from the backend are surfaced, not swallowed", async ({ page }) =
   await page.click("#btn-export");
   await page.click("#export-ok");
   await expect(page.locator("#result-note")).toContainText(/CSV cannot tell the two apart/);
+});
+
+/**
+ * A capability that nobody reads is decoration.
+ *
+ * `streamingExport` has been on `Capabilities` since Stage 11 and was consulted
+ * by nothing, so an Elasticsearch connection — which has no streaming path at
+ * all — was offered "re-run and export every row" and sent down a MySQL-only
+ * road when it took it.
+ */
+test("an engine that cannot stream is not offered the unbounded re-run", async ({ page }) => {
+  await connect(page, {
+    connect: () => ({ ...CONN_INFO, capabilities: READ_ONLY_CAPS }),
+    run_script: () => rowsResult([{ name: "a" }], [["1"]], { truncated: true }),
+  });
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+Shift+Enter");
+  await page.waitForTimeout(150);
+
+  await page.click("#btn-export");
+  // toBeDisabled() does not cover <option>; the property is the fact.
+  const all = page.locator("#export-scope option").nth(1);
+  await expect(all).toHaveJSProperty("disabled", true);
+  await expect(all).toContainText("cannot stream");
+  // And it must not have been *selected* by the truncation branch either.
+  await expect(page.locator("#export-scope")).toHaveValue("shown");
+});
+
+test("an engine that can stream is still offered it", async ({ page }) => {
+  await connect(page, {
+    run_script: () => rowsResult([{ name: "a" }], [["1"]], { truncated: true }),
+  });
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+Shift+Enter");
+  await page.waitForTimeout(150);
+
+  await page.click("#btn-export");
+  const all = page.locator("#export-scope option").nth(1);
+  await expect(all).toHaveJSProperty("disabled", false);
+  await expect(page.locator("#export-scope")).toHaveValue("all");
 });

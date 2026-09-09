@@ -211,6 +211,12 @@ async fn awkward_column_types_decode_as_what_they_actually_hold() {
 /// The other half of the same fix: genuinely binary columns must **stay**
 /// binary. A fix that turned every blob into mojibake would pass the test
 /// above and be worse than the bug.
+///
+/// Stage 12 changed how that is *said* on the wire — from the placeholder
+/// string `"<binary, 3 bytes>"` to `{"bytes": 3}` — because a string could not
+/// be told apart from a real value of those characters, which is what forced
+/// the SQL export to guess from the column type. The fact being asserted is
+/// unchanged: these two columns are binary and the length is known.
 #[tokio::test]
 #[ignore]
 async fn genuinely_binary_columns_are_still_reported_as_binary() {
@@ -225,8 +231,17 @@ async fn genuinely_binary_columns_are_still_reported_as_binary() {
     .await
     .unwrap();
     let row = &rows_of(&r.statements[0].outcome)[0];
-    assert_eq!(as_json(&row[0]), serde_json::json!("<binary, 3 bytes>"));
-    assert_eq!(as_json(&row[1]), serde_json::json!("<binary, 4 bytes>"));
+    assert_eq!(as_json(&row[0]), serde_json::json!({ "bytes": 3 }));
+    assert_eq!(as_json(&row[1]), serde_json::json!({ "bytes": 4 }));
+
+    // And the whole point of the new shape: the SQL-INSERT export refuses these
+    // on the strength of the *value*, with no reference to the column type.
+    for cell in row.iter().take(2) {
+        assert!(
+            db_query_lib::sqlgen::literal(cell, db_query_lib::decode::TypeHint::Text).is_err(),
+            "a binary value must be refused whatever its column claims to be"
+        );
+    }
 }
 
 #[tokio::test]

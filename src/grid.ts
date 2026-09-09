@@ -5,6 +5,7 @@
 // need is "render the visible window of a flat row list".
 
 import type { CellValue, ColumnMeta, ScriptResult, StatementResult } from "./api";
+import { binaryPlaceholder, isBinaryCell } from "./api";
 import { showValue } from "./dialog";
 import { contextMenu } from "./menu";
 
@@ -348,6 +349,11 @@ export class ResultView {
         } else if (typeof v === "boolean") {
           td.className = "numeric";
           td.textContent = v ? "1" : "0";
+        } else if (isBinaryCell(v)) {
+          // Styled like NULL: neither is a value you can read, and both are
+          // the app speaking rather than the server.
+          td.className = "null";
+          td.textContent = binaryPlaceholder(v);
         } else {
           // Numeric-hinted columns arrive as strings when precision matters
           // (DECIMAL, BIGINT beyond 2^53). Align them like numbers anyway.
@@ -677,6 +683,15 @@ export class ResultView {
 
     chips.push(el("span", "chip", `${s.elapsedMs} ms`));
 
+    if (r.reconnected) {
+      const chip = el("span", "chip warn", "reconnected");
+      chip.title =
+        "This tab's connection had been closed by the server, so a new one was " +
+        "opened. Temporary tables, session variables and any open transaction " +
+        "were lost with the old session.";
+      chips.push(chip);
+    }
+
     // Auto-LIMIT rewrote the SQL. Saying so is the whole mitigation for
     // "why doesn't this count match?" — never render results without it.
     if (s.effectiveSql) {
@@ -731,6 +746,8 @@ function spacer(height: number, cols: number): HTMLElement {
 function cellText(v: CellValue): string | null {
   if (v === null) return null;
   if (typeof v === "boolean") return v ? "1" : "0";
+  // Before `String(v)`, which would render the binary cell as [object Object].
+  if (isBinaryCell(v)) return binaryPlaceholder(v);
   return String(v);
 }
 

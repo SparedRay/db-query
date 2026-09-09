@@ -100,6 +100,16 @@ export function createSessionPersistence(deps: {
     }
 
     // Then everything we have not touched this session, exactly as it was read.
+    //
+    // **Untouched is the invariant.** Stage 12 tried to prune workspaces whose
+    // connection is not a saved profile, to stop the file growing by one entry
+    // per deleted profile and per ad-hoc connection. Two tests said no: an id
+    // we do not recognise is not the same as an id that is gone — it is a
+    // profile this build has not read yet, or one whose connection is about to
+    // come up — and deleting on that basis is exactly the "connecting to one
+    // server forgets another's tabs" bug these tests exist to prevent. A
+    // profile removed through the UI is handled by `forget`, where the fact is
+    // actually known.
     for (const [connectionId, ws] of pending) {
       if (!byConnection.has(connectionId)) byConnection.set(connectionId, ws);
     }

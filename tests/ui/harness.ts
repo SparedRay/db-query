@@ -253,6 +253,7 @@ export function rowsResult(
     delimiterDetected: false,
     cancelled: false,
     timedOut: false,
+    reconnected: false,
   };
 }
 

@@ -470,6 +470,33 @@ pub fn statement_at(spans: &[StatementSpan], cursor: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// **Recorded by the Stage 12 lint audit (C4), not a fix.**
+    ///
+    /// `"` is a *string* delimiter here, which is MySQL with `ANSI_QUOTES` off
+    /// — its default, and correct for the engine this was written for. Standard
+    /// SQL, and therefore Elasticsearch, uses it for **identifiers**.
+    ///
+    /// The consequence is that a cluster's `SELECT "user" FROM "orders"` has
+    /// its table and column names masked away, so the schema-aware linter never
+    /// sees them. That fails *safe* — silence rather than false "unknown table"
+    /// noise — which is why it is being written down rather than fixed inside a
+    /// bugfix release: making this dialect-aware means threading a dialect into
+    /// the mask, and the same mask decides statement boundaries and auto-LIMIT
+    /// on the execution path.
+    #[test]
+    fn double_quotes_are_masked_as_strings_which_is_mysqls_default() {
+        let masked = mask_keep_idents(r#"SELECT "user" FROM "orders""#);
+        assert!(masked.contains("SELECT"), "{masked}");
+        assert!(!masked.contains("user"), "identifier survived: {masked}");
+        assert!(!masked.contains("orders"), "identifier survived: {masked}");
+        // Backticked identifiers do survive, which is what MySQL linting needs.
+        let mysql = mask_keep_idents("SELECT `user` FROM `orders`");
+        assert!(
+            mysql.contains("user") && mysql.contains("orders"),
+            "{mysql}"
+        );
+    }
+
     use super::*;
 
     fn texts(sql: &str) -> Vec<&str> {

@@ -491,6 +491,8 @@ impl crate::engine::Engine for ElasticEngine {
             delimiter_detected: split_out.delimiter_detected,
             cancelled,
             timed_out: false,
+            // HTTP is stateless: there is no session to lose.
+            reconnected: false,
         })
     }
 

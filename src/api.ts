@@ -259,7 +259,30 @@ export type TypeHint = "numeric" | "text" | "temporal" | "binary" | "bool";
 export interface ColumnMeta { name: string; typeHint: TypeHint; sqlType: string; }
 
 /** Untagged on the Rust side: null stays null, numbers stay numbers. */
-export type CellValue = null | number | boolean | string;
+/**
+ * Mirrors Rust's `CellValue`, which is `#[serde(untagged)]`.
+ *
+ * `BinaryCell` is the odd one: the bytes of a BLOB never cross the IPC boundary
+ * — only the fact that they were binary, and how many. It used to arrive as the
+ * *string* `"<binary, 12 bytes>"`, which made a real string of those characters
+ * indistinguishable from real bytes and forced the SQL export to guess from the
+ * column type instead. `bytes` is null when even the length is unknown.
+ */
+export interface BinaryCell {
+  bytes: number | null;
+}
+
+export type CellValue = null | number | boolean | string | BinaryCell;
+
+/** Narrow a cell to the binary case. */
+export function isBinaryCell(v: CellValue): v is BinaryCell {
+  return typeof v === "object" && v !== null && "bytes" in v;
+}
+
+/** How a binary cell reads. Mirrors `CellValue::binary_placeholder` in Rust. */
+export function binaryPlaceholder(v: BinaryCell): string {
+  return v.bytes === null ? "<binary>" : `<binary, ${v.bytes} bytes>`;
+}
 
 /**
  * Mirrors Rust's `StatementKind`. `session` covers SET / USE / COMMIT and
@@ -287,6 +310,15 @@ export interface ScriptResult {
   delimiterDetected: boolean;
   cancelled: boolean;
   timedOut: boolean;
+  /**
+   * The tab's connection had died and was replaced before this ran.
+   *
+   * A reconnect is the right behaviour — a connection the server reaped while
+   * you were away should heal, not break. But a new connection is a new
+   * session, so temporary tables, session variables and any open transaction
+   * are gone, and that is not something to discover from a later error.
+   */
+  reconnected: boolean;
 }
 
 /** One entry per engine we can open files for. The dialog filters and the
@@ -437,8 +469,6 @@ export interface Diagnostic {
   message: string;
 }
 
-export interface StatementSpan { start: number; end: number; }
-export interface SplitOutput { statements: StatementSpan[]; delimiterDetected: boolean; }
 
 export const api = {
   // --- saved profiles. No password ever comes back out of these.
@@ -453,7 +483,6 @@ export const api = {
     invoke<SaveProfileOutcome>("save_profile", { profile, password }),
   /** Returns a warning if the keychain entry could not be removed. */
   deleteProfile: (id: string) => invoke<string | null>("delete_profile", { id }),
-  hasStoredPassword: (id: string) => invoke<boolean>("has_stored_password", { id }),
 
   // --- connections. Several can be live at once; every call names one.
   listRoutines: (connectionId: string, db: string) =>
@@ -569,7 +598,6 @@ export const api = {
   /** Connect using a profile's remembered password; errors if none is stored. */
   connectSaved: (id: string) => invoke<ConnInfo>("connect_saved", { id }),
   disconnect: (connectionId: string) => invoke<void>("disconnect", { connectionId }),
-  disconnectAll: () => invoke<void>("disconnect_all"),
   listConnections: () => invoke<ConnectionStatus[]>("list_connections"),
 
   // --- tab lifecycle. A tab is bound to one connection for life.
@@ -603,7 +631,6 @@ export const api = {
     invoke<SavedFile | null>("save_file_dialog", { suggestedName, contents, lineEnding }),
 
   // --- stateless
-  splitSql: (sql: string) => invoke<SplitOutput>("split_sql", { sql }),
   statementAtCursor: (sql: string, cursor: number) =>
     invoke<string | null>("statement_at_cursor", { sql, cursor }),
 };

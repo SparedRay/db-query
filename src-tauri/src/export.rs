@@ -134,6 +134,10 @@ fn cell_text(v: &CellValue, null_as: &str) -> String {
         CellValue::Float(f) => f.to_string(),
         CellValue::Bool(b) => if *b { "1" } else { "0" }.into(),
         CellValue::Text(t) => t.clone(),
+        // What the grid shows, which is what "export what is shown" means. A
+        // CSV of placeholders is honest; the SQL-INSERT export refuses instead,
+        // because a placeholder written into a BLOB would be silent corruption.
+        CellValue::Binary { bytes } => CellValue::binary_placeholder(*bytes),
     }
 }
 
@@ -801,10 +805,36 @@ mod tests {
     #[test]
     fn a_binary_column_stops_the_insert_export() {
         let columns = vec![col("id", "INT"), col("data", "BLOB")];
-        let rows = vec![vec![CellValue::Int(1), txt("<binary, 12 bytes>")]];
+        let rows = vec![vec![
+            CellValue::Int(1),
+            CellValue::Binary { bytes: Some(12) },
+        ]];
         let err = to_inserts(&columns, &rows, &insert_opts(), None).expect_err("must refuse");
         assert!(err.to_lowercase().contains("binary"), "{err}");
         assert!(binary_column_warning(&columns).is_some());
+    }
+
+    /// The other half, and the bug: a binary-*collation* `VARCHAR` reports a
+    /// BLOB type name, so the column hint says binary — but the value decoded
+    /// to text and the grid shows it as text. The INSERT export used to refuse
+    /// it anyway.
+    #[test]
+    fn text_in_a_binary_typed_column_still_exports() {
+        let columns = vec![col("id", "INT"), col("name", "VARBINARY")];
+        let rows = vec![vec![CellValue::Int(1), txt("ada")]];
+        let out = to_inserts(&columns, &rows, &insert_opts(), None)
+            .expect("text that the grid shows must be exportable");
+        assert!(out.contains("'ada'"), "{out}");
+    }
+
+    /// A CSV of what is shown is honest, so binary does not stop it — only the
+    /// INSERT export, where a placeholder would become silent corruption.
+    #[test]
+    fn a_binary_value_still_renders_in_csv() {
+        let columns = vec![col("data", "BLOB")];
+        let rows = vec![vec![CellValue::Binary { bytes: Some(12) }]];
+        let out = to_csv(&columns, &rows, &CsvOptions::default());
+        assert!(out.contains("<binary, 12 bytes>"), "{out}");
     }
 
     #[test]

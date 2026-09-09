@@ -245,12 +245,35 @@ mod tests {
     }
 
     /// The bytes are gone by the time a cell exists — `decode.rs` keeps only
-    /// `<binary, N bytes>`. Quoting that writes the placeholder into the BLOB.
+    /// the length. Quoting a placeholder writes it into the BLOB.
     #[test]
     fn binary_is_refused_rather_than_guessed() {
-        let v = CellValue::Text("<binary, 12 bytes>".into());
+        let v = CellValue::Binary { bytes: Some(12) };
         let err = literal(&v, TypeHint::Binary).expect_err("must not guess");
         assert!(err.to_lowercase().contains("binary"), "{err}");
+        // Refused wherever it appears, not only under a binary-typed column.
+        assert!(literal(&v, TypeHint::Text).is_err());
+        assert!(literal(&CellValue::Binary { bytes: None }, TypeHint::Text).is_err());
+    }
+
+    /// The disagreement this variant exists to end.
+    ///
+    /// A `VARCHAR` with a binary collation is reported under the BLOB type
+    /// names, so its column hint is `Binary` — but it decodes to real text and
+    /// the grid shows it as text. Refusing it made the export contradict what
+    /// the user could plainly see. The value knows it is text; that wins.
+    #[test]
+    fn text_under_a_binary_hinted_column_is_exported_as_text() {
+        let v = CellValue::Text("hello".into());
+        assert_eq!(literal(&v, TypeHint::Binary).unwrap(), "'hello'");
+    }
+
+    /// And it is still escaped — a binary-collation column is where someone
+    /// stores the awkward strings.
+    #[test]
+    fn text_under_a_binary_hinted_column_is_still_escaped() {
+        let v = CellValue::Text("it's\\".into());
+        assert_eq!(literal(&v, TypeHint::Binary).unwrap(), r"'it\'s\\'");
     }
 
     #[test]
@@ -686,13 +709,26 @@ pub fn literal(value: &CellValue, hint: TypeHint) -> Result<String, String> {
         return Ok("NULL".into());
     }
 
-    match hint {
-        TypeHint::Binary => Err(
-            "Binary columns cannot be written as literals: the row data holds only a \
+    // Decided on the **value**, not on the column's type.
+    //
+    // The column type cannot answer this: a `VARCHAR` with a binary collation
+    // is reported under the BLOB type names, decodes to ordinary text, and
+    // renders as text in the grid — and refusing it here is what made the
+    // export disagree with what the user could plainly see. A cell that really
+    // holds bytes says so itself.
+    if let CellValue::Binary { .. } = value {
+        return Err(
+            "Binary values cannot be written as literals: the row data holds only a \
              placeholder, not the bytes. Export the query results instead, which reads \
              the values back from the server."
                 .into(),
-        ),
+        );
+    }
+
+    match hint {
+        // A binary-hinted column whose value survived as text is text. Quoting
+        // it is right: it is what the grid shows and what the server returned.
+        TypeHint::Binary => Ok(quote_string(&cell_text(value))),
         TypeHint::Numeric => match value {
             CellValue::Int(v) => Ok(v.to_string()),
             CellValue::Float(v) if v.is_finite() => Ok(format_float(*v)),
@@ -708,6 +744,7 @@ pub fn literal(value: &CellValue, hint: TypeHint) -> Result<String, String> {
                 "{t:?} is not a number, but its column is numeric. Refusing to guess."
             )),
             CellValue::Null => unreachable!("handled above"),
+            CellValue::Binary { .. } => unreachable!("refused above"),
         },
         TypeHint::Bool => match value {
             CellValue::Bool(b) => Ok(if *b { "1".into() } else { "0".into() }),
@@ -742,6 +779,7 @@ fn cell_text(v: &CellValue) -> String {
         CellValue::Float(f) => f.to_string(),
         CellValue::Bool(b) => if *b { "1" } else { "0" }.into(),
         CellValue::Text(t) => t.clone(),
+        CellValue::Binary { bytes } => CellValue::binary_placeholder(*bytes),
     }
 }
 
