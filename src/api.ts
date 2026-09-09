@@ -662,6 +662,9 @@ export const api = {
   // --- stateless
   statementAtCursor: (sql: string, cursor: number) =>
     invoke<string | null>("statement_at_cursor", { sql, cursor }),
+  /** Lay SQL out. Rejects rather than returning something that means
+   *  something else, so a failure is worth showing. */
+  formatSql: (sql: string) => invoke<string>("format_sql", { sql }),
 
   // --- the MCP server. Off unless started; see src-tauri/src/mcp.rs for why a
   // listening socket is acceptable in an app where nothing runs unattended.

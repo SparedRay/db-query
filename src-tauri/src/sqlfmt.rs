@@ -345,6 +345,14 @@ impl Layout {
         self.line_indent = indent;
     }
 
+    /// One empty line, to separate top-level statements. Never two, and never
+    /// one at the very top.
+    fn blank(&mut self) {
+        if !self.out.is_empty() && !self.out.ends_with("\n\n") {
+            self.out.push('\n');
+        }
+    }
+
     fn push(&mut self, text: &str, space: bool) {
         if space && !self.line.is_empty() {
             self.line.push(' ');
@@ -393,7 +401,16 @@ fn wants_space(prev: Option<&Tok<'_>>, tok: &Tok<'_>, glued: bool) -> bool {
 /// Lay out a token stream. Pure whitespace decisions — every token is emitted,
 /// in order, exactly as it was lexed.
 fn layout(toks: &[Tok<'_>], glued: &[bool]) -> String {
-    let words: Vec<String> = toks.iter().map(Tok::upper).collect();
+    // Trailing `$` is stripped for **matching only** — the token itself is
+    // still emitted exactly as it came. `$` is a word byte because MySQL
+    // identifiers may contain one, which makes `END$$` a single word and hides
+    // the block closer inside a routine written with a custom delimiter. An
+    // identifier genuinely ending in `$` would be mis-indented and nothing
+    // more; rule 2 still guarantees the SQL is unchanged.
+    let words: Vec<String> = toks
+        .iter()
+        .map(|t| t.upper().trim_end_matches('$').to_string())
+        .collect();
     let word_at = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
     let is_open_paren = |i: usize| matches!(toks.get(i), Some(Tok::Punct("(")));
 
@@ -462,6 +479,12 @@ fn layout(toks: &[Tok<'_>], glued: &[bool]) -> String {
                 f.push(";", false);
                 f.newline(f.indent);
                 in_condition = false;
+                // A script is easier to read as separated statements than as a
+                // wall. Only at the top level: the `;`s inside a routine body
+                // belong to one statement and must not be spread apart.
+                if f.indent == 0 && f.blocks.is_empty() && i + 1 < toks.len() {
+                    f.blank();
+                }
                 continue;
             }
             Tok::Comment(_) => {
@@ -604,12 +627,109 @@ pub fn tidy(sql: &str) -> String {
     if sql.lines().all(|l| l.chars().count() <= WIDE) {
         return sql.to_string();
     }
-    let (before, glued) = scan(sql);
-    let out = layout(&before, &glued);
-    if lex(&out) != before {
-        return sql.to_string();
+    format(sql).unwrap_or_else(|| sql.to_string())
+}
+
+/// Lay SQL out **because the user asked**, however wide its lines already are.
+///
+/// This is [`tidy`] without rule 1. Rule 2 still holds, and here it is the
+/// whole interface: `None` means the rewrite would have changed a token, so the
+/// caller can say "I could not format this" instead of silently doing nothing —
+/// or, far worse, handing back SQL that no longer means what it did.
+///
+/// # `DELIMITER` lines are copied, not formatted
+///
+/// `DELIMITER` is a **client** directive that owns its whole line; the server
+/// has never understood it. Running it through the layout is not merely
+/// pointless, it is destructive: `END$$` followed by `DELIMITER ;` lays out as
+/// `END$$ DELIMITER;`, which is token-for-token identical — so rule 2 cannot
+/// see it — and no longer runs. So the text is split on those lines, each run
+/// between them is laid out on its own, and the directives are carried across
+/// verbatim.
+pub fn format(sql: &str) -> Option<String> {
+    let mut out = String::new();
+    for chunk in chunks(sql) {
+        match chunk {
+            Chunk::Directive(line) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+            Chunk::Sql(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let (before, glued) = scan(text);
+                let laid = layout(&before, &glued);
+                // Per run rather than over the whole document: a run that
+                // cannot be laid out safely should fail the whole request, and
+                // comparing here says which one.
+                if lex(&laid) != before {
+                    return None;
+                }
+                out.push_str(laid.trim_end());
+                out.push('\n');
+            }
+        }
+    }
+    Some(out)
+}
+
+enum Chunk<'a> {
+    /// A `DELIMITER …` line, to be reproduced as it stands.
+    Directive(&'a str),
+    /// Everything else.
+    Sql(&'a str),
+}
+
+/// Split on `DELIMITER` directive lines.
+///
+/// The rule is `split.rs`'s, deliberately: `DELIMITER` as the first
+/// non-whitespace on a line, followed by whitespace and a token. Two modules
+/// disagreeing about what a directive is would be a bug nobody could see from
+/// either one.
+///
+/// This does **not** track strings or comments, which `split.rs` does. The
+/// consequence is bounded and in the safe direction: the word `DELIMITER`
+/// starting a line inside a string literal or block comment would split a run
+/// in two, and the token comparison in [`format`] then rejects the whole thing.
+/// Refusing to format is a worse outcome than formatting; it is not a wrong
+/// outcome.
+fn chunks(sql: &str) -> Vec<Chunk<'_>> {
+    let mut out = Vec::new();
+    let mut run_start = 0;
+    let mut at = 0;
+
+    for line in sql.split_inclusive('\n') {
+        if is_delimiter_directive(line) {
+            if at > run_start {
+                out.push(Chunk::Sql(&sql[run_start..at]));
+            }
+            out.push(Chunk::Directive(line));
+            run_start = at + line.len();
+        }
+        at += line.len();
+    }
+    if at > run_start {
+        out.push(Chunk::Sql(&sql[run_start..at]));
     }
     out
+}
+
+fn is_delimiter_directive(line: &str) -> bool {
+    let t = line.trim_start();
+    let Some(rest) = t
+        .get(..9)
+        .filter(|k| k.eq_ignore_ascii_case("DELIMITER"))
+        .map(|_| &t[9..])
+    else {
+        return false;
+    };
+    // Whitespace after the keyword, or `DELIMITERS` would qualify — and then a
+    // token, since a bare `DELIMITER` sets nothing and is not a directive.
+    rest.starts_with([' ', '\t']) && !rest.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -621,6 +741,105 @@ mod tests {
     pub(super) const VIEW_SAMPLE: &str = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `poc`.`user_totals` AS select `u`.`id` AS `id`,`u`.`email` AS `email`,count(`o`.`id`) AS `orders`,coalesce(sum(`o`.`total`),0) AS `spent` from (`poc`.`users` `u` left join `poc`.`orders` `o` on((`o`.`user_id` = `u`.`id`))) where `u`.`id` is not null group by `u`.`id`,`u`.`email` order by `spent` desc";
 
     pub(super) const ROUTINE_SAMPLE: &str = "CREATE PROCEDURE `poc`.`top`(IN n INT) BEGIN DECLARE done INT DEFAULT 0; SET @x = 0; IF n > 0 THEN SELECT id, total FROM orders WHERE total > n ORDER BY total DESC LIMIT n; ELSE SELECT 0; END IF; WHILE @x < n DO SET @x = @x + 1; END WHILE; END";
+
+    // ------------------------------------------------------- format(), the command
+
+    /// The corruption this function's `DELIMITER` handling exists to prevent.
+    /// `END$$ DELIMITER;` is token-identical to the input, so rule 2 cannot see
+    /// it, and it does not run.
+    #[test]
+    fn a_delimiter_directive_keeps_its_own_line() {
+        let script = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n";
+        let out = format(script).expect("formattable");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.first(), Some(&"DELIMITER $$"), "{out}");
+        assert_eq!(lines.last(), Some(&"DELIMITER ;"), "{out}");
+        assert!(
+            !out.contains("DELIMITER;"),
+            "the closing directive was swallowed into the statement:\n{out}"
+        );
+    }
+
+    /// `$` is a word byte, so `END$$` lexes as one word and the block closer
+    /// hides inside it — which left the whole routine over-indented by one.
+    #[test]
+    fn a_routine_written_with_a_custom_delimiter_closes_its_block() {
+        let out = format("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n")
+            .expect("formattable");
+        assert!(
+            out.contains("\nEND$$\n"),
+            "END$$ did not return to column zero:\n{out}"
+        );
+    }
+
+    #[test]
+    fn delimiters_is_not_a_delimiter_directive() {
+        assert!(!is_delimiter_directive("DELIMITERS $$\n"));
+        // A bare one sets nothing.
+        assert!(!is_delimiter_directive("DELIMITER\n"));
+        assert!(!is_delimiter_directive("SELECT delimiter FROM t;\n"));
+        assert!(is_delimiter_directive("DELIMITER $$\n"));
+        assert!(is_delimiter_directive("  delimiter ;\n"));
+    }
+
+    /// A column that happens to be called `delimiter` is not a directive, and
+    /// must come through as ordinary SQL.
+    #[test]
+    fn a_column_named_delimiter_is_left_alone() {
+        let out = format("select delimiter from t where delimiter = 1;").expect("formattable");
+        assert!(out.contains("select delimiter"), "{out}");
+        assert_eq!(
+            lex(&out),
+            lex("select delimiter from t where delimiter = 1;")
+        );
+    }
+
+    /// Rule 1 is what `format` drops: an already-narrow statement is laid out
+    /// anyway, because the user asked for it.
+    #[test]
+    fn format_lays_out_narrow_text_that_tidy_would_leave_alone() {
+        let sql = "select a,b from t where a=1;";
+        assert_eq!(tidy(sql), sql, "tidy should not touch a narrow line");
+        let out = format(sql).expect("formattable");
+        assert_ne!(out, sql);
+        assert!(out.contains("\nfrom t"), "{out}");
+    }
+
+    /// Rule 2 is what it keeps, and here it is the entire interface.
+    #[test]
+    fn format_refuses_rather_than_changing_what_the_sql_means() {
+        // An unterminated string swallows the rest of the input as one token,
+        // which is exactly the input a formatter must not guess at.
+        let out = format("select 'unterminated");
+        assert!(
+            out.is_none() || lex(&out.unwrap()) == lex("select 'unterminated"),
+            "format changed a token"
+        );
+    }
+
+    #[test]
+    fn top_level_statements_are_separated_and_a_routine_body_is_not() {
+        let out = format("select 1; select 2;").expect("formattable");
+        assert!(
+            out.contains(";\n\nselect 2"),
+            "no blank line between statements:\n{out}"
+        );
+
+        let body = format(ROUTINE_SAMPLE).expect("formattable");
+        assert!(
+            !body.contains("\n\n"),
+            "a routine body was spread apart:\n{body}"
+        );
+    }
+
+    /// Every sample this module has, through the entry point the command uses.
+    #[test]
+    fn format_preserves_every_token_of_every_sample() {
+        for sample in [VIEW_SAMPLE, ROUTINE_SAMPLE, "select a,b from t;", ""] {
+            let out = format(sample).unwrap_or_else(|| panic!("refused: {sample}"));
+            assert_eq!(lex(&out), lex(sample), "tokens changed for: {sample}");
+        }
+    }
 
     /// Rule 2, on everything this module is ever asked to lay out. Nothing
     /// below matters if the output is not the same SQL.

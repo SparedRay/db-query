@@ -45,7 +45,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
-  createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, selectedText,
+  createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, replaceRange,
+  selectedText,
   setDialect, setEditorTheme, setLinting, setSchema,
 } from "./editor";
 
@@ -61,6 +62,7 @@ const els = {
   btnRun: $<HTMLButtonElement>("btn-run"),
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
+  btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
   timeout: $<HTMLInputElement>("num-timeout"),
@@ -1569,11 +1571,86 @@ function draggable(handle: HTMLElement, axis: "x" | "y") {
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
 
+/**
+ * Lay the buffer out — the selection if there is one, otherwise the whole tab.
+ *
+ * Rust decides the shape and, more importantly, refuses any rewrite that would
+ * change a token. So this replaces text without re-checking anything, and a
+ * refusal is reported rather than swallowed: an explicit action that silently
+ * does nothing is the worst of the three outcomes.
+ *
+ * **Nothing is run.** Formatting is a text edit, and one undo puts it back.
+ */
+async function formatBuffer() {
+  const sel = view.state.selection.main;
+  const whole = sel.empty;
+  const source = whole ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to);
+  if (!source.trim()) return;
+
+  let laid: string;
+  try {
+    laid = await api.formatSql(source);
+  } catch (err) {
+    results.setMessage(String(err));
+    return;
+  }
+  const text = whole ? laid : laid.trimEnd();
+  if (text === source) {
+    results.setMessage("Already laid out.");
+    return;
+  }
+
+  if (whole) {
+    // Where the cursor lands is decided by counting the non-whitespace
+    // characters in front of it, and finding the same count in the result.
+    // That is exact rather than approximate, and it is exact *because* the
+    // formatter only moves whitespace — the same rule that makes this safe at
+    // all is what makes the cursor land where it was.
+    const before = countCode(source.slice(0, sel.head));
+    replaceRange(view, {
+      from: 0,
+      to: view.state.doc.length,
+      insert: text,
+      cursor: offsetAfterCode(text, before),
+    });
+  } else {
+    replaceRange(view, {
+      from: sel.from,
+      to: sel.to,
+      insert: text,
+      cursor: sel.from + text.length,
+    });
+  }
+}
+
+/** Characters that are not whitespace — the part formatting cannot change. */
+function countCode(text: string): number {
+  let n = 0;
+  for (const ch of text) if (!/\s/.test(ch)) n++;
+  return n;
+}
+
+/** The offset just past the `n`th non-whitespace character. */
+function offsetAfterCode(text: string, n: number): number {
+  if (n === 0) return 0;
+  let seen = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (!/\s/.test(text[i])) {
+      seen++;
+      if (seen === n) return i + 1;
+    }
+  }
+  return text.length;
+}
+
+els.btnFormat.onclick = () => void formatBuffer();
+
 // ------------------------------------------------------------------- boot
 
 view = createEditor($("editor"), {
   onRunStatement: () => void runStatementUnderCursor(),
   onRunAll: () => void run(docText(view)),
+  onFormat: () => void formatBuffer(),
   // Keeps the dirty dot honest without polling.
   onDocChanged: () => {
     tabs?.render();

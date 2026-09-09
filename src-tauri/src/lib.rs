@@ -985,6 +985,21 @@ fn statement_at_cursor(sql: String, cursor: usize) -> Result<Option<String>, Str
         .map(|s| sql[s.start..s.end].to_string()))
 }
 
+/// Lay SQL out, for the editor's Format action.
+///
+/// Fails rather than returning something different: `sqlfmt::format` refuses
+/// any rewrite that would change a token, and an explicit action must say so
+/// rather than appear to work and change nothing. The frontend is then free to
+/// replace the buffer without re-checking anything.
+#[tauri::command]
+fn format_sql(sql: String) -> Result<String, String> {
+    sqlfmt::format(&sql).ok_or_else(|| {
+        "This could not be laid out safely, so nothing was changed. That usually \
+         means an unterminated quote or comment."
+            .to_string()
+    })
+}
+
 // ----------------------------------------------------------------------- files
 
 /// The file types we can open. The frontend uses this for its own affordances;
@@ -1320,6 +1335,7 @@ pub fn run() {
             clipboard_text,
             export_rerun,
             statement_at_cursor,
+            format_sql,
             supported_file_types,
             open_file_dialog,
             read_file,
