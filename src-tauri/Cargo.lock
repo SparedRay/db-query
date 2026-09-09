@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "db-query"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "async-trait",
  "futures-util",
