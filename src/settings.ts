@@ -13,6 +13,9 @@ export interface Settings {
   /** A font stack, not a single family: an uninstalled font must fall back. */
   fontFamily: string;
   fontSize: number;
+  /** Which syntax palette the editor uses. Composes with `theme` rather than
+   *  replacing it: each preset is written for both grounds. */
+  editorTheme: EditorTheme;
   /** Defaults applied at boot to the controls in the editor header. */
   autoLimit: boolean;
   lint: boolean;
@@ -34,6 +37,15 @@ export interface Settings {
   mcpPort: number;
 }
 
+/** The editor colour presets. `default` sets no attribute. */
+export type EditorTheme = "default" | "muted" | "contrast";
+
+export const EDITOR_THEMES: Array<{ value: EditorTheme; label: string }> = [
+  { value: "default", label: "Default" },
+  { value: "muted", label: "Muted" },
+  { value: "contrast", label: "High contrast" },
+];
+
 export const DEFAULT_MONO =
   'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace';
 
@@ -51,6 +63,7 @@ export const DEFAULTS: Settings = {
   theme: "system",
   fontFamily: DEFAULT_MONO,
   fontSize: 12,
+  editorTheme: "default",
   autoLimit: true,
   lint: true,
   timeoutSecs: 0,
@@ -174,6 +187,9 @@ export function load(): Settings {
         : DEFAULTS.theme,
     fontFamily: known ? (o.fontFamily as string) : DEFAULTS.fontFamily,
     fontSize: bounded(Number(o.fontSize), 9, 22, DEFAULTS.fontSize),
+    editorTheme: EDITOR_THEMES.some((t) => t.value === o.editorTheme)
+      ? (o.editorTheme as EditorTheme)
+      : DEFAULTS.editorTheme,
     autoLimit: typeof o.autoLimit === "boolean" ? o.autoLimit : DEFAULTS.autoLimit,
     lint: typeof o.lint === "boolean" ? o.lint : DEFAULTS.lint,
     timeoutSecs: bounded(Number(o.timeoutSecs), 0, 3600, DEFAULTS.timeoutSecs),
@@ -207,4 +223,9 @@ export function applyAppearance(s: Settings) {
   const root = document.documentElement;
   root.style.setProperty("--mono", s.fontFamily);
   root.style.setProperty("--code-size", `${s.fontSize}px`);
+  // An attribute rather than inline properties, so the palettes stay in the
+  // stylesheet where they can be read next to the theme they belong to.
+  // Default sets nothing, so its block is the plain `:root` one.
+  if (s.editorTheme === "default") delete root.dataset.editorTheme;
+  else root.dataset.editorTheme = s.editorTheme;
 }
