@@ -86,6 +86,26 @@ mise run test-ollama # the assistant against that local endpoint
 mise run ollama-down # tear it down
 ```
 
+## Releasing
+
+The version lives in `package.json`; `tauri.conf.json` reads it, and CI stamps
+it from the tag at build time. To cut a release, bump and tag in one step:
+
+```bash
+npm version patch     # or minor / major — writes package.json, the lockfile
+                      # AND src-tauri/Cargo.toml, commits, and tags vX.Y.Z
+git push --follow-tags
+```
+
+`npm version` owns the first two files; the `version` lifecycle script syncs
+`Cargo.toml` and stages it, so all three move together in one commit. Pushing
+the tag builds both installers and opens a **draft** release — publish it from
+the GitHub UI.
+
+Use `mise run set-version X.Y.Z` instead when you want to set the number without
+committing or tagging, such as bringing a tree back in line with a release CI
+stamped on its own.
+
 All three fixtures are rootless podman containers bound to localhost. See
 [dev/README.md](dev/README.md) for what each one seeds and why.
 

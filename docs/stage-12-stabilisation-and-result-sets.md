@@ -14,14 +14,20 @@ again.
 
 Worth stating plainly, because the framing affects the tag.
 
-`v0.2.0` is the last published release. Since then, **unreleased**, we have query
-history (Stage 9), the assistant (Stage 10) and Elasticsearch behind an engine
-trait (Stage 11). So the next release is not a bugfix release by content
-whatever we call it — it is three features plus this stabilisation pass.
+**Corrected 2026-09-09.** An earlier draft of this section said `v0.2.0` was the
+last release and proposed `v0.3.0`. That was read from a stale tag list: `v0.3.0`
+and `v0.3.1` are both published, and `v0.3.1` is the version being used. Query
+history, the assistant and Elasticsearch all shipped in them.
 
-The recommendation is unchanged: **`v0.3.0`**, cut after this stage lands. This
-stage is the work that makes that release worth installing rather than a
-separate smaller one. Nothing here is a schema, config or API break.
+So this **is** a bugfix release by content as well as by name, and the next tag
+is **`v0.3.2`**. Nothing here is a schema, config or API break — with one
+deliberate exception, C5, which deletes three commands nothing calls.
+
+The tree itself had drifted: `package.json` and `Cargo.toml` said `0.2.0` while
+`v0.3.1` was in the wild, because CI stamps the version from the tag and nothing
+wrote it back. Fixed by syncing the tree and by making `npm version` the way
+releases are cut — it moves `package.json`, the lockfile and `Cargo.toml`
+together in one commit and tags it. See the README's *Releasing* section.
 
 ---
 
