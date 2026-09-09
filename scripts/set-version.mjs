@@ -17,17 +17,27 @@
 //   * `src-tauri/Cargo.toml` — not used for the bundle any more, but a crate
 //     that disagrees with the app it builds is a trap for the next person.
 //
-// Usage: node scripts/set-version.mjs 0.2.0   (a leading "v" is accepted)
+// Two ways to call it:
+//
+//   node scripts/set-version.mjs 0.3.2   Set everything to this version.
+//   node scripts/set-version.mjs         SYNC: take package.json's version and
+//                                        write it into Cargo.toml.
+//
+// Sync mode exists for `npm version`, which bumps package.json and the lockfile
+// itself and then runs this as its `version` lifecycle script. In that flow npm
+// owns those two files, so touching them here would only fight it — sync mode
+// therefore writes Cargo.toml alone.
+//
+// A leading "v" is accepted in either form.
 
 import { readFileSync, writeFileSync } from "node:fs";
 
 const raw = process.argv[2];
-if (!raw) {
-  console.error("usage: node scripts/set-version.mjs <version>   e.g. 0.2.0 or v0.2.0");
-  process.exit(1);
-}
-
-const version = raw.replace(/^v/, "");
+const sync = raw === undefined;
+const version = (sync ? JSON.parse(readFileSync("package.json", "utf8")).version : raw).replace(
+  /^v/,
+  "",
+);
 // Deliberately strict. A version that is not semver reaches the bundler as a
 // build failure on Windows only, hours later, with an unrelated message.
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -41,18 +51,20 @@ function editJson(path, mutate) {
   writeFileSync(path, JSON.stringify(json, null, 2) + "\n");
 }
 
-editJson("package.json", (j) => {
-  j.version = version;
-});
-
-// The lockfile repeats the version, in two places for the root package.
-try {
-  editJson("package-lock.json", (j) => {
+if (!sync) {
+  editJson("package.json", (j) => {
     j.version = version;
-    if (j.packages?.[""]) j.packages[""].version = version;
   });
-} catch (e) {
-  if (e.code !== "ENOENT") throw e;
+
+  // The lockfile repeats the version, in two places for the root package.
+  try {
+    editJson("package-lock.json", (j) => {
+      j.version = version;
+      if (j.packages?.[""]) j.packages[""].version = version;
+    });
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
 }
 
 // Only the `[package]` version — a `version = ` under any dependency table must
@@ -69,4 +81,4 @@ if (replaced === cargo) {
 }
 writeFileSync(cargoPath, replaced);
 
-console.log(`version set to ${version}`);
+console.log(sync ? `Cargo.toml synced to ${version}` : `version set to ${version}`);

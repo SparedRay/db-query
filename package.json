@@ -1,7 +1,7 @@
 {
   "name": "db-query",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -11,7 +11,9 @@
     "tauri": "tauri",
     "test:ui": "playwright test --project=chromium",
     "test:ui:webkit": "playwright test --project=webkit",
-    "attribution": "node scripts/attribution.mjs"
+    "attribution": "node scripts/attribution.mjs",
+    "version": "node scripts/set-version.mjs && git add src-tauri/Cargo.toml",
+    "postversion": "git --no-pager log -1 --oneline && echo \"Now: git push --follow-tags\""
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.0",
