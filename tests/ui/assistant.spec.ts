@@ -337,3 +337,32 @@ test("the choice survives a reload", async ({ page }) => {
   await expect(page.locator("#set-ai-base")).toHaveValue("https://api.openai.com/v1");
   await expect(page.locator("#set-ai-model")).toHaveValue("some-model");
 });
+
+/**
+ * A hosted provider that speaks OpenAI's shape costs a preset, not an adapter.
+ * What is worth pinning is that choosing it sends the *provider* and *base URL*
+ * the compatibility layer expects — a preset with the wrong base URL is a 404
+ * an hour later, in someone else's account.
+ */
+test("Gemini is reached through the OpenAI-compatible path", async ({ page }) => {
+  await connect(page, {
+    assistant_status: () => READY,
+    assistant_send: () => new Promise(() => {}),
+  });
+  await choosePreset(page, "Google Gemini");
+  await page.fill("#set-ai-model", "gemini-2.5-pro");
+  await page.locator("#set-ai-model").blur();
+  await page.click("#set-close");
+
+  await page.click("#btn-assistant");
+  await page.fill("#chat-input", "which tables are there?");
+  await page.click("#chat-send");
+
+  await expect
+    .poll(async () => (await calls(page)).find((c) => c.cmd === "assistant_send")?.args)
+    .toMatchObject({
+      provider: "openAiCompatible",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      model: "gemini-2.5-pro",
+    });
+});

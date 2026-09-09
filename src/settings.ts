@@ -84,6 +84,18 @@ export const AI_PRESETS: Array<{
     modelHint: "the model name from your account",
   },
   {
+    // Google's own OpenAI-compatibility layer, so this costs a preset rather
+    // than an adapter: the key travels as `Authorization: Bearer`, which is
+    // what the OpenAI path already sends. Google calls it beta and silently
+    // ignores parameters it does not support — which for us is none, since we
+    // send a model, messages and `stream`.
+    label: "Google Gemini",
+    provider: "openAiCompatible",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    model: "",
+    modelHint: "a model from your account, e.g. gemini-2.5-pro",
+  },
+  {
     label: "Ollama (local)",
     provider: "openAiCompatible",
     baseUrl: "http://localhost:11434/v1",
