@@ -122,16 +122,24 @@ answer was asked for and this may not have been.
 
 ## 5. Milestones
 
-- [ ] **M1 — A real client connects.** Claude Desktop or Claude Code, configured
-      with the URL and token, lists the four tools.
-- [ ] **M2 — The schema it reports is the real one.** `list_tables` and
-      `describe_table` against a live MySQL and a live Elasticsearch match what
-      the tree shows.
+- [x] **M1 — A real client connects.** 2026-09-09, against the running app on
+      127.0.0.1:49732: `initialize` negotiated `2025-11-25` and the server named
+      itself `db-query 0.3.7`; `tools/list` returned exactly the four.
+- [x] **M2 — The schema it reports is the real one.** Live MySQL, 2026-09-09:
+      `list_databases` named the open connection and its five schemas,
+      `list_tables` returned the seven objects in `poc` with `VIEW` distinguished
+      from `BASE TABLE`, and `describe_table` returned real types, keys and
+      nullability (`varchar(190)` `UNI`, `decimal(12,2)`, `int` `PRI`).
+      **Elasticsearch is still unchecked** — it is a different `Engine`
+      implementation of the same three calls, so it is a real gap, not a
+      formality.
 - [x] **M3 — `put_query` lands in the editor**, in a new tab, focused, **not
       run**, and visibly marked as external. Asserted in `tests/ui/mcp.spec.ts`,
       where the load-bearing assertion is the negative one: `run_script` never
-      appears in the command log. Still to be seen by hand against a real
-      client, which is M1's job.
+      appears in the command log. **Seen by hand**, 2026-09-09: a query composed
+      from the schema the client had just read through `describe_table` arrived
+      in the window, and was confirmed "visible and executable" — visible being
+      the feature and executable meaning *by the person at the keyboard*.
 - [x] **M4 — Off means off.** With the switch off, nothing is listening on the
       port: proved by connecting to it and failing, not by reading the code.
       `off_means_nothing_is_listening`, and `restarting_releases_the_previous_port`
@@ -139,10 +147,13 @@ answer was asked for and this may not have been.
       making `stop` a no-op.
 - [x] **M5 — The door is locked.** A request with no token, a wrong token, or a
       foreign `Origin` is refused, and the refusal says which — asserted over
-      the socket, not just over a `HeaderMap`.
-- [x] **M6 — Nothing can execute.** Twice: over the router
-      (`advertises_exactly_the_four_tools`) and over the wire
-      (`a_client_handshake_lists_exactly_the_four_tools`).
+      the socket, not just over a `HeaderMap`. **Re-checked against the running
+      app**, 2026-09-09: no token 401, wrong token 401,
+      `Origin: https://evil.example` 403.
+- [x] **M6 — Nothing can execute.** Three times: over the router
+      (`advertises_exactly_the_four_tools`), over the wire
+      (`a_client_handshake_lists_exactly_the_four_tools`), and from the running
+      app, where `tools/list` returned those four and nothing else.
 - [ ] **M7 — Nothing regressed.** Every suite, both engines, both platforms.
 
 ---
@@ -386,3 +397,57 @@ not surprise you. A *boot* that cannot bind reports it in the results pane and
 **keeps the preference**, because a port that happens to be busy this morning
 must not quietly turn a feature off forever. One flag, two behaviours, and a
 test for each.
+
+---
+
+## 12. M1 by hand, against the running app — 2026-09-09
+
+Driven with `curl` rather than through a client's own configuration, on
+purpose: it is the same HTTP a client speaks, and it shows the *refusals*, which
+a working client never exercises.
+
+**The door, first.** No token → 401. Wrong token → 401.
+`Origin: https://evil.example` with the correct token → **403**. All three
+against the real listener on `127.0.0.1:49732`, not a test harness.
+
+**Then the handshake.** `initialize` negotiated `2025-11-25` and the server
+named itself `db-query 0.3.7`, with the instructions text that tells a model
+what this server is for. `tools/list` returned exactly four:
+`list_databases`, `list_tables`, `describe_table`, `put_query`.
+
+**Then the schema** — the real one. `list_databases` reported the open
+connection by name and its five schemas; `list_tables` returned the seven
+objects in `poc`, with `user_totals` distinguished as a `VIEW`;
+`describe_table` returned genuine types, keys and nullability rather than an
+approximation — `varchar(190)` `UNI`, `decimal(12,2)`, `int` `PRI`.
+
+**Then the point of the stage.** A `users`/`orders` roll-up was composed *from
+the two `describe_table` answers* — the agent workflow rather than a canned
+string — and sent through `put_query`. It arrived in the window. Confirmed by
+the person in front of it: **"Query visible and executable."** Which is the
+whole design in four words: the client made it visible, and only the user can
+execute it.
+
+### Registered where the token cannot leak
+
+Added to `~/.claude.json` under `projects[…].mcpServers` — Claude Code's
+**local** scope. Deliberately *not* `--scope project`, which writes `.mcp.json`
+into the repository: that file is committed, and this one carries a bearer
+token. The distinction is worth stating in the docs the app itself shows, since
+the snippet in Settings is the same JSON either way and only the destination
+decides whether the token is published.
+
+Two consequences to know: MCP servers are read when a session starts, so the
+entry does not reach the session that wrote it; and the port is in the config,
+so changing it in Settings means re-copying the snippet.
+
+### Still not done
+
+**Elasticsearch (part of M2).** The three schema tools go through the `Engine`
+trait, and only MySQL's implementation has been exercised through MCP. A
+different implementation of the same three calls is exactly where this would
+break quietly.
+
+**M4 and M7 by hand**, and the token in the transcript: the one used here was
+pasted into a chat log, so it should be regenerated in Settings → Integrations
+before this is left running.
