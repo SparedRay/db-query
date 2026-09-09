@@ -135,8 +135,8 @@ draft is not `latest`, so an unpublished release reaches nobody.
 ### Which bump
 
 `patch` for fixes and anything invisible. `minor` for a feature someone would
-notice — a new engine, a new panel. `major` is not in use: this is a POC below
-1.0, where `minor` already means "new capability".
+notice — a new engine, a new panel. `major` is not in use: below 1.0, `minor`
+already means "new capability".
 
 ### Rehearsing without spending a tag
 
@@ -200,5 +200,4 @@ honouring. What it cannot establish is the copyright status of AI-generated
 output, which is genuinely unsettled and varies by jurisdiction. The code here
 is original to this project rather than copied from another codebase, and it is
 offered under MIT on that basis. If you need stronger provenance guarantees than
-that, this is a POC and you should assume nothing beyond what this paragraph
-says.
+that, assume nothing beyond what this paragraph says.
