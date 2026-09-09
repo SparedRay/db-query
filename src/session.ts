@@ -90,6 +90,7 @@ export function createSessionPersistence(deps: {
         cursor: tabs.cursorOf(tab),
         activeDb: tab.activeDb,
         untitledNumber: tab.untitledNumber,
+        external: tab.external,
       });
     }
 
@@ -152,6 +153,9 @@ export function createSessionPersistence(deps: {
       cursor: stored.cursor,
       activeDb: stored.activeDb,
       untitledNumber: stored.untitledNumber,
+      // Absent in files written before Stage 13, which is exactly the case
+      // where the answer is "the user opened it".
+      external: stored.external ?? false,
     };
 
     if (stored.filePath === null) return base;

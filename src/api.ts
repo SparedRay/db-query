@@ -412,6 +412,10 @@ export interface StoredTab {
   cursor: number;
   activeDb: string | null;
   untitledNumber: number | null;
+  /** Arrived through the MCP server rather than being opened by the user.
+   *  Stored, because provenance that lasts only until you quit is provenance
+   *  you cannot rely on. Absent in files written before Stage 13. */
+  external?: boolean;
 }
 
 export interface StoredWorkspace {
@@ -425,6 +429,28 @@ export interface SessionStore {
   version: number;
   connections: StoredWorkspace[];
 }
+
+export interface McpStatus {
+  running: boolean;
+  port: number | null;
+  /** The full URL a client is configured with, when running. */
+  url: string | null;
+}
+
+/**
+ * What `put_query` sends. Mirrors `mcp::PutQuery` in Rust.
+ *
+ * The connection id travels with it so a tab that arrives after the user has
+ * switched connection can say so, rather than quietly attaching to whichever
+ * workspace happens to be in front.
+ */
+export interface McpPutQuery {
+  sql: string;
+  connectionId: string;
+}
+
+/** Mirrors `mcp::PUT_QUERY_EVENT`. */
+export const MCP_PUT_QUERY_EVENT = "mcp://put-query";
 
 export interface SessionLoad {
   session: SessionStore;
@@ -633,4 +659,16 @@ export const api = {
   // --- stateless
   statementAtCursor: (sql: string, cursor: number) =>
     invoke<string | null>("statement_at_cursor", { sql, cursor }),
+
+  // --- the MCP server. Off unless started; see src-tauri/src/mcp.rs for why a
+  // listening socket is acceptable in an app where nothing runs unattended.
+  mcpStart: (port: number) => invoke<McpStatus>("mcp_start", { port }),
+  mcpStop: () => invoke<McpStatus>("mcp_stop"),
+  mcpStatus: () => invoke<McpStatus>("mcp_status"),
+  /** Which connection an MCP client sees. Only the UI knows this. */
+  mcpSetFocus: (connectionId: string | null) =>
+    invoke<void>("mcp_set_focus", { connectionId }),
+  /** Minted on first read and kept in the OS keychain. */
+  mcpToken: () => invoke<string>("mcp_token"),
+  mcpRegenerateToken: () => invoke<string>("mcp_regenerate_token"),
 };

@@ -62,6 +62,15 @@ export interface ScriptTab {
   serverConnId: number;
   /** Set while the tab has never been saved, so the number can be reused. */
   untitledNumber: number | null;
+  /**
+   * This tab arrived through the MCP server rather than being opened here.
+   *
+   * A tab that appears unbidden must not look like one you opened, so it is
+   * marked in the strip and the mark survives a restart. It clears on Save:
+   * once the buffer is a file you chose a name and a place for, the question
+   * "where did this come from" has been answered.
+   */
+  external: boolean;
 }
 
 /**
@@ -84,6 +93,7 @@ export interface RestoredTab {
   cursor: number;
   activeDb: string | null;
   untitledNumber: number | null;
+  external: boolean;
 }
 
 export interface TabHooks {
@@ -249,6 +259,8 @@ export class TabManager {
     encoding?: string;
     lineEnding?: string;
     mtimeMs?: number | null;
+    /** Opened by something other than the person at the keyboard. */
+    external?: boolean;
   }): ScriptTab {
     const connectionId = opts?.connectionId ?? this.activeConnectionId;
     if (!connectionId) {
@@ -280,6 +292,7 @@ export class TabManager {
       activeDb: null,
       serverConnId: 0,
       untitledNumber,
+      external: opts?.external ?? false,
     };
 
     this.tabs.push(tab);
@@ -403,6 +416,7 @@ export class TabManager {
         activeDb: spec.activeDb,
         serverConnId: 0,
         untitledNumber: spec.untitledNumber,
+        external: spec.external,
       };
       this.tabs.push(tab);
       this.hooks.onCreated(tab);
@@ -474,6 +488,9 @@ export class TabManager {
     tab.filePath = opts.path;
     tab.title = opts.name;
     tab.untitledNumber = null;
+    // Saved to a place you chose, under a name you chose: it is your file now,
+    // and the provenance question has an answer that is no longer "unbidden".
+    tab.external = false;
     tab.mtimeMs = opts.mtimeMs;
     tab.baseline = opts.baseline;
     this.render();
@@ -492,8 +509,20 @@ export class TabManager {
       el.className =
         "stab" +
         (tab.id === this.activeId ? " active" : "") +
-        (this.isDirty(tab) ? " dirty" : "");
+        (this.isDirty(tab) ? " dirty" : "") +
+        (tab.external ? " external" : "");
       el.title = tab.filePath ?? tab.title;
+
+      if (tab.external) {
+        // Before the label, so it reads as a prefix on the tab rather than as
+        // decoration after the name. It is not a button: provenance is a fact,
+        // not a control.
+        const mark = document.createElement("span");
+        mark.className = "stab-external";
+        mark.textContent = "\u2197"; // north-east arrow: it came from outside
+        mark.title = "Added by an MCP client. It has not been run.";
+        el.append(mark);
+      }
 
       if (tab.busy) {
         const spin = document.createElement("span");

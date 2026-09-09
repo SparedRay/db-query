@@ -433,6 +433,16 @@ input.num {
 .stab-mark:hover { background: var(--btn-bg-hover); }
 .stab-mark:hover::before { color: var(--fg-strong); }
 
+/* Provenance, not a control: a tab that arrived through the MCP server rather
+   than because someone opened it. Deliberately quiet — it is a fact to notice,
+   not a warning to dismiss — but with a left edge strong enough that a tab
+   appearing while you look elsewhere is visibly not one of yours. */
+.stab.external { border-left: 2px solid var(--accent); padding-left: 9px; }
+.stab-external {
+  font-size: 10px; line-height: 1; color: var(--accent);
+  flex: 0 0 auto; opacity: 0.85;
+}
+
 .stab-add {
   background: none; border: none; color: var(--fg-dim);
   font-size: 15px; line-height: 1; padding: 0 10px; cursor: pointer; flex: 0 0 auto;

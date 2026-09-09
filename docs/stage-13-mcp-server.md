@@ -127,8 +127,11 @@ answer was asked for and this may not have been.
 - [ ] **M2 — The schema it reports is the real one.** `list_tables` and
       `describe_table` against a live MySQL and a live Elasticsearch match what
       the tree shows.
-- [ ] **M3 — `put_query` lands in the editor**, in a new tab, focused, **not
-      run**, and visibly marked as external.
+- [x] **M3 — `put_query` lands in the editor**, in a new tab, focused, **not
+      run**, and visibly marked as external. Asserted in `tests/ui/mcp.spec.ts`,
+      where the load-bearing assertion is the negative one: `run_script` never
+      appears in the command log. Still to be seen by hand against a real
+      client, which is M1's job.
 - [x] **M4 — Off means off.** With the switch off, nothing is listening on the
       port: proved by connecting to it and failing, not by reading the code.
       `off_means_nothing_is_listening`, and `restarting_releases_the_previous_port`
@@ -155,9 +158,10 @@ answer was asked for and this may not have been.
 - [x] `tests/mcp_http.rs`: seven tests over a real socket — pulled forward from
       Phase 4 because a listening socket should not be committed unproven
 
-### Phase 2 — Reaching the editor
-- [ ] `put_query` emits to the frontend; a new tab, focused, never run
-- [ ] External tabs are marked, and the mark survives a session restore
+### Phase 2 — Reaching the editor ✅ 2026-09-09
+- [x] `put_query` emits to the frontend; a new tab, focused, never run
+- [x] External tabs are marked, and the mark survives a session restore
+- [x] `tests/ui/mcp.spec.ts`: 9 tests, both engines
 
 ### Phase 3 — Settings and discoverability
 - [ ] Settings → *Integrations*: switch, port, token (copy / regenerate)
@@ -291,3 +295,40 @@ is why it is configurable. `put_query` emits its event today and nothing
 listens — a tool that reports success into the void until Phase 2 lands. And
 `rust-version` moved 1.82 → 1.88: a declaration catching up with what mise and
 CI have always built with (`stable`), not a toolchain change.
+
+---
+
+## 10. What Phase 2 built
+
+`put_query` now reaches the editor. One Tauri event, `mcp://put-query` — the
+app's **first**, which is why `listen` had to be imported at all — carrying the
+SQL and the connection it was aimed at.
+
+**The connection id travels with the payload rather than being assumed.** A
+query aimed at one server must not land in another's workspace because the user
+switched while the agent was thinking, and if that connection has closed the
+query is *reported* rather than dropped: the client has already been told it was
+placed, so silence is the one outcome nobody can see.
+
+**Provenance is stored, not just displayed.** `StoredTab.external` in
+`workspace.rs`, `#[serde(default)]` so every session file written before this
+stage loads unchanged and means "the user opened this" — a compat detail with
+teeth, since getting it wrong would put a provenance mark on everybody's
+existing tabs on the first launch of a new build. Two Rust tests and one UI test
+hold that line.
+
+**The mark clears on Save.** Once the buffer is a file you chose a name and a
+place for, "where did this come from" has an answer, and keeping the mark would
+make it decoration rather than information. This is a judgement call and the one
+most likely to be revisited.
+
+**Rejected: inserting into the current tab.** Even when it is empty. A new tab
+is the only shape where the arrival is visible, and visibility is the whole
+mechanism — §3.4 exists because a tab that appears unbidden must not look like
+one you opened.
+
+**Six tests were confirmed able to fail.** Breaking the session round-trip fails
+"the mark comes back after a restart"; breaking the clear-on-save fails its own
+test. Both were checked rather than assumed.
+
+Still unreachable by a user: nothing starts the server. That is Phase 3.
