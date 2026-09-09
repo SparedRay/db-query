@@ -1,5 +1,5 @@
 // Typed mirror of the Rust command surface. Keep in sync with src-tauri/src.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 /**
  * Everything about a connection except its secret. **This is exactly what is
@@ -258,6 +258,26 @@ export interface FileTypeSpec {
   dialect: string;
 }
 
+// ---------------------------------------------------------------- assistant
+
+export interface AssistantStatus {
+  /** True when a key is in the keychain. The key never comes back out. */
+  configured: boolean;
+  model: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** What arrives while a reply is being written. */
+export type AssistantEvent =
+  | { type: "thinking"; delta: string }
+  | { type: "text"; delta: string }
+  | { type: "done"; stopReason: string | null }
+  | { type: "failed"; message: string };
+
 // ------------------------------------------------------------------ history
 
 /**
@@ -276,6 +296,8 @@ export interface HistoryHit {
   rows: number | null;
   elapsedMs: number;
   error: string | null;
+  /** "user" or "assistant" — where the statement came from. */
+  source: string;
   runs: number;
 }
 
@@ -394,6 +416,30 @@ export const api = {
   // --- the remembered session. Rust owns the file; the shape is ours.
   loadSession: () => invoke<SessionLoad>("load_session"),
   saveSession: (session: SessionStore) => invoke<void>("save_session", { session }),
+
+  // --- the assistant. It has no tools and no connection: it writes SQL into
+  // the editor and the user runs it, like every other generated-SQL path here.
+  assistantStatus: () => invoke<AssistantStatus>("assistant_status"),
+  /** `null` or "" forgets the key. Returns whether one is now stored. */
+  assistantSetKey: (key: string | null) => invoke<boolean>("assistant_set_key", { key }),
+  /**
+   * Stream one reply. Rejects only if the request never started; anything that
+   * goes wrong afterwards arrives as a `failed` event, so a partial answer
+   * already on screen is kept.
+   */
+  assistantSend: (
+    connectionId: string | null,
+    db: string | null,
+    messages: ChatMessage[],
+    onEvent: (e: AssistantEvent) => void,
+  ) => {
+    const channel = new Channel<AssistantEvent>();
+    channel.onmessage = onEvent;
+    return invoke<void>("assistant_send", { connectionId, db, messages, onEvent: channel });
+  },
+
+  /** Record that the assistant proposed this SQL, for history provenance. */
+  rememberProposal: (sql: string) => invoke<void>("remember_proposal", { sql }),
 
   // --- query history. Recorded in Rust at the one point every execution
   // passes through; never run from here, only inserted for the user to run.

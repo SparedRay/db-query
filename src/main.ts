@@ -28,6 +28,7 @@ import {
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
 import { createHistory } from "./history";
+import { createAssistant } from "./assistant";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -61,6 +62,18 @@ const els = {
   btnUpdate: $<HTMLButtonElement>("btn-update"),
   btnSettings: $<HTMLButtonElement>("btn-settings"),
   btnHistory: $<HTMLButtonElement>("btn-history"),
+  btnAssistant: $<HTMLButtonElement>("btn-assistant"),
+  assistantDialog: $<HTMLDialogElement>("assistant-dialog"),
+  chatLog: $<HTMLElement>("chat-log"),
+  chatInput: $<HTMLTextAreaElement>("chat-input"),
+  chatSend: $<HTMLButtonElement>("chat-send"),
+  chatClear: $<HTMLButtonElement>("chat-clear"),
+  chatClose: $<HTMLButtonElement>("chat-close"),
+  chatNote: $<HTMLElement>("chat-note"),
+  setAiKey: $<HTMLInputElement>("set-ai-key"),
+  setAiSave: $<HTMLButtonElement>("set-ai-save"),
+  setAiForget: $<HTMLButtonElement>("set-ai-forget"),
+  setAiNote: $<HTMLElement>("set-ai-note"),
   historyDialog: $<HTMLDialogElement>("history-dialog"),
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
@@ -1449,6 +1462,8 @@ files = createFileUx({
 //
 // Read before anything can be written, or the first keystroke would save an
 // empty session over the remembered one.
+void refreshAiNote();
+
 void session.boot().then((warning) => {
   if (warning) results.setMessage(warning);
 });
@@ -1563,6 +1578,74 @@ const history = createHistory({
 });
 
 els.btnHistory.onclick = () => void history.open();
+
+/**
+ * The assistant. It writes SQL; you run it — see `assistant.ts` and
+ * `assistant.rs` for why that is the design and not a limitation.
+ */
+const assistant = createAssistant({
+  dialog: els.assistantDialog,
+  log: els.chatLog,
+  input: els.chatInput,
+  send: els.chatSend,
+  clear: els.chatClear,
+  close: els.chatClose,
+  note: els.chatNote,
+  context: () => ({
+    connectionId: conns.active()?.profile.id ?? null,
+    db: tabs.active()?.activeDb ?? null,
+  }),
+  insert: (sql) => {
+    insertAtCursor(view, sql);
+    els.assistantDialog.close();
+    view.focus();
+  },
+  openInTab: (sql) => {
+    if (!tabs.activeConnection()) {
+      results.setMessage("Open a connection first — a script tab belongs to one.");
+      return;
+    }
+    tabs.create({ contents: sql });
+    els.assistantDialog.close();
+  },
+  // So history can say a statement came from the assistant rather than from you.
+  remember: (sql) => void api.rememberProposal(sql).catch(() => {}),
+});
+
+els.btnAssistant.onclick = () => void assistant.open();
+
+/** The API key. Written to the keychain; never read back out. */
+async function refreshAiNote() {
+  try {
+    const s = await api.assistantStatus();
+    els.setAiNote.textContent = s.configured
+      ? `A key is stored. Model: ${s.model}.`
+      : "No key stored — the assistant is off.";
+  } catch (err) {
+    els.setAiNote.textContent = String(err);
+  }
+}
+
+els.setAiSave.onclick = async () => {
+  try {
+    await api.assistantSetKey(els.setAiKey.value);
+    // Cleared immediately: the field exists to hand the key over, not to hold it.
+    els.setAiKey.value = "";
+    await refreshAiNote();
+  } catch (err) {
+    els.setAiNote.textContent = String(err);
+  }
+};
+
+els.setAiForget.onclick = async () => {
+  try {
+    await api.assistantSetKey(null);
+    els.setAiKey.value = "";
+    await refreshAiNote();
+  } catch (err) {
+    els.setAiNote.textContent = String(err);
+  }
+};
 
 els.setLicences.onclick = async () => {
   els.setLicences.disabled = true;
@@ -1709,9 +1792,19 @@ window.addEventListener("keydown", (e) => {
   // Any open dialog owns the keyboard. Ctrl+T inside the connection form should
   // not open a tab behind it, and `showModal()` on an already-open dialog
   // throws — which is what Ctrl+H would otherwise do to the history list.
-  if (els.dialog.open || els.settingsDialog.open || els.historyDialog.open) return;
+  if (
+    els.dialog.open ||
+    els.settingsDialog.open ||
+    els.historyDialog.open ||
+    els.assistantDialog.open
+  ) {
+    return;
+  }
 
-  if (e.key === "h" || e.key === "H") {
+  if (e.key === "k" || e.key === "K") {
+    e.preventDefault();
+    void assistant.open();
+  } else if (e.key === "h" || e.key === "H") {
     e.preventDefault();
     void history.open();
   } else if (e.key === "t" || e.key === "T") {

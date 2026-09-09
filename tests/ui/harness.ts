@@ -75,6 +75,8 @@ export const baseBackend: Backend = {
   // Every run records history; every boot may open the dialog. Stubbed empty so
   // no other test has to think about it.
   history_search: () => [],
+  assistant_status: () => ({ configured: false, model: "claude-opus-5" }),
+  remember_proposal: () => null,
   history_clear: () => null,
 };
 
@@ -110,8 +112,17 @@ export async function installBackend(page: Page, backend: Backend = {}) {
       const calls: Array<{ cmd: string; args: unknown }> = [];
       (window as unknown as Record<string, unknown>).__CALLS__ = calls;
 
-      // Registered Tauri event listeners, so a test can fire one.
-      const listeners: Array<{ event: string; handler: (e: unknown) => unknown }> = [];
+      // Every callback the app hands to Tauri, by id.
+      //
+      // The real runtime returns an integer from `transformCallback` and calls
+      // back by id. Returning the function itself was simpler, but it made
+      // streaming untestable: `Channel` is built entirely on that id, and a
+      // function cannot travel through invoke args — Playwright cannot
+      // serialise one.
+      let callbackSeq = 0;
+      const callbacks: Record<number, (arg: unknown) => unknown> = {};
+      const listeners: Array<{ event: string; id: number }> = [];
+
       // Dispatch without awaiting the handler. A close-requested handler that
       // opens a dialog does not settle until someone answers it — awaiting here
       // would deadlock the very test that wants to see the dialog.
@@ -120,8 +131,26 @@ export async function installBackend(page: Page, backend: Backend = {}) {
         payload: unknown,
       ) => {
         for (const l of listeners) {
-          if (l.event === event) void l.handler({ event, id: 0, payload });
+          if (l.event === event) void callbacks[l.id]?.({ event, id: 0, payload });
         }
+      };
+
+      // Push one message into a `Channel`.
+      //
+      // The index is kept here, per channel, rather than asked of the caller.
+      // `Channel` buffers out-of-order messages and silently holds anything
+      // arriving before the index it is waiting for — so a test that sent a
+      // second batch starting from zero would simply see nothing, with no
+      // error. Counting here makes that impossible, and matches the runtime,
+      // where Rust owns the counter.
+      const channelIndex: Record<number, number> = {};
+      (window as unknown as Record<string, unknown>).__CHANNEL_SEND__ = (
+        id: number,
+        message: unknown,
+      ) => {
+        const index = channelIndex[id] ?? 0;
+        channelIndex[id] = index + 1;
+        callbacks[id]?.({ index, message });
       };
       (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         // The shape `@tauri-apps/api/mocks` installs. Without it,
@@ -131,7 +160,11 @@ export async function installBackend(page: Page, backend: Backend = {}) {
           currentWindow: { label: "main" },
           currentWebview: { windowLabel: "main", label: "main" },
         },
-        transformCallback: (cb: unknown) => cb,
+        transformCallback: (cb: unknown) => {
+          const id = ++callbackSeq;
+          callbacks[id] = cb as (arg: unknown) => unknown;
+          return id;
+        },
         unregisterCallback: () => {},
         convertFileSrc: (p: string) => p,
         invoke: async (cmd: string, args: Record<string, unknown>) => {
@@ -141,10 +174,7 @@ export async function installBackend(page: Page, backend: Backend = {}) {
             // are how quitting reaches the app, and the close handler is where
             // unsaved work is decided. Everything else is inert.
             if (cmd === "plugin:event|listen") {
-              listeners.push({
-                event: String(args.event),
-                handler: args.handler as (e: unknown) => unknown,
-              });
+              listeners.push({ event: String(args.event), id: Number(args.handler) });
               return 0;
             }
             if (cmd.startsWith("plugin:")) return 0;
@@ -342,5 +372,46 @@ export async function fireEvent(page: Page, event: string, payload: unknown = nu
     ([event, payload]) =>
       (window as unknown as { __FIRE__: (e: string, p: unknown) => void }).__FIRE__(event, payload),
     [event, payload] as [string, unknown],
+  );
+}
+
+/**
+ * Push messages into the `Channel` an invoke was given.
+ *
+ * `cmd` names the command whose most recent call carried the channel. The
+ * channel arrives in the args as `__CHANNEL__:<id>` — the same shape the real
+ * runtime sends — so this reads the id back out of what the app actually sent,
+ * rather than out of a stub.
+ */
+export async function sendOnChannel(
+  page: Page,
+  cmd: string,
+  argName: string,
+  messages: unknown[],
+) {
+  const all = (await calls(page)).filter((c) => c.cmd === cmd);
+  const last = all[all.length - 1];
+  if (!last) throw new Error(`no call to ${cmd} to answer`);
+  // Two shapes, because two things serialise it. The live runtime calls the
+  // channel's `toJSON` and sends `__CHANNEL__:<id>`; reading `__CALLS__` back
+  // out of the page structured-clones the object instead, which keeps its
+  // public `id` and drops the rest. Accept either rather than depend on which.
+  const arg = last.args[argName] as unknown;
+  const id =
+    typeof arg === "string"
+      ? Number(arg.replace("__CHANNEL__:", ""))
+      : Number((arg as { id?: number } | null)?.id);
+  if (!id) {
+    throw new Error(`${cmd}.${argName} was not a channel: ${JSON.stringify(arg)}`);
+  }
+
+  await page.evaluate(
+    ([id, messages]) => {
+      const send = (window as unknown as {
+        __CHANNEL_SEND__: (i: number, m: unknown) => void;
+      }).__CHANNEL_SEND__;
+      for (const m of messages as unknown[]) send(id as number, m);
+    },
+    [id, messages] as [number, unknown[]],
   );
 }

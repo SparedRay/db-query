@@ -28,6 +28,7 @@ function hit(over: Record<string, unknown> = {}) {
     rows: 12,
     elapsedMs: 4,
     error: null,
+    source: "user",
     runs: 1,
     ...over,
   };

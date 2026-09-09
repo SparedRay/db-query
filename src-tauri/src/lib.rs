@@ -1,5 +1,6 @@
 //! Command surface and state registration.
 
+pub mod assistant;
 pub mod decode;
 pub mod exec;
 pub mod export;
@@ -298,6 +299,7 @@ pub async fn remember(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
+    let proposals = state.proposals.lock().await;
     let entries: Vec<history::Entry> = result
         .statements
         .iter()
@@ -310,6 +312,7 @@ pub async fn remember(
             history::Entry {
                 at,
                 connection_id: connection_id.clone(),
+                source: source_of(&proposals, &s.sql),
                 database: database.clone(),
                 sql: s.sql.clone(),
                 kind: serde_json::to_value(s.kind)
@@ -324,7 +327,156 @@ pub async fn remember(
         })
         .collect();
 
+    drop(proposals);
     let _ = history::record(dir, &entries);
+}
+
+/// Whose statement is this?
+///
+/// Exact text only. If you edited what the assistant offered before running it,
+/// it is yours — which is both the honest answer and the one that needs no
+/// fuzzy matching to reach.
+fn source_of(proposals: &assistant::Proposals, sql: &str) -> String {
+    if proposals.contains(sql) {
+        "assistant".into()
+    } else {
+        "user".into()
+    }
+}
+
+// ----------------------------------------------------------------- assistant
+//
+// An assistant that writes SQL for the user to read. It has no tools and no
+// connection: see `assistant.rs` for why that is the design rather than a
+// limitation.
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantStatus {
+    /// True when a key is in the keychain. The key itself never comes back out.
+    configured: bool,
+    model: String,
+}
+
+#[tauri::command]
+fn assistant_status() -> AssistantStatus {
+    AssistantStatus {
+        configured: secrets::has_stored(assistant::KEY_ID),
+        model: assistant::MODEL.to_string(),
+    }
+}
+
+/// Store or forget the API key. `None` (or empty) forgets it.
+///
+/// Same three-way shape and the same store as a database password: the OS
+/// credential store, never a config file.
+#[tauri::command]
+fn assistant_set_key(key: Option<String>) -> Result<bool, String> {
+    match key.map(|k| k.trim().to_string()) {
+        Some(k) if !k.is_empty() => {
+            secrets::store(assistant::KEY_ID, &secrets::Secret::new(k)).map_err(|e| e.0)?;
+            Ok(true)
+        }
+        _ => {
+            secrets::delete(assistant::KEY_ID).map_err(|e| e.0)?;
+            Ok(false)
+        }
+    }
+}
+
+/// Remember that the assistant proposed this SQL.
+///
+/// Called when the user accepts a block into the editor — not when the model
+/// writes one. A statement the assistant offered and you never used is not part
+/// of your history, and should not be recorded as though it were.
+#[tauri::command]
+async fn remember_proposal(state: State<'_, AppState>, sql: String) -> Result<(), String> {
+    state.proposals.lock().await.remember(&sql);
+    Ok(())
+}
+
+/// Stream one reply.
+///
+/// Errors after the request has started are sent **as events**, not returned:
+/// by then there may be half an answer on screen, and throwing it away to show
+/// an error loses the more useful half.
+#[tauri::command]
+async fn assistant_send(
+    state: State<'_, AppState>,
+    connection_id: Option<String>,
+    db: Option<String>,
+    messages: Vec<assistant::ChatMessage>,
+    on_event: tauri::ipc::Channel<assistant::StreamEvent>,
+) -> Result<(), String> {
+    let Some(key) = secrets::load(assistant::KEY_ID).map_err(|e| e.0)? else {
+        return Err("No API key is set. Add one in Settings to use the assistant.".into());
+    };
+
+    // Schema, when there is a live connection to take it from. Names and types
+    // only — `render_schema` cannot see row data, by construction.
+    let (server_version, schema_text) = match &connection_id {
+        Some(id) => match session::server(&state, id).await {
+            Ok(server) => {
+                let version = server.server_version.clone();
+                let text = match &db {
+                    Some(db) => server
+                        .schema_cache
+                        .lock()
+                        .await
+                        .get(db)
+                        .map(|s| assistant::render_schema(db, s)),
+                    None => None,
+                };
+                (version, text)
+            }
+            Err(_) => ("unknown".to_string(), None),
+        },
+        None => ("unknown".to_string(), None),
+    };
+
+    let system = assistant::system_prompt(&server_version, schema_text.as_deref());
+    let body = assistant::request(assistant::MODEL, &system, &messages);
+
+    let response = reqwest::Client::new()
+        .post(assistant::API_URL)
+        .header("x-api-key", key.expose())
+        .header("anthropic-version", assistant::API_VERSION)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach the API: {e}"))?;
+
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        // Returned rather than sent as an event: nothing has been shown yet.
+        return Err(assistant::http_error(status, &text));
+    }
+
+    let mut response = response;
+    let mut decoder = assistant::SseDecoder::default();
+    loop {
+        match response.chunk().await {
+            Ok(Some(bytes)) => {
+                // Lossy on purpose: a multi-byte character split across chunks
+                // must not abort a reply. The decoder buffers whole events, so
+                // the only cost is a replacement char in the rare split case.
+                let chunk = String::from_utf8_lossy(&bytes);
+                for event in decoder.push(&chunk) {
+                    let _ = on_event.send(event);
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = on_event.send(assistant::StreamEvent::Failed {
+                    message: format!("The reply was cut off: {e}"),
+                });
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Newest first, deduplicated by statement, optionally filtered.
@@ -981,6 +1133,10 @@ pub fn run() {
             routine_ddl,
             table_ddl,
             third_party_licenses,
+            assistant_status,
+            assistant_set_key,
+            assistant_send,
+            remember_proposal,
             history_search,
             history_clear,
             load_session,

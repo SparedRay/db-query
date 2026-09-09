@@ -16,6 +16,7 @@ decisions that were corrected along the way.
 | 7 | [Session persistence](stage-7-session-persistence.md) | 🔒 **Frozen** — tabs restore on connect, S1-S8 tested; hands-on confirmation carried to Stage 8 |
 | 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 🚧 **In progress** — licence notices ship and are readable in-app; publishing and proving the updater still open |
 | 9 | [Query history](stage-9-query-history.md) | 🚧 **In progress** — recorded, searchable and safe; hands-on confirmation pending |
+| 10 | [An assistant that writes SQL](stage-10-assistant.md) | 🚧 **Experimental** — proposes SQL, never runs it; unverified against the real API |
 
 ## Rules
 

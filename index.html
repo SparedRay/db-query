@@ -10,6 +10,7 @@
     <div id="app">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
+        <button id="btn-assistant" class="rail-cog" type="button" title="Ask the assistant (Ctrl+K)">✦</button>
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)">↺</button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings">⚙</button>
       </div>
@@ -106,6 +107,22 @@
           <input type="number" id="set-browse" min="1" max="1000000" step="100" />
         </label>
         <p class="hint">Applied at startup; the controls above the editor still win for this session.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Assistant</legend>
+        <label>Anthropic API key
+          <input type="password" id="set-ai-key" placeholder="sk-ant-…" autocomplete="off" />
+        </label>
+        <div class="ai-key-actions">
+          <button type="button" id="set-ai-save" class="mini">Save key</button>
+          <button type="button" id="set-ai-forget" class="mini">Forget key</button>
+        </div>
+        <p class="hint" id="set-ai-note">Checking…</p>
+        <p class="hint">Stored in your system keychain, never in a config file.
+          The assistant writes SQL for you to review and run — it cannot execute
+          anything itself. Your schema's table and column names are sent with
+          each question; row data never is.</p>
       </fieldset>
 
       <fieldset>
@@ -209,6 +226,18 @@
           <button value="ok" id="conn-ok">Connect</button>
         </menu>
       </form>
+    </dialog>
+
+    <dialog id="assistant-dialog">
+      <h2>Assistant</h2>
+      <p class="hint" id="chat-note">Checking…</p>
+      <div id="chat-log" class="chat-log"></div>
+      <textarea id="chat-input" rows="3" placeholder="Ask about your schema, or describe the query you want…"></textarea>
+      <menu>
+        <button type="button" id="chat-clear">Clear</button>
+        <button type="button" id="chat-send" class="primary">Send</button>
+        <button type="button" id="chat-close">Close</button>
+      </menu>
     </dialog>
 
     <dialog id="history-dialog">

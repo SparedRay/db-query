@@ -74,6 +74,9 @@ export function createHistory(deps: HistoryDeps) {
       bits.push({ text: `${hit.rows} row${hit.rows === 1 ? "" : "s"}` });
     }
     bits.push({ text: `${hit.elapsedMs} ms` });
+    // Where it came from. Shown only for the assistant: "user" is the default
+    // and labelling every ordinary statement would be noise.
+    if (hit.source === "assistant") bits.push({ text: "from the assistant" });
     if (hit.runs > 1) bits.push({ text: `run ${hit.runs}×` });
     for (const b of bits) {
       const span = document.createElement("span");

@@ -58,6 +58,21 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 tauri-plugin-updater = "2.11.0"
 
+# The Anthropic API client. **No new crates**: reqwest is already linked via
+# `tauri-plugin-updater`, and these are exactly the features that plugin asks
+# for, so cargo unifies them into the build that already exists. Measured, not
+# assumed — the crate count is unchanged.
+#
+# `rustls-no-provider` rather than `rustls` on purpose: `rustls` pulls
+# `aws-lc-rs`, which is a new crypto crate *and* needs cmake and NASM to build,
+# which would land on Windows CI. The updater plugin already installs rustls
+# with the `ring` provider, and that is the provider this uses.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-no-provider",
+] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

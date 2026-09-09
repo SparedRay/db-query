@@ -51,6 +51,17 @@ pub struct Entry {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub error: Option<String>,
+    /// "user" or "assistant" — where the statement came from.
+    ///
+    /// Defaulted so history written before the assistant existed still reads,
+    /// and so the *absence* of provenance means "yours", which is the safe
+    /// direction: nothing gets attributed to the assistant by accident.
+    #[serde(default = "default_source")]
+    pub source: String,
+}
+
+fn default_source() -> String {
+    "user".into()
 }
 
 /// One row of the history list: the newest run of a given statement, plus how
@@ -262,6 +273,7 @@ mod tests {
             rows: Some(1),
             elapsed_ms: 3,
             error: None,
+            source: "user".into(),
         }
     }
 
@@ -429,5 +441,20 @@ mod tests {
         assert_eq!(kept.len(), KEEP_ENTRIES);
         assert_eq!(kept.last().unwrap().at, KEEP_ENTRIES as u64 + 10);
         assert!(kept.iter().all(|e| e.at > 10), "the oldest were dropped");
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// History written before the assistant existed has no `source`. It must
+    /// still read, and must read as the user's — never as the assistant's.
+    #[test]
+    fn an_entry_with_no_source_is_the_users() {
+        let line = r#"{"at":1,"connectionId":"c1","database":null,"sql":"SELECT 1",
+            "kind":"select","status":"ok","rows":1,"elapsedMs":2}"#;
+        let e: Entry = serde_json::from_str(&line.replace('\n', "")).unwrap();
+        assert_eq!(e.source, "user");
     }
 }

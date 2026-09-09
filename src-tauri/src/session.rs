@@ -203,6 +203,10 @@ pub struct AppState {
     pub connections: Mutex<HashMap<ConnectionId, Arc<ServerConn>>>,
     /// Flat, because a tab already knows its server.
     pub tabs: Mutex<HashMap<TabId, Arc<TabSession>>>,
+    /// SQL the assistant proposed this session, so history can say where a
+    /// statement came from. In memory only: provenance is a fact about this
+    /// run, and a stale proposal file would start mislabelling things.
+    pub proposals: Mutex<crate::assistant::Proposals>,
 }
 
 /// sqlx errors are verbose and full of internals. Surface the part a human
