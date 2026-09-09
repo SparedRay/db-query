@@ -58,6 +58,11 @@ const lintCompartment = new Compartment();
  */
 const themeRules = {
   "&": { height: "100%", backgroundColor: "var(--bg)", color: "var(--fg)" },
+  // Currently inert, and kept deliberately: `drawSelection` forces
+  // `caret-color: transparent !important` on `.cm-content` and paints the
+  // caret itself as `.cm-cursor`, whose colour comes from CodeMirror's base
+  // theme (black / #ddd, both of which are right here — measured). This is the
+  // fallback if `drawSelection` is ever removed.
   ".cm-content": { caretColor: "var(--fg)" },
   ".cm-gutters": {
     backgroundColor: "var(--bg-raised)",
@@ -66,9 +71,26 @@ const themeRules = {
   },
   ".cm-activeLine": { backgroundColor: "var(--bg-row-hover)" },
   ".cm-activeLineGutter": { backgroundColor: "var(--chip-bg)" },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-    backgroundColor: "var(--sel-header-bg)",
+  // Selection, at the specificity CodeMirror's own base theme uses.
+  //
+  // This was written as `&.cm-focused .cm-selectionBackground` and **never
+  // applied**: the base theme's rule is
+  // `&dark.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`
+  // — five classes to our three — so it won every time, and a focused selection
+  // was drawn in its default `#233`. On the light theme that is a visible (if
+  // wrong) lavender; on the dark theme it is #233 on a #16181d background,
+  // which is to say invisible. Select-all looked like it did nothing.
+  //
+  // Matching the selector shape exactly is what fixes it, and the reason the
+  // long form is written out rather than tidied: it is not decoration, it is
+  // the specificity. `selection_is_visible_in_both_themes` measures the result.
+  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    backgroundColor: "var(--sel-editor-bg)",
   },
+  // The editor is not focused — clicking into the grid, say. Two classes,
+  // because the base theme's blurred rule (`&dark .cm-selectionBackground`)
+  // has two. Dimmer, so it reads as "this was selected" rather than "this is".
+  "& .cm-selectionBackground": { backgroundColor: "var(--sel-editor-bg-blur)" },
 } as const;
 
 const darkTheme = EditorView.theme(themeRules, { dark: true });
