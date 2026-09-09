@@ -15,6 +15,7 @@ decisions that were corrected along the way.
 | 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 🔒 **Frozen** — updater built and version taken from the tag; never run against a published release, attribution still not shipped |
 | 7 | [Session persistence](stage-7-session-persistence.md) | 🔒 **Frozen** — tabs restore on connect, S1-S8 tested; hands-on confirmation carried to Stage 8 |
 | 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 🚧 **In progress** — licence notices ship and are readable in-app; publishing and proving the updater still open |
+| 9 | [Query history](stage-9-query-history.md) | 🚧 **In progress** — recorded, searchable and safe; hands-on confirmation pending |
 
 ## Rules
 

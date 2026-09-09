@@ -27,6 +27,7 @@ import {
 } from "./connections";
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
+import { createHistory } from "./history";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -59,6 +60,13 @@ const els = {
   btnExport: $<HTMLButtonElement>("btn-export"),
   btnUpdate: $<HTMLButtonElement>("btn-update"),
   btnSettings: $<HTMLButtonElement>("btn-settings"),
+  btnHistory: $<HTMLButtonElement>("btn-history"),
+  historyDialog: $<HTMLDialogElement>("history-dialog"),
+  histSearch: $<HTMLInputElement>("hist-search"),
+  histThisConn: $<HTMLInputElement>("hist-this-conn"),
+  histList: $<HTMLElement>("hist-list"),
+  histClear: $<HTMLButtonElement>("hist-clear"),
+  histClose: $<HTMLButtonElement>("hist-close"),
   settingsDialog: $<HTMLDialogElement>("settings-dialog"),
   setTheme: $<HTMLSelectElement>("set-theme"),
   setFont: $<HTMLSelectElement>("set-font"),
@@ -1525,6 +1533,37 @@ els.setClose.onclick = () => els.settingsDialog.close();
  * rather than a browser because that dialog is already scrollable, already
  * escapes its content, and already closes on Escape.
  */
+/**
+ * Query history. Reading only — choosing a statement puts it in the editor and
+ * stops there, like every other generated-SQL path in this app.
+ */
+const history = createHistory({
+  dialog: els.historyDialog,
+  search: els.histSearch,
+  thisConnectionOnly: els.histThisConn,
+  list: els.histList,
+  clear: els.histClear,
+  close: els.histClose,
+  activeConnection: () => conns.active()?.profile.id ?? null,
+  insert: (sql) => {
+    insertAtCursor(view, sql);
+    view.focus();
+  },
+  openInTab: (sql) => {
+    // A tab must belong to a connection, so without one there is nowhere to put
+    // it — say so rather than throwing.
+    if (!tabs.activeConnection()) {
+      results.setMessage("Open a connection first — a script tab belongs to one.");
+      return;
+    }
+    tabs.create({ contents: sql });
+  },
+  copy: (sql) => void copyText(sql),
+  notify: (m) => results.setMessage(m),
+});
+
+els.btnHistory.onclick = () => void history.open();
+
 els.setLicences.onclick = async () => {
   els.setLicences.disabled = true;
   try {
@@ -1667,10 +1706,15 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 // focus. Ctrl+W in particular must be intercepted or the webview may act on it.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-  const inDialog = els.dialog.open;
-  if (inDialog) return;
+  // Any open dialog owns the keyboard. Ctrl+T inside the connection form should
+  // not open a tab behind it, and `showModal()` on an already-open dialog
+  // throws — which is what Ctrl+H would otherwise do to the history list.
+  if (els.dialog.open || els.settingsDialog.open || els.historyDialog.open) return;
 
-  if (e.key === "t" || e.key === "T") {
+  if (e.key === "h" || e.key === "H") {
+    e.preventDefault();
+    void history.open();
+  } else if (e.key === "t" || e.key === "T") {
     e.preventDefault();
     tabs.create();
   } else if (e.key === "w" || e.key === "W") {

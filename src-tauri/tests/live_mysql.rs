@@ -1855,3 +1855,140 @@ async fn the_connection_survives_a_streaming_export() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ------------------------------------------------- query history, end to end
+//
+// `history.rs` is unit tested against synthetic entries. The question those
+// cannot answer is whether *running a script actually records it* — the wiring
+// between execution and the store, with real outcomes, real timings and a real
+// current database.
+
+/// A scratch config directory, so a test never touches the real history file.
+fn history_dir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("db-query-live-hist-{name}-{stamp}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+#[ignore]
+async fn running_a_script_records_each_statement() {
+    let state = connected().await;
+    let dir = history_dir("record");
+
+    let result = exec::run_script(
+        &state,
+        T,
+        "SELECT 1 AS a; SELECT * FROM poc.users LIMIT 2;",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    db_query_lib::remember(&dir, &state, T, &result).await;
+
+    let hits = db_query_lib::history::search(&dir, None, None, 50);
+    assert_eq!(hits.len(), 2, "both statements recorded");
+
+    // Newest first, and the SQL is what was typed.
+    assert!(hits[0].entry.sql.contains("users"));
+    assert_eq!(hits[0].entry.status, "ok");
+    assert_eq!(hits[0].entry.connection_id, C);
+    assert_eq!(hits[0].entry.rows, Some(2), "the real row count is kept");
+
+    session::disconnect(&state, C).await.unwrap();
+}
+
+/// A failure is often exactly the statement you are trying to find again, so it
+/// is recorded with the server's own message.
+#[tokio::test]
+#[ignore]
+async fn a_failed_statement_is_recorded_with_its_error() {
+    let state = connected().await;
+    let dir = history_dir("failed");
+
+    let result = exec::run_script(&state, T, "SELECT * FROM poc.no_such_table", false, None)
+        .await
+        .unwrap();
+    db_query_lib::remember(&dir, &state, T, &result).await;
+
+    let hits = db_query_lib::history::search(&dir, None, None, 50);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].entry.status, "error");
+    let message = hits[0].entry.error.clone().expect("an error message");
+    assert!(message.contains("no_such_table"), "got {message}");
+
+    session::disconnect(&state, C).await.unwrap();
+}
+
+/// Auto-LIMIT rewrites the statement before sending it. What gets recorded must
+/// be what the **user wrote** — handing back our rewrite later, as though they
+/// had typed it, is a small lie that compounds every time it is re-run.
+#[tokio::test]
+#[ignore]
+async fn history_keeps_the_users_sql_not_our_rewrite() {
+    let state = connected().await;
+    let dir = history_dir("rewrite");
+
+    let result = exec::run_script(&state, T, "SELECT * FROM poc.users", true, None)
+        .await
+        .unwrap();
+    assert!(
+        result.statements[0].effective_sql.is_some(),
+        "this test is pointless unless auto-LIMIT actually rewrote the statement"
+    );
+    db_query_lib::remember(&dir, &state, T, &result).await;
+
+    let hits = db_query_lib::history::search(&dir, None, None, 50);
+    assert_eq!(hits[0].entry.sql, "SELECT * FROM poc.users");
+    assert!(!hits[0].entry.sql.to_ascii_uppercase().contains("LIMIT"));
+
+    session::disconnect(&state, C).await.unwrap();
+}
+
+/// The rule that matters most, proved against a real server: a password typed
+/// into the editor never reaches the disk.
+#[tokio::test]
+#[ignore]
+async fn a_credential_statement_is_never_written_down() {
+    let state = connected().await;
+    let dir = history_dir("secret");
+
+    // Deliberately invalid so it fails rather than creating anything; the point
+    // is what gets recorded, and a failed statement is recorded too.
+    let result = exec::run_script(
+        &state,
+        T,
+        "CREATE USER 'zz_hist_probe'@'%' IDENTIFIED BY 'zzSECRETzz-do-not-leak'; SELECT 1;",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    db_query_lib::remember(&dir, &state, T, &result).await;
+
+    let path = db_query_lib::history::path_in(&dir);
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        !raw.contains("zzSECRETzz-do-not-leak"),
+        "a password reached the history file"
+    );
+    assert!(!raw.contains("IDENTIFIED BY"));
+    // The innocent statement beside it is still recorded.
+    assert!(raw.contains("SELECT 1"));
+
+    // Clean up if the CREATE USER actually succeeded.
+    let _ = exec::run_script(
+        &state,
+        T,
+        "DROP USER IF EXISTS 'zz_hist_probe'@'%'",
+        false,
+        None,
+    )
+    .await;
+    session::disconnect(&state, C).await.unwrap();
+}

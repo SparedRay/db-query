@@ -4,6 +4,7 @@ pub mod decode;
 pub mod exec;
 pub mod export;
 pub mod files;
+pub mod history;
 pub mod lint;
 pub mod profiles;
 pub mod schema;
@@ -250,13 +251,104 @@ async fn tab_status(state: State<'_, AppState>, tab_id: String) -> Result<TabSta
 
 #[tauri::command]
 async fn run_script(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     tab_id: String,
     sql: String,
     auto_limit: bool,
     timeout_secs: Option<u64>,
 ) -> Result<ScriptResult, String> {
-    exec::run_script(&state, &tab_id, &sql, auto_limit, timeout_secs).await
+    let result = exec::run_script(&state, &tab_id, &sql, auto_limit, timeout_secs).await?;
+    if let Ok(dir) = config_dir(&app) {
+        remember(&dir, &state, &tab_id, &result).await;
+    }
+    Ok(result)
+}
+
+/// Write what just ran into the history file.
+///
+/// **Recorded here rather than inside `exec::run_script`** so that execution
+/// owns no opinion about a config directory, and so that a history failure
+/// cannot fail a query. Everything is best-effort and silent: the worst case is
+/// a statement missing from a list, and interrupting someone's work to say so
+/// would be a far worse trade.
+///
+/// Recorded from Rust rather than from the frontend because this is the single
+/// point every execution passes through. The `sql` stored is what the user
+/// wrote, never `effective_sql` — an auto-LIMIT we added is ours, and handing
+/// it back later as though they had typed it would be a small lie that
+/// compounds every time the statement is re-run.
+/// Takes a directory rather than an `AppHandle` so the live suite can drive it
+/// against a real database — the Tauri layer is the one place a test cannot go,
+/// and "does running a script actually record it" is the question that matters.
+pub async fn remember(
+    dir: &std::path::Path,
+    state: &AppState,
+    tab_id: &str,
+    result: &ScriptResult,
+) {
+    let Ok(tab) = session::tab(state, tab_id).await else {
+        return;
+    };
+    let connection_id = tab.server.id().to_string();
+    let database = tab.current_db.lock().await.clone();
+
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let entries: Vec<history::Entry> = result
+        .statements
+        .iter()
+        .map(|s| {
+            let (status, rows, error) = match &s.outcome {
+                exec::Outcome::Rows { rows, .. } => ("ok", Some(rows.len() as u64), None),
+                exec::Outcome::Affected { rows } => ("ok", Some(*rows), None),
+                exec::Outcome::Error { message } => ("error", None, Some(message.clone())),
+            };
+            history::Entry {
+                at,
+                connection_id: connection_id.clone(),
+                database: database.clone(),
+                sql: s.sql.clone(),
+                kind: serde_json::to_value(s.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "other".into()),
+                status: status.into(),
+                rows,
+                elapsed_ms: s.elapsed_ms,
+                error,
+            }
+        })
+        .collect();
+
+    let _ = history::record(dir, &entries);
+}
+
+/// Newest first, deduplicated by statement, optionally filtered.
+#[tauri::command]
+fn history_search(
+    app: tauri::AppHandle,
+    query: Option<String>,
+    connection_id: Option<String>,
+    limit: usize,
+) -> Result<Vec<history::Hit>, String> {
+    let dir = config_dir(&app)?;
+    Ok(history::search(
+        &dir,
+        query.as_deref(),
+        connection_id.as_deref(),
+        limit.clamp(1, 1000),
+    ))
+}
+
+/// Forget everything, or everything for one connection. Only ever called after
+/// the user says yes.
+#[tauri::command]
+fn history_clear(app: tauri::AppHandle, connection_id: Option<String>) -> Result<(), String> {
+    history::clear(&config_dir(&app)?, connection_id.as_deref())
 }
 
 #[tauri::command]
@@ -889,6 +981,8 @@ pub fn run() {
             routine_ddl,
             table_ddl,
             third_party_licenses,
+            history_search,
+            history_clear,
             load_session,
             save_session,
             app_defaults,

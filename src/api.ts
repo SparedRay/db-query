@@ -258,6 +258,27 @@ export interface FileTypeSpec {
   dialect: string;
 }
 
+// ------------------------------------------------------------------ history
+
+/**
+ * One statement in the history list — the newest run of it, plus how often it
+ * has been run. `sql` is always what the user wrote, never a rewritten form.
+ */
+export interface HistoryHit {
+  /** Unix milliseconds. */
+  at: number;
+  connectionId: string;
+  database: string | null;
+  sql: string;
+  kind: StatementKind;
+  /** "ok" | "error" — a failed statement is often the one worth finding. */
+  status: string;
+  rows: number | null;
+  elapsedMs: number;
+  error: string | null;
+  runs: number;
+}
+
 // ------------------------------------------------------------------ session
 
 /**
@@ -373,6 +394,13 @@ export const api = {
   // --- the remembered session. Rust owns the file; the shape is ours.
   loadSession: () => invoke<SessionLoad>("load_session"),
   saveSession: (session: SessionStore) => invoke<void>("save_session", { session }),
+
+  // --- query history. Recorded in Rust at the one point every execution
+  // passes through; never run from here, only inserted for the user to run.
+  historySearch: (query: string, connectionId: string | null, limit = 200) =>
+    invoke<HistoryHit[]>("history_search", { query, connectionId, limit }),
+  historyClear: (connectionId: string | null) =>
+    invoke<void>("history_clear", { connectionId }),
 
   /**
    * The licence notices this build ships. Generated per target at package time;

@@ -10,6 +10,7 @@
     <div id="app">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
+        <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)">↺</button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings">⚙</button>
       </div>
 
@@ -208,6 +209,22 @@
           <button value="ok" id="conn-ok">Connect</button>
         </menu>
       </form>
+    </dialog>
+
+    <dialog id="history-dialog">
+      <h2>Query history</h2>
+      <div class="hist-controls">
+        <input type="search" id="hist-search" placeholder="Search statements…" autocomplete="off" />
+        <label class="toggle"><input type="checkbox" id="hist-this-conn" checked /> This connection only</label>
+      </div>
+      <div id="hist-list" class="hist-list" tabindex="-1"></div>
+      <p class="hint" id="hist-note">
+        Statements that set a credential are never recorded.
+      </p>
+      <menu>
+        <button type="button" id="hist-clear" class="danger">Clear history…</button>
+        <button type="button" id="hist-close" class="primary">Close</button>
+      </menu>
     </dialog>
 
     <script type="module" src="/src/main.ts"></script>

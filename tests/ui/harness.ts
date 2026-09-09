@@ -72,6 +72,10 @@ export const baseBackend: Backend = {
   lint_sql: () => [],
   tab_status: () => ({ connected: false, running: false, currentDatabase: null, connectionId: 0 }),
   list_connections: () => [],
+  // Every run records history; every boot may open the dialog. Stubbed empty so
+  // no other test has to think about it.
+  history_search: () => [],
+  history_clear: () => null,
 };
 
 /**

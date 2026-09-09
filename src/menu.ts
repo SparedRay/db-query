@@ -10,6 +10,10 @@
  *   * **Escape closes it.** A menu with no keyboard exit is a trap.
  *   * **It must be clamped to the viewport**, which can only be measured once
  *     it is attached.
+ *   * **A modal dialog owns the screen.** `showModal()` puts the dialog in the
+ *     browser's top layer, above everything in the normal stacking order — so a
+ *     menu appended to `document.body` is *painted* but not reachable: the
+ *     dialog swallows the click. It has to be appended inside the dialog.
  *
  * One implementation, so the next fix lands everywhere — the same move
  * `choose()` made into `dialog.ts`.
@@ -54,7 +58,11 @@ export function contextMenu(e: MouseEvent, items: MenuItem[]) {
     menu.append(b);
   }
 
-  document.body.append(menu);
+  // Inside the open modal, when there is one. No z-index can lift an element
+  // out of the normal stacking order and into the top layer; being a descendant
+  // of the dialog is the only way in.
+  const host = document.querySelector("dialog[open]") ?? document.body;
+  host.append(menu);
 
   // Measurable only once attached, which is why this runs after the append.
   const box = menu.getBoundingClientRect();
