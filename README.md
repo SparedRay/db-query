@@ -78,6 +78,9 @@ mise run test       # offline tests: no database or keychain needed
 mise run db-up      # start and seed the MySQL 8 fixture container
 mise run test-live  # tests needing the fixture and a keychain
 mise run db-down    # tear the fixture down
+mise run es-up      # start and seed the Elasticsearch fixture
+mise run test-es    # tests needing that fixture
+mise run es-down    # tear it down
 ```
 
 ## Third-party licences
@@ -117,7 +120,10 @@ number — `mise run set-version 0.2.0`.
 
 ## Targets
 
-MySQL **8.0+**. TLS verifies the CA chain and hostname by default; the
+MySQL **8.0+**, and **Elasticsearch SQL** (`POST /_sql`) — read-only, since that
+is all the engine's SQL surface offers.
+
+MySQL TLS verifies the CA chain and hostname by default; the
 connection form has an "allow invalid certificates" toggle for internal servers
 with self-signed certs, which drops to encrypted-but-unverified — never to
 plaintext.

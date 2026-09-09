@@ -2,12 +2,15 @@
 
 pub mod assistant;
 pub mod decode;
+pub mod elastic;
 pub mod engine;
 pub mod exec;
 pub mod export;
 pub mod files;
 pub mod history;
+pub mod httpsql;
 pub mod lint;
+pub mod mysql;
 pub mod profiles;
 pub mod schema;
 pub mod secrets;
@@ -408,6 +411,10 @@ async fn remember_proposal(state: State<'_, AppState>, sql: String) -> Result<()
 /// Errors after the request has started are sent **as events**, not returned:
 /// by then there may be half an answer on screen, and throwing it away to show
 /// an error loses the more useful half.
+// Eight parameters, and each is load-bearing: where to send the request, which
+// model, the schema context, the conversation and the channel to stream back.
+// Bundling them into a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn assistant_send(
     state: State<'_, AppState>,
@@ -429,10 +436,12 @@ async fn assistant_send(
 
     // Schema, when there is a live connection to take it from. Names and types
     // only — `render_schema` cannot see row data, by construction.
+    let mut caps: Option<crate::engine::Capabilities> = None;
     let (server_version, schema_text) = match &connection_id {
         Some(id) => match session::server(&state, id).await {
             Ok(server) => {
                 let version = server.server_version.clone();
+                caps = Some(server.capabilities.clone());
                 let text = match &db {
                     Some(db) => server
                         .schema_cache
@@ -449,7 +458,7 @@ async fn assistant_send(
         None => ("unknown".to_string(), None),
     };
 
-    let system = assistant::system_prompt(&server_version, schema_text.as_deref());
+    let system = assistant::system_prompt(&server_version, schema_text.as_deref(), caps.as_ref());
     let body = assistant::request(provider, &model, &system, &messages);
 
     // Auth differs by provider, and a local server usually wants none at all —
@@ -1044,6 +1053,23 @@ async fn save_file_dialog(
     }
 }
 
+/// Choose the TLS backend, once, before anything opens a connection.
+///
+/// **This is not optional, and its absence was a latent crash.** `reqwest` is
+/// built with `rustls-no-provider` — chosen so that `aws-lc-rs`, which needs
+/// cmake and NASM, stays out of the Windows build — and that feature makes the
+/// caller responsible for installing a crypto provider. Nothing did, so the
+/// first `Client::new()` would have panicked: the assistant's first request on
+/// Linux, where the updater never builds a client because it refuses earlier.
+///
+/// Found by a unit test in `httpsql`, not by using the app.
+///
+/// Idempotent by design: `install_default` returns `Err` if a provider is
+/// already set, which is a fact rather than a failure.
+fn install_tls() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// The licence notices this build is obliged to carry.
 ///
 /// Generated per target at package time by `scripts/attribution.mjs` and shipped
@@ -1132,6 +1158,9 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
+    // Before any client is built, by anything.
+    install_tls();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

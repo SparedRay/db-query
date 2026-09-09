@@ -170,6 +170,9 @@ mod tests {
             user: "reporting".into(),
             database: Some("analytics".into()),
             allow_invalid_certs: false,
+            kind: Default::default(),
+            url: String::new(),
+            auth: Default::default(),
         }
     }
 

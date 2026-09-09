@@ -34,6 +34,9 @@ fn profile(id: &str) -> ConnProfile {
         // The container ships a self-signed cert, so strict verification would
         // (correctly) refuse it. See `refuses_a_self_signed_cert_by_default`.
         allow_invalid_certs: true,
+        kind: Default::default(),
+        url: String::new(),
+        auth: Default::default(),
     }
 }
 
@@ -64,7 +67,12 @@ async fn connected() -> AppState {
 /// prove tab connections are lazy and are actually released on close.
 async fn server_conn_count(state: &AppState) -> i64 {
     let server = session::server(state, C).await.unwrap();
-    let mut meta = server.meta.lock().await;
+    let mut meta = server
+        .meta
+        .as_ref()
+        .expect("a MySQL connection")
+        .lock()
+        .await;
     sqlx::query(
         "SELECT COUNT(*) AS n FROM information_schema.processlist \
          WHERE user = ? AND id <> CONNECTION_ID()",
@@ -766,7 +774,12 @@ async fn a_reaped_tab_connection_is_reopened_transparently() {
     // KILL (not KILL QUERY) drops the whole connection, exactly as wait_timeout would.
     {
         let server = session::server(&state, C).await.unwrap();
-        let mut meta = server.meta.lock().await;
+        let mut meta = server
+            .meta
+            .as_ref()
+            .expect("a MySQL connection")
+            .lock()
+            .await;
         sqlx::query(sqlx::AssertSqlSafe(format!("KILL {old_id}")))
             .execute(&mut *meta)
             .await
@@ -1262,7 +1275,12 @@ async fn examining_a_routine_produces_a_script_that_recreates_it_exactly() {
 /// the comparison above cannot be fooled by a bug shared with it.
 async fn body_of(state: &AppState, name: &str) -> String {
     let server = session::server(state, C).await.unwrap();
-    let mut meta = server.meta.lock().await;
+    let mut meta = server
+        .meta
+        .as_ref()
+        .expect("a MySQL connection")
+        .lock()
+        .await;
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SHOW CREATE PROCEDURE `poc`.`{name}`"
     )))

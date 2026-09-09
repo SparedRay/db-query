@@ -37,7 +37,24 @@ export interface ConnProfile {
   user: string;
   database: string | null;
   allowInvalidCerts: boolean;
+
+  /**
+   * Which engine this connects to. Optional in the type as it is in the file:
+   * a profile written before Stage 11 has none and means MySQL.
+   */
+  kind?: EngineKind;
+  /** Base URL, for engines addressed by one. MySQL uses host and port. */
+  url?: string;
+  auth?: HttpAuth;
 }
+
+export type EngineKind = "mysql" | "elasticsearch";
+
+/** How to authenticate an HTTP engine. A local cluster usually wants nothing. */
+export type HttpAuth =
+  | { type: "none" }
+  | { type: "basic"; user: string }
+  | { type: "apiKey" };
 
 /**
  * A profile as it comes *back* from the backend: the stored fields plus facts

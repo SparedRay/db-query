@@ -208,15 +208,37 @@
         <label>Name <input name="name" placeholder="local" /></label>
         <div class="swatches" id="conn-colours"></div>
 
-        <div class="row">
-          <label class="grow">Host <input name="host" value="127.0.0.1" required /></label>
-          <label class="narrow">Port <input name="port" type="number" value="3306" required /></label>
-        </div>
-        <label>User <input name="user" value="root" required /></label>
-        <label>Password <input name="password" type="password" /></label>
-        <label>Database <input name="database" placeholder="(optional)" /></label>
+        <label>Engine
+          <select name="kind" id="conn-kind">
+            <option value="mysql">MySQL</option>
+            <option value="elasticsearch">Elasticsearch (SQL)</option>
+          </select>
+        </label>
 
-        <label class="toggle">
+        <div id="conn-mysql-fields">
+          <div class="row">
+            <label class="grow">Host <input name="host" value="127.0.0.1" /></label>
+            <label class="narrow">Port <input name="port" type="number" value="3306" /></label>
+          </div>
+          <label>User <input name="user" value="root" /></label>
+        </div>
+
+        <div id="conn-es-fields" hidden>
+          <label>URL <input name="url" placeholder="http://localhost:9200" spellcheck="false" /></label>
+          <label>Authentication
+            <select name="auth" id="conn-auth">
+              <option value="none">None (local cluster)</option>
+              <option value="basic">Username and password</option>
+              <option value="apiKey">API key</option>
+            </select>
+          </label>
+          <label id="conn-es-user-row" hidden>Username <input name="esUser" autocomplete="off" /></label>
+        </div>
+
+        <label>Password <input name="password" type="password" /></label>
+        <label id="conn-db-row">Database <input name="database" placeholder="(optional)" /></label>
+
+        <label class="toggle" id="conn-tls-row">
           <input type="checkbox" name="allowInvalidCerts" />
           Allow invalid certificates (self-signed / internal CA)
         </label>

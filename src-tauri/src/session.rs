@@ -70,6 +70,31 @@ pub struct ConnProfile {
     pub database: Option<String>,
     #[serde(default)]
     pub allow_invalid_certs: bool,
+
+    /// Which engine this connects to.
+    ///
+    /// `#[serde(default)]` throughout, so every `connections.json` written
+    /// before Stage 11 loads unchanged and means MySQL — the same
+    /// backward-compatible move `workspace.rs` relies on.
+    #[serde(default)]
+    pub kind: EngineKind,
+    /// Base URL, for engines addressed by one. Ignored by MySQL, which uses
+    /// `host`/`port`.
+    #[serde(default)]
+    pub url: String,
+    /// How to authenticate an HTTP engine. MySQL always uses user + password.
+    #[serde(default)]
+    pub auth: crate::httpsql::Auth,
+}
+
+/// Which engine a profile names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineKind {
+    /// The default, so a profile written before engines existed is MySQL.
+    #[default]
+    Mysql,
+    Elasticsearch,
 }
 
 /// A profile as the **UI** sees it: the persisted fields, plus the facts that
@@ -154,9 +179,14 @@ pub struct ServerConn {
     /// able to authenticate later. Phase 2 replaces this with a zeroizing
     /// `Secret`; it is never serialised or logged.
     password: String,
-    pub killer: Mutex<MySqlConnection>,
-    pub meta: Mutex<MySqlConnection>,
+    /// The two shared MySQL connections. `None` for engines that hold nothing
+    /// open — HTTP is stateless, so there is nothing to keep or to leak.
+    pub killer: Option<Mutex<MySqlConnection>>,
+    pub meta: Option<Mutex<MySqlConnection>>,
     pub schema_cache: Mutex<HashMap<String, DbSchema>>,
+    /// Everything that differs between engines. MySQL's implementation is a
+    /// dispatch vtable over the code that has always been here; see `mysql.rs`.
+    pub engine: Box<dyn crate::engine::Engine>,
     pub server_version: String,
     /// What this connection's engine supports. Held here so `exec` can ask
     /// without knowing which engine it is talking to.
@@ -167,6 +197,23 @@ pub struct ServerConn {
 }
 
 impl ServerConn {
+    /// The shared MySQL connections, for the code that is MySQL's.
+    ///
+    /// A `Result` rather than a panic: reaching these on a connection that has
+    /// none means a MySQL-only path was called for another engine, which is a
+    /// bug worth a message rather than a crash in someone's session.
+    pub(crate) fn mysql_meta(&self) -> Result<&Mutex<MySqlConnection>, String> {
+        self.meta
+            .as_ref()
+            .ok_or_else(|| "This operation needs a MySQL connection.".to_string())
+    }
+
+    pub(crate) fn mysql_killer(&self) -> Result<&Mutex<MySqlConnection>, String> {
+        self.killer
+            .as_ref()
+            .ok_or_else(|| "This operation needs a MySQL connection.".to_string())
+    }
+
     pub fn id(&self) -> &str {
         &self.profile.id
     }
@@ -301,6 +348,10 @@ pub async fn connect(
     // Reconnecting an id replaces the old session rather than stacking one.
     disconnect(state, &profile.id).await.ok();
 
+    if profile.kind == EngineKind::Elasticsearch {
+        return connect_elastic(state, profile, password).await;
+    }
+
     // Only the two shared connections up front. Tab connections are lazy, so
     // connecting costs 2 regardless of how many tabs the connection has.
     let mut meta = open(&profile, &password).await?;
@@ -329,9 +380,10 @@ pub async fn connect(
     let conn = Arc::new(ServerConn {
         profile,
         password,
-        killer: Mutex::new(killer),
-        meta: Mutex::new(meta),
+        killer: Some(Mutex::new(killer)),
+        meta: Some(Mutex::new(meta)),
         schema_cache: Mutex::new(HashMap::new()),
+        engine: Box::new(crate::mysql::MysqlEngine::new()),
         server_version: server_version.clone(),
         capabilities: crate::engine::Capabilities::mysql(),
         introspection_count: AtomicU64::new(0),
@@ -383,8 +435,12 @@ pub async fn disconnect(state: &AppState, id: &str) -> Result<(), String> {
     // If nobody else is mid-operation, say goodbye properly. Otherwise the last
     // Arc holder dropping it closes the sockets anyway — either way no leak.
     if let Ok(s) = Arc::try_unwrap(server) {
-        s.killer.into_inner().close().await.ok();
-        s.meta.into_inner().close().await.ok();
+        if let Some(k) = s.killer {
+            k.into_inner().close().await.ok();
+        }
+        if let Some(m) = s.meta {
+            m.into_inner().close().await.ok();
+        }
     }
     Ok(())
 }
@@ -520,7 +576,11 @@ pub async fn ensure_exec(
     Ok(())
 }
 
-pub async fn use_database(state: &AppState, tab_id: &str, db: &str) -> Result<(), String> {
+pub(crate) async fn mysql_use_database(
+    state: &AppState,
+    tab_id: &str,
+    db: &str,
+) -> Result<(), String> {
     let tab = tab(state, tab_id).await?;
     let quoted = crate::sqlgen::quote_ident(db)?;
 
@@ -544,7 +604,7 @@ async fn kill_on(server: &ServerConn, conn_id: u64) -> Result<(), String> {
     if conn_id == 0 {
         return Ok(()); // this tab has never opened a connection
     }
-    let mut killer = server.killer.lock().await;
+    let mut killer = server.mysql_killer()?.lock().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("KILL QUERY {conn_id}")))
         .execute(&mut *killer)
         .await
@@ -556,13 +616,96 @@ async fn kill_on(server: &ServerConn, conn_id: u64) -> Result<(), String> {
 ///
 /// Takes that tab's connection's killer lock and the tab's `conn_id`. It never
 /// takes the tab's `exec` lock — the query being killed is holding it.
-pub async fn cancel_query(state: &AppState, tab_id: &str) -> Result<(), String> {
+pub(crate) async fn mysql_cancel_query(state: &AppState, tab_id: &str) -> Result<(), String> {
     let Some(tab) = tab_if_open(state, tab_id).await else {
         return Ok(());
     };
     // Flag first: even if KILL races the query finishing, the script stops.
     tab.cancel_requested.store(true, Ordering::SeqCst);
     kill_on(&tab.server, tab.conn_id.load(Ordering::SeqCst)).await
+}
+
+// ------------------------------------------------------------ engine dispatch
+
+/// The databases on a MySQL server. Split out so `MysqlEngine` can offer it as
+/// `namespaces` without `connect` and the engine trait duplicating the query.
+pub(crate) async fn mysql_databases(server: &ServerConn) -> Result<Vec<String>, String> {
+    let mut meta = server.mysql_meta()?.lock().await;
+    let rows = sqlx::query(
+        "SELECT schema_name AS name FROM information_schema.schemata ORDER BY schema_name",
+    )
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.try_get::<String, _>("name").ok())
+        .collect())
+}
+
+/// Switch the namespace this tab works in — a database, a catalog, a schema.
+pub async fn use_database(state: &AppState, tab_id: &str, db: &str) -> Result<(), String> {
+    let tab = tab(state, tab_id).await?;
+    let server = Arc::clone(&tab.server);
+    server.engine.use_namespace(state, tab_id, db).await
+}
+
+/// Stop whatever this tab is running.
+pub async fn cancel_query(state: &AppState, tab_id: &str) -> Result<(), String> {
+    let tab = tab(state, tab_id).await?;
+    let server = Arc::clone(&tab.server);
+    server.engine.cancel(state, tab_id).await
+}
+
+/// Open a connection to an Elasticsearch cluster.
+///
+/// Shaped like the MySQL path on purpose — same `ConnInfo` out, same
+/// `ServerConn` in the map — so everything above `connect` is unchanged.
+///
+/// The two shared MySQL connections have no counterpart here: HTTP is
+/// stateless, so there is nothing to hold open and nothing to leak. That is why
+/// `ServerConn` keeps them behind `Option` rather than this path inventing a
+/// pair it would never use.
+async fn connect_elastic(
+    state: &AppState,
+    profile: ConnProfile,
+    password: String,
+) -> Result<ConnInfo, String> {
+    let secret = (!password.is_empty()).then_some(password);
+    let engine = crate::elastic::ElasticEngine::new(&profile.url, profile.auth.clone(), secret);
+
+    // Reachability and version in one call, before anything is stored: a
+    // connection that failed must leave no trace, exactly as for MySQL.
+    let server_version = engine.version().await?;
+    let capabilities = engine.capabilities().clone();
+
+    let id = profile.id.clone();
+    let current_database = profile.database.clone().filter(|d| !d.is_empty());
+
+    let conn = Arc::new(ServerConn {
+        profile,
+        password: String::new(),
+        killer: None,
+        meta: None,
+        schema_cache: Mutex::new(HashMap::new()),
+        engine: Box::new(engine),
+        server_version: server_version.clone(),
+        capabilities: capabilities.clone(),
+        introspection_count: AtomicU64::new(0),
+    });
+
+    // Catalogs are this engine's namespaces; a cluster with cross-cluster
+    // search off simply has none, which the tree renders as no children.
+    let databases = conn.engine.namespaces(&conn).await.unwrap_or_default();
+    state.connections.lock().await.insert(id.clone(), conn);
+
+    Ok(ConnInfo {
+        id,
+        server_version,
+        databases,
+        current_database,
+        capabilities,
+    })
 }
 
 #[cfg(test)]
@@ -579,6 +722,9 @@ mod tests {
             user: "reporting".into(),
             database: Some("analytics".into()),
             allow_invalid_certs: false,
+            kind: Default::default(),
+            url: String::new(),
+            auth: Default::default(),
         }
     }
 

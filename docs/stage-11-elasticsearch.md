@@ -3,7 +3,8 @@
 **Goal:** run SQL against an Elasticsearch cluster from the same editor, with the
 same tabs, grid, export and history.
 **Builds on:** [Stage 10 — An assistant that writes SQL](stage-10-assistant.md).
-**Status:** 🚧 In progress — capabilities landed 2026-09-08; the `Engine` trait is next.
+**Status:** 🚧 Built 2026-09-08 — the seam, the engine, and both suites green
+against a real cluster. Not yet clicked through by hand.
 
 ---
 
@@ -231,15 +232,15 @@ shaped by the second engine and would be shaped again by the third.
 
 ## 5. Milestones
 
-- [ ] **E1 — A cluster can be saved and connected to**, with basic auth, an API key, or neither.
-- [ ] **E2 — Indices appear in the tree**, with their columns, under the right catalog.
-- [ ] **E3 — A `SELECT` runs and renders** in the ordinary grid, with the ordinary types.
-- [ ] **E4 — More rows than the cap sets `truncated`**, and the cursor is closed rather than left open.
-- [ ] **E5 — A write is refused before it is sent**, naming what the engine supports.
+- [x] **E1 — A cluster can be saved and connected to**, with basic auth, an API key, or neither.
+- [x] **E2 — Indices appear in the tree**, with their columns, under the right catalog.
+- [x] **E3 — A `SELECT` runs and renders** in the ordinary grid, with the ordinary types.
+- [x] **E4 — More rows than the cap sets `truncated`**, and the cursor is closed rather than left open.
+- [x] **E5 — A write is refused before it is sent**, naming what the engine supports.
 - [ ] **E6 — A running query can be cancelled.**
-- [ ] **E7 — Everything above it works untouched**: export, copy, history (including provenance), the value viewer, tab persistence.
-- [ ] **E8 — The assistant writes Elasticsearch SQL** when the tab is on a cluster, and does not offer writes.
-- [ ] **E9 — Nothing regressed for MySQL.** The whole existing suite, unchanged.
+- [x] **E7 — Everything above it works untouched**: export, copy, history (including provenance), the value viewer, tab persistence.
+- [x] **E8 — The assistant writes Elasticsearch SQL** when the tab is on a cluster, and does not offer writes.
+- [x] **E9 — Nothing regressed for MySQL.** 240 unit, 63 live and 412 UI tests, unchanged.
 
 ---
 
@@ -251,8 +252,10 @@ shaped by the second engine and would be shaped again by the third.
 - [x] **The tree menus read capabilities.** `DROP` on a table, a column and a routine is offered only where the engine accepts writes; the reads beside them stay
 - [x] **The rail names the engine the server reported**, rather than the hardcoded "MySQL" it had said since Stage 2
 - [x] **Gate passed:** the whole existing suite ran unchanged before the new tests were added — 203 UI, 217 unit, 63 live
-- [ ] `trait Engine`; `MysqlEngine` implements it; `ServerConn` holds `Box<dyn Engine>`
-- [ ] `ConnProfile.kind` + `url`, defaulted; connection dialog grows a second shape
+- [x] **`trait Engine`; `MysqlEngine` implements it; `ServerConn` holds `Box<dyn Engine>`.** Deliberately thin: the MySQL queries and caching did **not** move, they were renamed to `mysql_*` and the trait points at them. The seam was added; nothing behind it was rewritten
+- [x] **`ConnProfile.kind` + `url` + `auth`, all `#[serde(default)]`** — every `connections.json` written before Stage 11 loads unchanged and means MySQL
+- [x] Connection dialog grows an engine picker, a URL field and three auth shapes; host/port/user and the TLS toggle hide for a cluster
+- [x] **Gate passed twice**: 63 live MySQL tests and the whole UI suite ran unchanged after the trait refactor, before any Elasticsearch code was reachable
 
 #### Decisions taken while building
 
@@ -266,18 +269,18 @@ shaped by the second engine and would be shaped again by the third.
   for the assistant's dialect. Every behavioural branch reads a flag instead —
   a name check has to be revisited for each new engine, and one will be missed.
 
-### Phase 2 — The engine
-- [ ] A shared **HTTP SQL API** helper — request, page, map columns, map errors — the part Snowflake would reuse
-- [ ] `src-tauri/src/elastic.rs` on top of it: `POST /_sql`, `fetch_size`, cursor detection, `/_sql/close`, auth shapes
-- [ ] Map `columns[].type` onto `TypeHint`; decode JSON scalars into `CellValue`
-- [ ] `SHOW TABLES` / `DESCRIBE` into the existing `TableRef` / `ColumnInfo`
-- [ ] Read-only refusal (D1), cancellation token (D5)
+### Phase 2 — The engine — built 2026-09-08
+- [x] **`src-tauri/src/httpsql.rs`** — the shared half: auth shapes, JSON scalars into `CellValue`, `{name,type}` into `ColumnMeta`, error extraction. **10 unit tests.** This is the part Snowflake reuses
+- [x] **`src-tauri/src/elastic.rs`** — `POST /_sql?format=json`, `fetch_size`, cursor detection, `/_sql/close`, `SHOW CATALOGS` / `SHOW TABLES` / `DESCRIBE`. **13 unit tests** against recorded payloads
+- [x] Read-only refusal via capabilities (D1); cancellation between statements (D5)
+- [x] **10 live tests against a real 8.15 cluster**, including three that go through the app's own `connect` / `open_tab` / `run_script`
 
-### Phase 3 — Fitting in
-- [ ] Assistant dialect (D8); lint rules audited for MySQL-only assumptions
+### Phase 3 — Fitting in — built 2026-09-08
+- [x] **Assistant dialect (D8).** `system_prompt` takes the capabilities: a read-only engine is told so explicitly, told it has no routines, and told what its namespaces are called. MySQL gains no restrictions it did not have
+- [x] `mise run es-up` / `es-down` / `test-es` — a container fixture and a seeded index, mirroring `db-up`
+- [x] **CI runs both engines on every push** — an Elasticsearch service container beside the MySQL one, because the risk of this stage is breaking MySQL quietly
+- [ ] Lint rules audited for MySQL-only assumptions
 - [ ] Export path check (D9); `dialect` on new tabs follows the connection
-- [ ] `mise run es-up` — a container fixture and a seeded index, mirroring `db-up`
-- [ ] Live tests against it; UI tests against a stubbed backend
 
 ---
 
@@ -312,3 +315,68 @@ shaped by the second engine and would be shaped again by the third.
   wrong.** The mitigation is the Phase 1 gate — port MySQL first and require the
   existing suite to pass untouched — plus writing the HTTP helper as if
   Snowflake were next, because on this plan it is.
+
+---
+
+## 9. What implementation changed about the plan — 2026-09-08
+
+### A latent crash the plan never anticipated
+
+A unit test in `httpsql` — not the app — found that **`reqwest::Client::new()`
+panics**. `reqwest` is built with `rustls-no-provider` (chosen so `aws-lc-rs`,
+which needs cmake and NASM, stays out of Windows CI), and that feature makes the
+caller responsible for installing a crypto provider. **Nothing did.**
+
+So the assistant shipped in Stage 10 would have panicked on its first request on
+Linux, where `update_check` returns early and never builds a client to install
+one incidentally. `install_tls()` now runs before anything else in `run()`.
+
+Two lessons worth keeping: a feature flag chosen for the *build* had a runtime
+obligation attached to it, and the bug was found by a test for a different
+module in a different stage.
+
+### The trait was cheaper than expected, because nothing moved
+
+`MysqlEngine` is a dispatch vtable. The `information_schema` queries, the
+caching, the exec loop — none of it moved; the functions were renamed `mysql_*`
+and the trait points at them. That is why 63 live tests passed through the
+refactor without an edit, which was the gate the plan set.
+
+`ServerConn.meta` and `.killer` became `Option`, since an HTTP engine holds
+nothing open. Reaching them returns a `Result` rather than panicking: it means a
+MySQL-only path was called for another engine, which is a bug worth a message
+rather than a crash in someone's session.
+
+### Decisions taken while building
+
+- **`SHOW CATALOGS` failing is not a failed connection.** Cross-cluster search
+  may simply be off, so it yields an empty namespace list and the tree shows
+  indices without one.
+- **There is no `SHOW CREATE` for an index**, so "Examine definition" renders
+  `DESCRIBE` as a comment block plus the statement itself. Inventing a
+  `CREATE TABLE` this engine could never run would be worse than saying what is
+  actually known.
+- **`SHOW TABLES` column names differ between versions** ("name"/"table",
+  "type"/"kind"), so both are accepted. Pinning one is the kind of failure that
+  only appears on someone else's cluster.
+- **An alias reads as a view.** Readable, not a base table — and the tree
+  already groups on that word.
+- **Nested documents keep their JSON** rather than becoming "[object]". The cell
+  viewer from Stage 6 can already show them.
+- **Cancellation stops the script between statements.** There is no server-side
+  kill, so a single long query cannot be interrupted — stated here because the
+  capability says `cancellation: true` and that is the honest extent of it.
+
+---
+
+## 10. What is still open
+
+- **Nobody has clicked through it.** Every layer is tested, including three live
+  tests through the app's own command path, but no human has connected the UI to
+  a cluster and expanded the tree.
+- **Lint is still MySQL-flavoured** (§6 Phase 3). Schema-aware checks work
+  because they read the tree; dialect-specific rules have not been audited.
+- **A new tab's `dialect` still says "mysql"** regardless of its connection,
+  which affects syntax highlighting rather than correctness.
+- **Export (D9)** goes through the in-memory path for a cluster, which is right,
+  but the streaming path's absence has not been surfaced in the UI.

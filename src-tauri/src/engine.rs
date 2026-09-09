@@ -81,6 +81,91 @@ impl Capabilities {
     }
 }
 
+/// One engine's implementation of everything that differs between engines.
+///
+/// **A trait rather than an enum**, because a third engine (Snowflake,
+/// PostgreSQL) is plausible and should be an *addition* — one file implementing
+/// one interface — rather than a hunt for every match arm. See §3 of the Stage
+/// 11 tracker for the reasoning, including the enum this replaced.
+///
+/// Methods take `&ServerConn` rather than owning their transport, because MySQL
+/// genuinely needs shared connections that the session layer already stores and
+/// closes; Elasticsearch keeps everything it needs in `self` and ignores the
+/// argument. That keeps this a dispatch layer and leaves the connection
+/// lifecycle in one place.
+///
+/// **Nothing here branches on `capabilities().engine`.** That field names the
+/// engine for display; behaviour is dispatched by *being* an implementation.
+#[async_trait::async_trait]
+pub trait Engine: Send + Sync {
+    fn capabilities(&self) -> &Capabilities;
+
+    /// Databases, catalogs or schemas — whatever `namespace_label` calls them.
+    async fn namespaces(&self, server: &crate::session::ServerConn) -> Result<Vec<String>, String>;
+
+    async fn tables(
+        &self,
+        server: &crate::session::ServerConn,
+        ns: &str,
+    ) -> Result<Vec<crate::schema::TableRef>, String>;
+
+    async fn columns(
+        &self,
+        server: &crate::session::ServerConn,
+        ns: &str,
+        table: &str,
+    ) -> Result<Vec<crate::schema::ColumnInfo>, String>;
+
+    /// Engines without stored routines return an empty list rather than an
+    /// error — the tree omits empty groups, so nothing has to know why.
+    async fn routines(
+        &self,
+        server: &crate::session::ServerConn,
+        ns: &str,
+    ) -> Result<Vec<crate::schema::RoutineRef>, String>;
+
+    async fn table_ddl(
+        &self,
+        server: &crate::session::ServerConn,
+        ns: &str,
+        table: &str,
+    ) -> Result<String, String>;
+
+    async fn routine_ddl(
+        &self,
+        server: &crate::session::ServerConn,
+        ns: &str,
+        name: &str,
+        kind: crate::schema::RoutineKind,
+    ) -> Result<String, String>;
+
+    /// Run a whole script.
+    ///
+    /// The engine owns the loop because the session state differs so much: a
+    /// MySQL tab has its own connection, temp tables and open transaction, while
+    /// an Elasticsearch tab has nothing at all. Both share the splitting,
+    /// classification and refusal in `exec`.
+    async fn run_script(
+        &self,
+        state: &crate::session::AppState,
+        tab_id: &str,
+        sql: &str,
+        auto_limit: bool,
+        timeout_secs: Option<u64>,
+    ) -> Result<crate::exec::ScriptResult, String>;
+
+    /// Make this the tab's current namespace. A no-op where switching is free.
+    async fn use_namespace(
+        &self,
+        state: &crate::session::AppState,
+        tab_id: &str,
+        ns: &str,
+    ) -> Result<(), String>;
+
+    /// Stop whatever the tab is running. Best-effort by nature.
+    async fn cancel(&self, state: &crate::session::AppState, tab_id: &str) -> Result<(), String>;
+}
+
 /// Why this engine will not run a statement, if it will not.
 ///
 /// Checked **before** the statement is sent. Relaying a remote parser's

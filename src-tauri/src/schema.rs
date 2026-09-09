@@ -101,13 +101,10 @@ pub async fn refresh(state: &AppState, connection_id: &str, db: &str) -> Result<
     Ok(())
 }
 
-pub async fn list_tables(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mysql_list_tables(
+    server: &ServerConn,
     db: &str,
 ) -> Result<Vec<TableRef>, String> {
-    let server = server(state, connection_id).await?;
-
     if let Some(cached) = server
         .schema_cache
         .lock()
@@ -119,7 +116,7 @@ pub async fn list_tables(
     }
 
     let rows = {
-        let mut meta = server.meta.lock().await;
+        let mut meta = server.mysql_meta()?.lock().await;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(
             "SELECT table_name AS name, table_type AS kind \
@@ -155,14 +152,11 @@ pub async fn list_tables(
     Ok(tables)
 }
 
-pub async fn list_columns(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mysql_list_columns(
+    server: &ServerConn,
     db: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
-    let server = server(state, connection_id).await?;
-
     if let Some(cached) = server
         .schema_cache
         .lock()
@@ -175,7 +169,7 @@ pub async fn list_columns(
     }
 
     let rows = {
-        let mut meta = server.meta.lock().await;
+        let mut meta = server.mysql_meta()?.lock().await;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(
             "SELECT column_name AS name, column_type AS data_type, \
@@ -227,13 +221,10 @@ pub async fn list_columns(
 /// **`ordinal_position = 0` is the function's return value, not a parameter.**
 /// It comes back with a NULL name and NULL mode, so including it would put a
 /// nameless argument at the front of every generated `SELECT fn(...)` call.
-pub async fn list_routines(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mysql_list_routines(
+    server: &ServerConn,
     db: &str,
 ) -> Result<Vec<RoutineRef>, String> {
-    let server = server(state, connection_id).await?;
-
     if let Some(cached) = server
         .schema_cache
         .lock()
@@ -245,7 +236,7 @@ pub async fn list_routines(
     }
 
     let (routine_rows, param_rows) = {
-        let mut meta = server.meta.lock().await;
+        let mut meta = server.mysql_meta()?.lock().await;
         server.introspection_count.fetch_add(2, Ordering::SeqCst);
         let routines = sqlx::query(
             "SELECT routine_name AS name, routine_type AS kind, \
@@ -334,17 +325,15 @@ pub async fn list_routines(
 /// keys, defaults or nullability, so a derived schema is always a widened
 /// approximation. This is what makes an exported script recreate the original
 /// rather than something shaped like it.
-pub async fn table_ddl(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mysql_table_ddl(
+    server: &ServerConn,
     db: &str,
     table: &str,
 ) -> Result<String, String> {
-    let server = server(state, connection_id).await?;
     let qualified = crate::sqlgen::qualify(db, table)?;
 
     let row = {
-        let mut meta = server.meta.lock().await;
+        let mut meta = server.mysql_meta()?.lock().await;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SHOW CREATE TABLE {qualified}"
@@ -371,20 +360,18 @@ pub async fn table_ddl(
 /// the name is quoted rather than bound. That is what `quote_ident` is for, and
 /// why `RoutineKind` is an enum: the only two words that can reach the keyword
 /// slot are the two spelled out in its `keyword()`.
-pub async fn routine_ddl(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mysql_routine_ddl(
+    server: &ServerConn,
     db: &str,
     name: &str,
     kind: RoutineKind,
 ) -> Result<String, String> {
-    let server = server(state, connection_id).await?;
     let kw = kind.keyword();
     let qualified = crate::sqlgen::qualify(db, name)?;
     let sql = format!("SHOW CREATE {kw} {qualified}");
 
     let row = {
-        let mut meta = server.meta.lock().await;
+        let mut meta = server.mysql_meta()?.lock().await;
         server.introspection_count.fetch_add(1, Ordering::SeqCst);
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&mut *meta)
@@ -438,4 +425,60 @@ pub async fn lint_schema(server: &ServerConn, db: Option<&str>) -> crate::lint::
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ------------------------------------------------------------ engine dispatch
+//
+// The command layer calls these; they ask the connection's engine. MySQL's
+// implementations are the `mysql_*` functions above, unchanged — the split is a
+// dispatch layer, not a rewrite, which is what let the whole existing suite run
+// untouched through this change.
+
+pub async fn list_tables(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<TableRef>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.tables(&server, db).await
+}
+
+pub async fn list_columns(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.columns(&server, db, table).await
+}
+
+pub async fn list_routines(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<RoutineRef>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.routines(&server, db).await
+}
+
+pub async fn table_ddl(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    table: &str,
+) -> Result<String, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.table_ddl(&server, db, table).await
+}
+
+pub async fn routine_ddl(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    name: &str,
+    kind: RoutineKind,
+) -> Result<String, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.routine_ddl(&server, db, name, kind).await
 }

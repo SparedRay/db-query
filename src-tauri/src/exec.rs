@@ -342,7 +342,7 @@ fn used_database(sql: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-pub async fn run_script(
+pub(crate) async fn mysql_run_script(
     state: &AppState,
     tab_id: &str,
     sql: &str,
@@ -496,6 +496,22 @@ pub async fn run_script(
         cancelled,
         timed_out,
     })
+}
+
+/// Run a script through whichever engine this tab belongs to.
+pub async fn run_script(
+    state: &AppState,
+    tab_id: &str,
+    sql: &str,
+    auto_limit_enabled: bool,
+    timeout_secs: Option<u64>,
+) -> Result<ScriptResult, String> {
+    let tab = session::tab(state, tab_id).await?;
+    let server = Arc::clone(&tab.server);
+    server
+        .engine
+        .run_script(state, tab_id, sql, auto_limit_enabled, timeout_secs)
+        .await
 }
 
 #[cfg(test)]

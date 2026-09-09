@@ -34,6 +34,22 @@ jobs:
     # and the podman fixture in dev/README.md, so the same tests run unchanged
     # here and on a developer machine.
     services:
+      # A second engine gets a second fixture. Stage 11's whole risk is breaking
+      # MySQL quietly while adding Elasticsearch, so both run on every push.
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -sf http://localhost:9200 || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=30
+
       mysql:
         image: mysql:8
         env:
@@ -114,6 +130,29 @@ jobs:
       # It runs on Windows instead, which is what finally answers E0/C3w.
       - name: Seed the fixture
         run: mysql -h 127.0.0.1 -P 3306 -uroot -pdevpassword < dev/seed.sql
+      - name: Seed the Elasticsearch fixture
+        run: |
+          curl -sf -X PUT http://localhost:9200/orders -H 'content-type: application/json' -d '{
+            "mappings": {"properties": {
+              "user": {"type": "keyword"},
+              "total": {"type": "double"},
+              "created_at": {"type": "date"}
+            }}
+          }'
+          curl -sf -X POST http://localhost:9200/orders/_bulk \
+            -H 'content-type: application/x-ndjson' --data-binary '
+          {"index":{}}
+          {"user":"ada","total":120.5,"created_at":"2026-01-02T00:00:00Z"}
+          {"index":{}}
+          {"user":"grace","total":80.0,"created_at":"2026-01-03T00:00:00Z"}
+          {"index":{}}
+          {"user":"ada","total":15.25,"created_at":"2026-01-04T00:00:00Z"}
+          '
+          curl -sf -X POST http://localhost:9200/orders/_refresh
+
+      - name: Live Elasticsearch tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic -- --ignored --test-threads=1
+
       - name: Live MySQL tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --test live_mysql -- --ignored --test-threads=1
 

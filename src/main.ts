@@ -15,6 +15,8 @@ import {
   type SourceTable,
   type UpdateStatus,
   type Capabilities,
+  type EngineKind,
+  type HttpAuth,
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
@@ -122,6 +124,13 @@ const els = {
   connRememberRow: $<HTMLLabelElement>("conn-remember-row"),
   dialog: $<HTMLDialogElement>("conn-dialog"),
   form: $<HTMLFormElement>("conn-form"),
+  connKind: $<HTMLSelectElement>("conn-kind"),
+  connAuth: $<HTMLSelectElement>("conn-auth"),
+  connMysqlFields: $<HTMLElement>("conn-mysql-fields"),
+  connEsFields: $<HTMLElement>("conn-es-fields"),
+  connEsUserRow: $<HTMLElement>("conn-es-user-row"),
+  connDbRow: $<HTMLElement>("conn-db-row"),
+  connTlsRow: $<HTMLElement>("conn-tls-row"),
   connError: $<HTMLParagraphElement>("conn-error"),
   connCancel: $<HTMLButtonElement>("conn-cancel"),
   vsplit: $("vsplit"), hsplit: $("hsplit"),
@@ -448,8 +457,35 @@ function openConnectionEditor(existing?: ConnectionEntry) {
   const pw = f.elements.namedItem("password") as HTMLInputElement;
   pw.placeholder = p?.rememberPassword ? "(unchanged — stored in the keychain)" : "";
 
+  els.connKind.value = p?.kind ?? "mysql";
+  set("url", p?.url ?? "");
+  els.connAuth.value = p?.auth?.type ?? "none";
+  set("esUser", p?.auth?.type === "basic" ? p.auth.user : "");
+  applyEngineFields();
+
   els.dialog.showModal();
 }
+
+/**
+ * Show the fields the chosen engine actually has.
+ *
+ * MySQL is addressed by host and port, Elasticsearch by a URL; a form offering
+ * both at once asks people to work out which half applies. The database field
+ * stays for both — it is the catalog for a cluster, which is the same idea
+ * under the engine's own word.
+ */
+function applyEngineFields() {
+  const isEs = els.connKind.value === "elasticsearch";
+  els.connMysqlFields.hidden = isEs;
+  els.connEsFields.hidden = !isEs;
+  // TLS verification is a MySQL option here; a cluster URL carries its own
+  // scheme and an https one is verified by the platform.
+  els.connTlsRow.hidden = isEs;
+  els.connEsUserRow.hidden = !isEs || els.connAuth.value !== "basic";
+}
+
+els.connKind.onchange = applyEngineFields;
+els.connAuth.onchange = applyEngineFields;
 
 els.connSave.onchange = () => {
   els.connRememberRow.hidden = !els.connSave.checked;
@@ -470,15 +506,30 @@ els.form.addEventListener("submit", async (e) => {
   const host = String(fd.get("host") ?? "").trim();
   const wantSave = els.connSave.checked;
 
+  const kind = (String(fd.get("kind") ?? "mysql") || "mysql") as EngineKind;
+  const url = String(fd.get("url") ?? "").trim();
+  const authKind = String(fd.get("auth") ?? "none");
+  const auth: HttpAuth =
+    authKind === "basic"
+      ? { type: "basic", user: String(fd.get("esUser") ?? "").trim() }
+      : authKind === "apiKey"
+        ? { type: "apiKey" }
+        : { type: "none" };
+
   const profile: ConnProfile = {
     id: editing?.profile.id ?? newConnectionId(),
-    name: String(fd.get("name") ?? "").trim() || host,
+    // A cluster has no host, so it is named after its URL instead of ending up
+    // with a blank label in the rail.
+    name: String(fd.get("name") ?? "").trim() || (kind === "mysql" ? host : url),
     colour: chosenColour,
     host,
     port: Number(fd.get("port") ?? 3306),
     user: String(fd.get("user") ?? "").trim(),
     database: String(fd.get("database") ?? "").trim() || null,
     allowInvalidCerts: fd.get("allowInvalidCerts") === "on",
+    kind,
+    url,
+    auth,
   };
   // Kept out of the profile on purpose — see ConnProfile's doc comment.
   const typed = String(fd.get("password") ?? "");

@@ -203,11 +203,22 @@ pub fn render_schema(db: &str, schema: &DbSchema) -> String {
 }
 
 /// The instructions. Short on purpose — the constraint is the important part.
-pub fn system_prompt(server_version: &str, schema: Option<&str>) -> String {
-    let mut s = String::from(
-        "You are a SQL assistant embedded in a MySQL client. You help the user \
-         read, write and understand SQL against the database described below.\n\n\
-         You CANNOT run anything. You have no tools and no connection. Every \
+///
+/// `caps` decides the dialect and what the model is told it may write. Telling
+/// a read-only engine's user to run an `UPDATE` is a confident, useless answer,
+/// and the model cannot know the difference unless it is told.
+pub fn system_prompt(
+    server_version: &str,
+    schema: Option<&str>,
+    caps: Option<&crate::engine::Capabilities>,
+) -> String {
+    let engine = caps.map(|c| c.engine.as_str()).unwrap_or("MySQL");
+    let mut s = format!(
+        "You are a SQL assistant embedded in a {engine} client. You help the user \
+         read, write and understand SQL against the database described below.\n\n"
+    );
+    s.push_str(
+        "You CANNOT run anything. You have no tools and no connection. Every \
          statement you write is placed in the user's editor for them to review \
          and run themselves. Never claim to have run a query, and never report \
          results you have not been given — if you need data to answer, write the \
@@ -217,7 +228,25 @@ pub fn system_prompt(server_version: &str, schema: Option<&str>) -> String {
          For anything destructive — DROP, TRUNCATE, DELETE or UPDATE without a \
          WHERE — say plainly what it will do before the block.\n\n",
     );
-    s.push_str(&format!("Server: MySQL {server_version}\n\n"));
+
+    if let Some(caps) = caps {
+        if !caps.writes {
+            s.push_str(
+                "**This engine is read-only through this interface.** It accepts SELECT, \
+                 SHOW and DESCRIBE only — no INSERT, UPDATE, DELETE or DDL, and no \
+                 transactions. Never offer one; if the user asks for a change, say that \
+                 it cannot be made from here.\n\n",
+            );
+        }
+        if !caps.routines {
+            s.push_str("This engine has no stored procedures or functions.\n\n");
+        }
+        s.push_str(&format!(
+            "The user's SQL dialect is {}'s. Its namespaces are called {}s.\n\n",
+            caps.engine, caps.namespace_label
+        ));
+    }
+    s.push_str(&format!("Server: {engine} {server_version}\n\n"));
     match schema {
         Some(schema) if !schema.trim().is_empty() => {
             s.push_str("Schema (names and types only; no row data is shared):\n");
@@ -642,7 +671,7 @@ mod tests {
     /// The whole feature rests on this instruction.
     #[test]
     fn the_prompt_forbids_claiming_to_have_run_anything() {
-        let p = system_prompt("8.4.0", Some("TABLE `users` (id int)"));
+        let p = system_prompt("8.4.0", Some("TABLE `users` (id int)"), None);
         assert!(p.contains("CANNOT run"));
         assert!(p.contains("no tools"));
         assert!(p.contains("```sql"));
@@ -651,7 +680,7 @@ mod tests {
 
     #[test]
     fn with_no_schema_the_prompt_says_to_ask_rather_than_guess() {
-        let p = system_prompt("8.4.0", None);
+        let p = system_prompt("8.4.0", None, None);
         assert!(p.contains("Ask the user"), "{p}");
         assert!(
             !p.contains("Schema ("),
@@ -865,5 +894,27 @@ mod tests {
         // servers and silently ignored on others.
         assert!(body.get("thinking").is_none());
         assert!(body.get("system").is_none());
+    }
+
+    /// A read-only engine must be told so, or it will confidently write an
+    /// `UPDATE` the user cannot run.
+    #[test]
+    fn a_read_only_engine_is_declared_to_the_model() {
+        let caps = crate::elastic::capabilities();
+        let p = system_prompt("8.15.0", Some("TABLE `orders` (total double)"), Some(&caps));
+        assert!(p.contains("read-only"), "{p}");
+        assert!(p.contains("no INSERT, UPDATE, DELETE"), "{p}");
+        assert!(p.contains("elasticsearch client"), "{p}");
+        assert!(p.contains("catalogs"), "{p}");
+        assert!(p.contains("no stored procedures"), "{p}");
+    }
+
+    /// MySQL gains no restrictions it did not have.
+    #[test]
+    fn an_engine_with_writes_gets_no_refusal_text() {
+        let caps = crate::engine::Capabilities::mysql();
+        let p = system_prompt("8.4.0", None, Some(&caps));
+        assert!(!p.contains("read-only"), "{p}");
+        assert!(p.contains("mysql client"), "{p}");
     }
 }

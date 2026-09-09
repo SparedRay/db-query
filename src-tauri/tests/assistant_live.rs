@@ -25,6 +25,7 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
     let system = assistant::system_prompt(
         "8.4.0",
         Some("TABLE `users` (id int NOT NULL PK, email varchar(190) NOT NULL UNIQUE)"),
+        None,
     );
     let messages = vec![ChatMessage {
         role: "user".into(),
@@ -139,7 +140,8 @@ async fn a_local_openai_compatible_server_streams_back() {
         "a local server should not be asked for a key"
     );
 
-    let system = assistant::system_prompt("8.4.0", Some("TABLE `users` (id int NOT NULL PK)"));
+    let system =
+        assistant::system_prompt("8.4.0", Some("TABLE `users` (id int NOT NULL PK)"), None);
     let messages = vec![ChatMessage {
         role: "user".into(),
         content: "Write a query counting the users. One sql block, no commentary.".into(),

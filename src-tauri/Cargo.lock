@@ -876,9 +876,11 @@ dependencies = [
 name = "db-query"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "futures-util",
  "keyring",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",

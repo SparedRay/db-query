@@ -63,6 +63,12 @@ pub fn type_hint(sql_type: &str) -> TypeHint {
         | "NEWDECIMAL" | "FLOAT UNSIGNED" | "DOUBLE UNSIGNED" | "DECIMAL UNSIGNED" => {
             TypeHint::Numeric
         }
+        // Elasticsearch's own numeric names. The hint drives alignment and
+        // nothing else, so it maps type *names* rather than one engine's types
+        // — a second engine that says "long" should still right-align.
+        "LONG" | "SHORT" | "BYTE" | "HALF_FLOAT" | "SCALED_FLOAT" | "UNSIGNED_LONG" => {
+            TypeHint::Numeric
+        }
         "BOOLEAN" | "BOOL" => TypeHint::Bool,
         "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" | "YEAR" => TypeHint::Temporal,
         "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "GEOMETRY" => {

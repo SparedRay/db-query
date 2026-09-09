@@ -67,6 +67,20 @@ tauri-plugin-updater = "2.11.0"
 # `aws-lc-rs`, which is a new crypto crate *and* needs cmake and NASM to build,
 # which would land on Windows CI. The updater plugin already installs rustls
 # with the `ring` provider, and that is the provider this uses.
+# Dynamic dispatch for the engine trait. `dyn Trait` with async methods is not
+# object-safe natively, and the engine is chosen at runtime from a profile.
+# Already present on Linux via keyring -> secret-service -> zbus; on Windows this
+# adds one crate. It is a **proc macro**, so it runs at build time and puts zero
+# bytes in the binary. MIT OR Apache-2.0, read from the vendored Cargo.toml.
+async-trait = "0.1"
+
+# Only to install the process-wide crypto provider — see `install_tls` in
+# lib.rs. `reqwest` is built with `rustls-no-provider` (deliberately, to keep
+# `aws-lc-rs` and its cmake/NASM build out of Windows CI), which means *somebody*
+# has to choose one, and until now nobody did: the first `Client::new()` panics.
+# Already linked at 0.23 via tauri-plugin-updater, so this adds no crate.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "stream",
