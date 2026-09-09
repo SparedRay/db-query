@@ -26,7 +26,9 @@ import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
 import { createTheme, type ThemePref } from "./theme";
 import {
-  AI_PRESETS, FONTS, applyAppearance, load as loadSettings, save as saveSettings,
+  AI_PRESETS, EDITOR_THEMES, FONTS, applyAppearance, load as loadSettings,
+  type EditorTheme,
+  save as saveSettings,
 } from "./settings";
 import { contextMenu } from "./menu";
 import { icon, type IconName } from "./icons";
@@ -106,6 +108,7 @@ const els = {
   setTheme: $<HTMLSelectElement>("set-theme"),
   setFont: $<HTMLSelectElement>("set-font"),
   setFontSize: $<HTMLInputElement>("set-font-size"),
+  setEditorColours: $<HTMLSelectElement>("set-editor-colours"),
   setAutoLimit: $<HTMLInputElement>("set-autolimit"),
   setLint: $<HTMLInputElement>("set-lint"),
   setTimeout: $<HTMLInputElement>("set-timeout"),
@@ -1848,6 +1851,9 @@ function applySettings() {
 for (const f of FONTS) {
   els.setFont.append(new Option(f.label, f.stack));
 }
+for (const t of EDITOR_THEMES) {
+  els.setEditorColours.append(new Option(t.label, t.value));
+}
 
 /**
  * The settings dialog's vertical tabs.
@@ -2051,6 +2057,7 @@ function openSettings() {
   els.setTheme.value = theme.current();
   els.setFont.value = settings.fontFamily;
   els.setFontSize.value = String(settings.fontSize);
+  els.setEditorColours.value = settings.editorTheme;
   els.setAutoLimit.checked = settings.autoLimit;
   els.setLint.checked = settings.lint;
   els.setTimeout.value = String(settings.timeoutSecs);
@@ -2070,6 +2077,7 @@ function openSettings() {
 function commit() {
   settings.fontFamily = els.setFont.value;
   settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
+  settings.editorTheme = els.setEditorColours.value as EditorTheme;
   settings.autoLimit = els.setAutoLimit.checked;
   settings.lint = els.setLint.checked;
   settings.timeoutSecs = Math.max(0, Number(els.setTimeout.value) || 0);
@@ -2080,7 +2088,8 @@ function commit() {
 }
 
 for (const el of [
-  els.setFont, els.setFontSize, els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
+  els.setFont, els.setFontSize, els.setEditorColours,
+  els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
 ]) {
   el.onchange = commit;
 }

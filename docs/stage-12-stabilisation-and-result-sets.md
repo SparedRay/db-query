@@ -894,3 +894,59 @@ section.
 
 `drawSelection` does hide the native selection, so there is no second highlight
 underneath and no `::selection` rule of ours to write.
+
+---
+
+## 20. Editor colour presets, and the dark theme's syntax colours — 2026-09-09
+
+Found while measuring §19: **the editor's syntax colours never followed the
+theme at all.** The same `defaultHighlightStyle` was in force on both, and its
+colours are fixed and written for a light background. Measured against `--bg`:
+
+| token | colour | on light | on dark |
+|---|---|---|---|
+| keyword | `#770088` | 9.81:1 | **1.81:1** |
+| comment | `#994400` | 6.60:1 | **2.69:1** |
+| number | `#116644` | 6.98:1 | **2.54:1** |
+
+Keywords at 1.81:1 are not dim, they are unreadable. Nobody reported it because
+the app's own chrome followed the theme correctly, so the editor looked *washed
+out* rather than broken — and this is the third rule in three days that appeared
+to be wired up and was not.
+
+### The fix is the feature
+
+Replacing `defaultHighlightStyle` with a `HighlightStyle` over `var(--syn-*)`
+fixes the dark theme **and** makes an editor theme a block of custom properties
+with no code behind it. Those are the same change, which is why the answer to
+"what is the quick path to custom themes" was "fix this bug".
+
+Eight tokens — keyword, string, number, comment, name, type, function, punct —
+mapped to the tags `@codemirror/lang-sql` actually emits, read from the package
+rather than guessed. A rule for a tag the grammar never produces is another rule
+that looks like it works.
+
+### Three presets, not a colour picker
+
+*Default*, *Muted*, *High contrast*, chosen in Settings → Appearance and stored
+like any other preference. Each is written for **both** grounds, so the editor
+palette and the light/dark theme stay separate choices and the editor never
+disagrees with the window around it. `data-editor-theme` on `<html>`; Default
+sets no attribute, so its palette is the plain `:root` block.
+
+A colour picker was considered and rejected for now: every custom palette is one
+the contrast test below cannot vet in advance, and the value of these presets is
+precisely that they *have* been vetted.
+
+### 48 measurements, and one test that matters more
+
+`tests/ui/editor-theme.spec.ts` asserts every token in every preset on both
+grounds — 3 × 2 × 8 — at 4.5:1, and at **7:1** for High contrast, which has to
+earn its name.
+
+But the test that actually catches this bug is the small one: *the preset
+reaches the text in the editor*. Reinstating `defaultHighlightStyle` leaves all
+48 palette assertions green — the tokens are still defined and still readable,
+they are simply not being used — and reddens that one alone. Checked by doing
+it. A guard on the values would have missed the entire defect it was written
+for.

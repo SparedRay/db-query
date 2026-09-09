@@ -98,6 +98,86 @@
   color-scheme: light;
 }
 
+/* --- editor syntax colours --------------------------------------------------
+   Eight tokens, in three presets, each written for both grounds. Two things
+   made these worth having rather than accepting CodeMirror's defaults:
+
+   1. `defaultHighlightStyle`'s colours are **fixed for a light background** and
+      were being used on the dark theme too — keywords at 1.81:1, comments at
+      2.69, numbers at 2.54, all measured. The dark theme's editor had never
+      actually been legible.
+   2. Once the colours are tokens, an editor theme is a block of custom
+      properties and nothing else.
+
+   Every one of the 48 combinations below is asserted at 4.5:1 against its own
+   background by `tests/ui/editor-theme.spec.ts` — 7:1 for High contrast, which
+   is the point of it. Do not add a colour here without adding it there. */
+:root {
+  --syn-keyword: #c792ea;
+  --syn-string: #a5d6a7;
+  --syn-number: #f0a868;
+  --syn-comment: #8b95a5;
+  --syn-name: #d7dae0;
+  --syn-type: #7fd3dd;
+  --syn-function: #82b1ff;
+  --syn-punct: #aab3c0;
+}
+:root[data-theme="light"] {
+  --syn-keyword: #7c3aed;
+  --syn-string: #0a7d3f;
+  --syn-number: #b45309;
+  --syn-comment: #5b6270;
+  --syn-name: #1b1f27;
+  --syn-type: #0e6f7f;
+  --syn-function: #1d4ed8;
+  --syn-punct: #4b5563;
+}
+
+/* Muted: the same structure, less shouting. Each preset block sets the whole
+   set, because a partial one would inherit half a palette from Default. */
+:root[data-editor-theme="muted"] {
+  --syn-keyword: #b9b3d6;
+  --syn-string: #a9c3a9;
+  --syn-number: #d3b48c;
+  --syn-comment: #828a99;
+  --syn-name: #cdd2da;
+  --syn-type: #a3c1c6;
+  --syn-function: #a8bcd8;
+  --syn-punct: #9aa2af;
+}
+:root[data-editor-theme="muted"][data-theme="light"] {
+  --syn-keyword: #5b4a86;
+  --syn-string: #3a6b4a;
+  --syn-number: #7a5a2e;
+  --syn-comment: #61697a;
+  --syn-name: #252a33;
+  --syn-type: #3c6169;
+  --syn-function: #3c5a8a;
+  --syn-punct: #565e6c;
+}
+
+:root[data-editor-theme="contrast"] {
+  --syn-keyword: #e39bff;
+  --syn-string: #8ff0a4;
+  --syn-number: #ffc266;
+  --syn-comment: #b6bfcc;
+  --syn-name: #ffffff;
+  --syn-type: #7ce8f5;
+  --syn-function: #8ec7ff;
+  --syn-punct: #d5dbe4;
+}
+:root[data-editor-theme="contrast"][data-theme="light"] {
+  --syn-keyword: #5b21b6;
+  --syn-string: #065f46;
+  --syn-number: #7c2d12;
+  --syn-comment: #374151;
+  --syn-name: #000000;
+  --syn-type: #0c4a6e;
+  --syn-function: #1e3a8a;
+  --syn-punct: #1f2937;
+}
+
+
 * { box-sizing: border-box; }
 
 html, body, #app { height: 100%; margin: 0; }
