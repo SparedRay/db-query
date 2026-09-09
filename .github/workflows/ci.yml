@@ -67,7 +67,23 @@ jobs:
       # compile without these. Mirrors the apt step in README.md.
       - name: System libraries
         run: |
-          sudo apt-get update
+          # `apt-get update` fails the whole step if *any* configured repository
+          # is unhappy, including ones this build never installs from. The
+          # runner image configures Google's Chrome repo, and on 2026-09-09 its
+          # index was being republished while we fetched it — a hash-sum
+          # mismatch on a repo we do not read failed the Linux build.
+          #
+          # Everything below comes from Ubuntu's own archive, so the third-party
+          # lists are dropped first. `rm -f` on names that may not be there is
+          # deliberate: this must not become a second thing that can fail.
+          #
+          # It also covers the browser step further down: `playwright install
+          # --with-deps` runs its own `apt-get update`, which would have hit the
+          # same repo, and a flag on this line would not have reached it.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
+          # For the transient kind, which retrying does fix.
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y \
             build-essential curl wget file pkg-config patchelf \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
