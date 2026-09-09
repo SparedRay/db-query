@@ -29,6 +29,7 @@ run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --lib",
   "cargo test --manifest-path src-tauri/Cargo.toml --test sample_files",
   "cargo test --manifest-path src-tauri/Cargo.toml --test packaging",
+  "node --test scripts/set-version.test.mjs",
 ]
 
 [tasks.test-ui]

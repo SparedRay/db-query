@@ -69,16 +69,25 @@ if (!sync) {
 
 // Only the `[package]` version — a `version = ` under any dependency table must
 // not be touched, which is why this anchors on the section rather than the key.
+// The `(?!^\[)` keeps the search inside `[package]`: without it, a `[package]`
+// with no version of its own would reach forward into the next table and stamp
+// a dependency's.
+const PACKAGE_VERSION = /(\[package\]\r?\n(?:(?!^\[)[^\n]*\r?\n)*?)version(\s*=\s*)"[^"]*"/m;
+
 const cargoPath = "src-tauri/Cargo.toml";
 const cargo = readFileSync(cargoPath, "utf8");
-const replaced = cargo.replace(
-  /(\[package\][\s\S]*?\n)version\s*=\s*"[^"]*"/,
-  `$1version = "${version}"`,
-);
-if (replaced === cargo) {
+// Asked as "did the pattern match?", never as "did the text change?".
+//
+// Those are the same question only while the tree is behind the tag. Since
+// releases are cut with `npm version`, the tagged commit already carries the
+// number, so CI stamps a version Cargo.toml **already has** — a no-op rewrite
+// that the old check reported as "could not find a [package] version", failing
+// the release on both platforms. See the release workflow's own note: "CI then
+// stamps the same value and changes nothing."
+if (!PACKAGE_VERSION.test(cargo)) {
   console.error(`could not find a [package] version in ${cargoPath}`);
   process.exit(1);
 }
-writeFileSync(cargoPath, replaced);
+writeFileSync(cargoPath, cargo.replace(PACKAGE_VERSION, `$1version$2"${version}"`));
 
 console.log(sync ? `Cargo.toml synced to ${version}` : `version set to ${version}`);

@@ -144,12 +144,31 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       # --- `mise run test` ---
+      # `npm version` writes the version into Cargo.toml and nothing into
+      # Cargo.lock, which records it too — so the tagged commit carried a
+      # lockfile a release behind, and `cargo build --locked` (what packagers
+      # and `cargo install` use) refuses that outright.
+      #
+      # Checked here rather than as a Rust test, because a Rust test cannot see
+      # it: `cargo test` regenerates the lockfile before the test runs, quietly
+      # repairing the drift it was meant to catch. The build above has already
+      # done the same — so the question worth asking is whether that *changed*
+      # anything.
+      - name: The committed lockfile is the one a build produces
+        run: git diff --exit-code src-tauri/Cargo.lock
+
       - name: Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Sample-file fixtures
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
       - name: Packaging invariants (version source, updater endpoint)
         run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
+
+      # The release stamps the version on both platforms, so this runs on both.
+      # It is the step that failed v0.3.4 — after the tag had been pushed, which
+      # is the worst place to learn that a script has a bug.
+      - name: Release version stamping
+        run: node --test scripts/set-version.test.mjs
 
       # --- the live suite: the half of `mise run test-live` that can run here ---
       # The keychain half cannot: a Linux runner has no D-Bus secret service.
@@ -246,12 +265,31 @@ jobs:
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
+      # `npm version` writes the version into Cargo.toml and nothing into
+      # Cargo.lock, which records it too — so the tagged commit carried a
+      # lockfile a release behind, and `cargo build --locked` (what packagers
+      # and `cargo install` use) refuses that outright.
+      #
+      # Checked here rather than as a Rust test, because a Rust test cannot see
+      # it: `cargo test` regenerates the lockfile before the test runs, quietly
+      # repairing the drift it was meant to catch. The build above has already
+      # done the same — so the question worth asking is whether that *changed*
+      # anything.
+      - name: The committed lockfile is the one a build produces
+        run: git diff --exit-code src-tauri/Cargo.lock
+
       - name: Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Sample-file fixtures
         run: cargo test --manifest-path src-tauri/Cargo.toml --test sample_files
       - name: Packaging invariants (version source, updater endpoint)
         run: cargo test --manifest-path src-tauri/Cargo.toml --test packaging
+
+      # The release stamps the version on both platforms, so this runs on both.
+      # It is the step that failed v0.3.4 — after the tag had been pushed, which
+      # is the worst place to learn that a script has a bug.
+      - name: Release version stamping
+        run: node --test scripts/set-version.test.mjs
 
       # E0 / C3w, carried since Stage 2 and unanswerable until now: does the
       # keychain layer actually work against Windows Credential Manager?
