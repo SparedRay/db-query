@@ -74,8 +74,16 @@ function bundledPackages() {
 
 function npmSection() {
   const lines = [];
+  const licences = [];
   const packages = bundledPackages();
-  lines.push(`NPM PACKAGES (${packages.length})`, "");
+  // Its own banner, in the same shape as the crate half's rules. Without one
+  // the file reads as two documents stapled together.
+  lines.push(
+    "=".repeat(80),
+    `NPM PACKAGES (${packages.length}) — bundled into the frontend`,
+    "=".repeat(80),
+    "",
+  );
 
   for (const name of packages) {
     const dir = join("node_modules", name);
@@ -99,16 +107,22 @@ function npmSection() {
       licenceFiles.find((f) => !/APACHE/i.test(f)) ||
       licenceFiles[0];
 
+    // The same layout the crate blocks use, so one reading habit covers both.
+    const licence = preferMit ? "MIT License" : declared;
+    licences.push([licence, name]);
     lines.push(
-      "=".repeat(80),
-      `${name} ${meta.version}  —  ${preferMit ? "MIT" : declared}`,
-      "=".repeat(80),
+      "-".repeat(80),
+      licence,
+      "-".repeat(80),
+      "",
+      "Applies to:",
+      `  - ${name} ${meta.version}`,
       "",
       readFileSync(join(dir, chosen), "utf8").trimEnd(),
       "",
     );
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), licences };
 }
 
 // ----------------------------------------------------------------- rust half
@@ -171,6 +185,192 @@ function rustSection() {
   }
 }
 
+
+// ------------------------------------------------------- checking the output
+//
+// Everything below exists because of a review of the shipped file (Stage 12
+// §17). Each check corresponds to a defect that was in it, and each defect was
+// invisible: cargo-about exited 0 every time, and the file looked plausible.
+
+const RULE = "=".repeat(80);
+
+/**
+ * Split the rendered crate section into `{ name, crates, text }` blocks.
+ *
+ * The template emits `RULE / name / RULE / "Applies to:" / list / text`, so
+ * splitting on the rule alternates name, body, name, body from index 1.
+ */
+export function parseBlocks(section) {
+  const parts = section.split(`\n${RULE}\n`);
+  const preamble = parts.shift();
+  const blocks = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const name = parts[i].trim();
+    const body = parts[i + 1];
+    const m = body.match(/^\nApplies to:\n((?:  - .*\n)+)\n([\s\S]*)$/);
+    if (!m) throw new Error(`could not parse the block for "${name}"`);
+    blocks.push({
+      name,
+      // Unique: cargo-about can list the same crate twice under one licence.
+      crates: [...new Set(m[1].trimEnd().split("\n").map((l) => l.replace(/^  - /, "")))],
+      text: m[2].trimEnd(),
+    });
+  }
+  return { preamble, blocks };
+}
+
+export function renderBlocks(blocks) {
+  return blocks
+    .map(
+      (b) =>
+        `${RULE}\n${b.name}\n${RULE}\n\nApplies to:\n` +
+        `${b.crates.map((c) => `  - ${c}`).join("\n")}\n\n${b.text}\n`,
+    )
+    .join("\n");
+}
+
+/** The crate's name alone, from an "Applies to" line. */
+const crateName = (line) => line.split(/\s+/)[0];
+
+/**
+ * Merge blocks that say the same thing.
+ *
+ * `ring`'s Apache text appeared twice differing only in indentation, and
+ * `miniz_oxide`'s twice differing by a blank line. Compared on collapsed
+ * whitespace, so a reflow cannot hide a duplicate.
+ */
+export function dedupe(blocks) {
+  const seen = new Map();
+  for (const b of blocks) {
+    const key = `${b.name}\u0000${b.text.replace(/\s+/g, " ").trim()}`;
+    const first = seen.get(key);
+    if (!first) {
+      seen.set(key, b);
+      continue;
+    }
+    for (const c of b.crates) if (!first.crates.includes(c)) first.crates.push(c);
+    first.crates.sort();
+  }
+  return [...seen.values()];
+}
+
+/**
+ * The crates cargo-about could not find a notice for, and what we say instead.
+ *
+ * Its fallback is the SPDX *template* — `Copyright (c) <year> <copyright
+ * holders>`. MIT's one substantive condition is that the copyright notice be
+ * retained, and a literal `<copyright holders>` retains nothing; printing it is
+ * worse than saying plainly that there was nothing to retain.
+ *
+ * Every crate that reaches this point has been checked by hand: each one either
+ * publishes no licence file at all, or publishes one that cannot be read (the
+ * sqlx crates ship `LICENSE-MIT` as a symlink to `../LICENSE-MIT`, which does
+ * not resolve inside the package, so its content is that string). The ones that
+ * *do* ship a real notice are named in `about.toml` instead — see the
+ * clarifications there.
+ */
+export const PLACEHOLDER = "Copyright (c) <year> <copyright holders>";
+
+export function explainMissingNotices(blocks) {
+  for (const b of blocks) {
+    if (!b.text.includes(PLACEHOLDER)) continue;
+    b.text = b.text.replace(
+      PLACEHOLDER,
+      [
+        "No copyright notice is reproduced here, because none is published.",
+        "",
+        "Each crate above either ships no licence file in its crates.io package,",
+        "or ships one that cannot be read from it. There is therefore no notice to",
+        "retain, and inventing one would be worse than saying so. The licence they",
+        "grant is below; the holder of each copyright is the project at the URL",
+        "beside its name.",
+      ].join("\n"),
+    );
+  }
+  return blocks;
+}
+
+/** Crates we told `about.toml` to clarify, which must therefore be clarified. */
+function clarifiedCrates() {
+  const toml = readFileSync("src-tauri/about.toml", "utf8");
+  return [...toml.matchAll(/^\[([A-Za-z0-9_.-]+)\.clarify\]/gm)].map((m) => m[1]);
+}
+
+/**
+ * Fail the build on any defect the review found.
+ *
+ * The point is not tidiness. A clarification goes stale **silently** when a
+ * crate is bumped — the reason is logged at `debug`, which nothing reads, and
+ * generation exits 0 with the wrong output. That is exactly how cargo-about's
+ * own built-in `ring` workaround came to do nothing at all while appearing to
+ * be in force.
+ */
+export function verify(blocks) {
+  const problems = [];
+
+  const missing = new Set(
+    blocks.flatMap((b) => (b.text.includes(PLACEHOLDER) ? b.crates.map(crateName) : [])),
+  );
+  for (const crate of clarifiedCrates()) {
+    if (missing.has(crate)) {
+      problems.push(
+        `${crate} is clarified in about.toml but still has no notice — the ` +
+          "clarification has gone stale (a version bump changes the checksum). " +
+          "Re-check the path and SHA-256 against the crate as published now.",
+      );
+    }
+  }
+
+  // Licence *notices*, not source files. cargo-about extracts whole files whose
+  // header happens to match a licence, which is how `eddsa_digest()` and a set
+  // of C typedefs came to be in a document of legal notices.
+  for (const b of blocks) {
+    const code = b.text.match(/^\s*(#include|pub fn |fn main|mod \w+;|typedef |static const )/m);
+    if (code) {
+      problems.push(
+        `the "${b.name}" block covering ${b.crates[0]} contains source code ` +
+          `(${JSON.stringify(code[1])}), not a licence notice`,
+      );
+    }
+  }
+
+  if (blocks.some((b) => b.crates.some((c) => crateName(c) === "db-query"))) {
+    problems.push("db-query lists itself in its own third-party licence file");
+  }
+
+  if (problems.length) {
+    throw new Error(
+      `the generated licence file has ${problems.length} defect(s):\n\n` +
+        problems.map((p) => `  * ${p}`).join("\n\n") +
+        "\n",
+    );
+  }
+}
+
+/**
+ * One count per licence, over **distinct crates**.
+ *
+ * cargo-about's own overview counts entries, not crates: `ring` alone was
+ * eighteen of the eighteen "ISC License", for three actually-ISC crates.
+ */
+export function counts(blocks, npmLicences) {
+  const byLicence = new Map();
+  for (const b of blocks) {
+    const set = byLicence.get(b.name) ?? new Set();
+    for (const c of b.crates) set.add(crateName(c));
+    byLicence.set(b.name, set);
+  }
+  for (const [licence, pkg] of npmLicences) {
+    const set = byLicence.get(licence) ?? new Set();
+    set.add(pkg);
+    byLicence.set(licence, set);
+  }
+  return [...byLicence.entries()]
+    .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]))
+    .map(([name, set]) => `${name}: ${set.size}`)
+    .join(", ");
+}
+
 // ------------------------------------------------------------------- assemble
 
 const header = `db-query — third-party licences
@@ -194,9 +394,27 @@ those apart from linked dependencies, and over-listing is the safe direction —
 naming something we do not ship costs nothing, while omitting something we do
 ship is the failure this file exists to prevent.
 
-Known to be build-time only: cssparser, cssparser-macros, dtoa-short, selectors
-(all reached via dom_query -> tauri-utils -> tauri-codegen -> tauri-macros, a
-proc-macro crate).
+Several dozen entries are in that category, not a handful: everything reached
+only through a proc macro. cssparser, cssparser-macros, dtoa-short and selectors
+(via dom_query -> tauri-utils -> tauri-codegen -> tauri-macros) are the ones
+traced by hand, and syn, quote, proc-macro2, serde_derive, darling, heck,
+strsim, cargo_metadata, tauri-codegen, tauri-macros, phf_macros and walkdir are
+plainly the same case. They are listed anyway, for the reason above.
+
+A NOTE ON WHAT IS REPRODUCED
+----------------------------
+Each block below is the licence text as the crate publishes it, not a text we
+compose. Three consequences worth stating, because they look like defects and
+are not:
+
+  * Some crates' own LICENSE-MIT carries no copyright line — that is their
+    authors' convention, and reproducing what they publish means reproducing
+    that. Where a crate publishes no readable licence file at all, the block
+    says so in place of a copyright notice rather than printing a template.
+  * ring's Apache-2.0 block ends with the Go and Chromium BSD-3 notices,
+    because ring ships them inside that file. They are part of ring's notice.
+  * A crate can appear under more than one licence when it publishes more than
+    one that applies.
 
 MOZILLA PUBLIC LICENSE 2.0
 --------------------------
@@ -212,10 +430,33 @@ Its source is available at that address and under the terms reproduced below.
 
 `;
 
-process.stdout.write(`Resolving crates for ${target}…\n`);
-const rust = rustSection();
-process.stdout.write("Reading the bundle's sourcemap…\n");
-const npm = npmSection();
+// Guarded so `scripts/attribution.test.mjs` can import the checks above
+// without generating anything: importing this file used to run the build.
+if (import.meta.main) {
+  process.stdout.write(`Resolving crates for ${target}…\n`);
+  const rust = rustSection();
+  process.stdout.write("Reading the bundle's sourcemap…\n");
+  const npm = npmSection();
 
-writeFileSync(out, `${header}${rust}\n\n${npm}\n`);
-process.stdout.write(`wrote ${out}\n`);
+  // cargo-about's output is a draft, not the document. Merge what it said twice,
+  // say plainly where it had nothing to say, and refuse to write the file at all
+  // if any of the defects the last review found have come back.
+  const { blocks } = parseBlocks(rust);
+  const cleaned = explainMissingNotices(dedupe(blocks));
+  verify(cleaned);
+
+  const crateBanner = [
+    "=".repeat(80),
+    `CRATES (${cleaned.reduce((n, b) => n + b.crates.length, 0)}) — linked into the binary`,
+    "=".repeat(80),
+    "",
+  ].join("\n");
+
+  const overview = `LICENCES, BY DISTINCT PACKAGE\n${counts(cleaned, npm.licences)}\n`;
+
+  writeFileSync(
+    out,
+    `${header}${overview}\n${crateBanner}\n${renderBlocks(cleaned)}\n${npm.text}\n`,
+  );
+  process.stdout.write(`wrote ${out}\n`);
+}

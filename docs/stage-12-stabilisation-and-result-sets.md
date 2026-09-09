@@ -649,3 +649,98 @@ Still open, and honestly so:
   Stage 8 §6 for where it lives and why it is not a CI artefact.
 - **N1** — CI runs every suite on both platforms and is green, which is not the
   same statement as someone having used the built app on both.
+
+---
+
+## 17. The licence file was reviewed, and it was wrong — 2026-09-09
+
+A2 asked whether the audit covered the Windows tree. It did. Nobody had read
+what it *said*, and reading it found twelve defects — none of which had ever
+failed anything. `cargo about` exited 0 every time, `--fail` never fired, CI was
+green, and the file looked plausible. That is the whole lesson: **an
+obligation you generate is not an obligation you have met.**
+
+### The one that mattered
+
+Roughly fifty crates — the whole Tauri family, all of windows-rs, chrono, sqlx,
+libm, minisign-verify, the unic crates — carried this:
+
+```
+MIT License
+Copyright (c) <year> <copyright holders>
+```
+
+That is cargo-about's fallback **template**, used when it finds no licence file.
+MIT's one substantive condition is that the copyright notice be retained, and a
+literal `<copyright holders>` retains nothing. Fifty crates with no attribution
+at all, in the file whose entire purpose is attribution.
+
+Reading cargo-about's own trace found two causes, neither of them "the crate
+ships nothing":
+
+- **The filename never reaches the scanner.** It walks with the `ignore`
+  crate's default file types, and `LICENSE_MIT` — an underscore, which is how
+  the whole Tauri family spells it — matches none of them. Tauri's
+  `LICENSE_APACHE-2.0` *is* scanned, and only because it ends in `.0` and so
+  looks like a man page. windows-rs spells it `license-mit`, lowercase, and
+  loses the same way.
+- **Confidence.** `minisign-verify`'s LICENSE is detected as MIT at 0.64 against
+  a threshold of 0.8, and discarded. Lowering the threshold is not the answer:
+  at 0.3 the file grows by 2500 lines of source whose headers now match.
+
+Thirty-six crates are now named in `about.toml` and carry their real notices.
+Eleven remain without one, and each was checked by hand: the unic crates,
+dlopen2, siphasher and webview2-com publish **no licence file at all**, and the
+sqlx crates publish `LICENSE-MIT` as a symlink to `../LICENSE-MIT`, which does
+not resolve inside the package — its content is that string. For those, the file
+now says so plainly instead of printing a template.
+
+### The rest
+
+- **`ring` was shipping source code.** It puts four licences in one file, so the
+  scanner fell back to hunting headers and extracted whole `.rs` and `.h` files
+  that merely open with the ISC header — `eddsa_digest()`, a set of C typedefs,
+  and a stub reading `mod bits_tests;`. Eighteen "ISC License" entries, for
+  three crates that are actually ISC. cargo-about *has* a built-in workaround
+  for exactly this, and it **fails silently**: ring 0.17.14 restructured its
+  licensing, the clarification no longer matches, and the reason is logged at
+  `debug`. Ours is written against the files ring ships today. `schemars_derive`
+  (carrying a copy of regex-syntax's `escape()`) and `libdbus-sys` (vendored
+  dbus C headers) had the same problem and are named too.
+- **`tracing-core` was attributed to the wrong people** — it appeared twice,
+  once correctly as "Tokio Contributors" and once under the `zip` crate's
+  copyright. The only outright false statement in the file.
+- **`atomic-waker`** was headed "MIT License" over a body that opened with the
+  full Apache-2.0 grant.
+- **The counts counted blocks, not crates**, which is why "ISC License: 18" read
+  as eighteen ISC crates. They are counted by distinct package now, and the npm
+  half is included.
+- **db-query listed itself**, under a placeholder copyright, in its own
+  third-party licence file. `cargo-about`'s `private.ignore` keys off `publish`
+  in Cargo.toml, which was never set.
+- Duplicate blocks (ring's Apache text twice, differing by indentation;
+  `miniz_oxide` twice, differing by a blank line) are merged, compared on
+  collapsed whitespace so a reflow cannot hide one.
+- The npm half has a banner and the same block layout as the crates, instead of
+  reading as a second document stapled on.
+- The build-time-only note claimed four crates when the real superset is several
+  dozen.
+
+### What stops this happening again
+
+Not care. `scripts/attribution.mjs` now **refuses to write the file** if any of
+these defects is present: a clarification that has gone stale, source code in a
+licence block, or the app listing itself. Ten tests in
+`scripts/attribution.test.mjs` cover each case, and both they and the generation
+run on both platforms in CI.
+
+The guard matters more than the fixes. Every clarification is keyed by a
+SHA-256, so a dependency bump silently un-does one — which is precisely what had
+already happened to cargo-about's own `ring` workaround, in a file that looked
+fine. A build that fails is the only version of this that stays fixed.
+
+### One mistake worth recording
+
+I destroyed `about.toml` mid-edit with `open(p, "w").write(open(p).read() ...)`,
+which truncates the file before the read runs. It was rebuilt from `git` plus
+the generated checksums, and every edit after that read first and wrote once.

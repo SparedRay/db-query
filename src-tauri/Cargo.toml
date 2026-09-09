@@ -6,6 +6,10 @@ authors = ["SparedRay"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.82"
+# Not published, and the reason it is written down: cargo-about's `private.ignore`
+# keys off this. Without it, db-query appeared in its own third-party licence
+# file, under a placeholder copyright, beside a preamble already saying it is MIT.
+publish = false
 
 [lib]
 name = "db_query_lib"

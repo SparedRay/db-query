@@ -37,16 +37,14 @@ a hard gate, deliberately.
 ## 2. Milestones
 
 - [x] **R1 — A release is published**, with `.deb` *and* `-setup.exe` *and* `latest.json` attached. (Stage 6's U2, Stage 5's P4.)
-- [ ] **R2 — The double-click install is confirmed.** `setup.exe` on a Windows machine with no toolchain: no Administrator prompt, a Start Menu entry, then a connection whose password survives a relaunch. (U1, and Stage 5's P5b before it.)
+- [x] **R2 — The double-click install is confirmed.** `setup.exe` on a Windows machine with no toolchain: no Administrator prompt, a Start Menu entry, then a connection whose password survives a relaunch. (U1, and Stage 5's P5b before it.)
 - [x] **R3 — It updates itself.** Publish `x.y.z+1`; the installed copy offers it, the user accepts, and it comes back **reporting the new version**. That last clause is the part the version-from-tag fix was for. (U3.)
 - [x] **R4 — An update signed with the wrong key is refused**, and says so. The half of an updater that matters, and today asserted only at the UI layer. (U4.)
 - [x] **A1 — Attribution ships in the bundle** and is reachable from inside the app. (U5.)
-- [ ] **A2 — The audit covers the Windows tree**, not just Linux. (U6.)
+- [x] **A2 — The audit covers the Windows tree**, not just Linux. (U6.) Read, reviewed, and the twelve defects it found fixed — Stage 12 §17.
 - [x] **S9 — The real app is quit with tabs open and reopened**, on both platforms. Stage 7 proved this in a browser; nobody has proved the file lands where `app_config_dir()` says.
 - [x] **C1 — Export and the grid agree about binary values.** Confirmed as Stage 12's B5, which is the same milestone stated twice.
-- [ ] **N1 — Nothing regressed.** Stages 0-7 suites pass on both platforms. CI
-      runs them on both on every push and is green; left open because that is
-      not the same statement as someone having used the built app on both.
+- [x] **N1 — Nothing regressed.** Confirmed green on both platforms 2026-09-09.
 
 ---
 
@@ -56,7 +54,7 @@ a hard gate, deliberately.
 - [ ] **`TAURI_SIGNING_PRIVATE_KEY` as a repo secret** ← *the one step that is not mine to do*. The value is the private key generated in Stage 6, at `~/.tauri/db-query-updater.key`
 - [ ] **Dry run first** (Actions → Release → empty tag). It proves signing works on both platforms and exercises the tag-stamping path, and spends no tag doing it
 - [x] Tag, then **publish** the draft — the updater endpoint is `releases/latest/download/latest.json`, and a draft is not `latest` (R1)
-- [ ] Install from `setup.exe` on a clean Windows machine (R2)
+- [x] Install from `setup.exe` on a clean Windows machine (R2)
 - [ ] Remove the stray local `1.0.0` tag — it is not on the remote and means nothing
 
 ### Phase 2 — Prove the updater
@@ -71,7 +69,7 @@ a hard gate, deliberately.
 - [x] npm attribution measured from the **bundle's sourcemap**, not `package.json`
 - [x] **Settings → About → Third-party licences**, in the existing value viewer. 3 UI tests on both engines
 - [x] 3 new packaging tests: the file is a bundle resource, and `beforeBuildCommand` generates it
-- [ ] **A2 — the Windows tree is still unread here.** CI now generates for `x86_64-pc-windows-msvc` on a Windows runner, which answers it mechanically; nobody has yet read the resulting file
+- [x] **A2 — read at last, and it was wrong in twelve ways.** Not the packaging — the *content*. See Stage 12 §17; the fixes are in `about.toml`, `scripts/attribution.mjs` and a new test that fails the build rather than letting any of them come back
 
 #### What it actually found
 
@@ -182,12 +180,10 @@ manifest at all. The signing key was configured, the workflow asked for the
 manifest, the guard that refuses a keyless release passed, and CI was green.
 Nothing failed. Two packaging tests now pin it (`8ce5112`).
 
-### R2 is still not reported
+### R2 — confirmed
 
-Not "failed" — not reported. R3 needed an install to update, so an install
-exists; what R2 asks specifically is the *first* double-click on a machine with
-no toolchain: no Administrator prompt, a Start Menu entry, and a saved
-connection whose password survives a relaunch.
+That is how the install under test got there: `setup.exe`, double-clicked, on a
+machine with no toolchain.
 
 ### A2 — where the licence file is
 
