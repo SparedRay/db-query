@@ -12,8 +12,9 @@ decisions that were corrected along the way.
 | 3 | [Schema actions & result export](stage-3-explore-and-export.md) | 🔒 **Frozen** — built; E1-E8 click-through never run, carried to Stage 4 |
 | 4 | [Testability](stage-4-testability.md) | 🔒 **Frozen** — 192 UI tests on both engines; E1-E8 answered; CI + Windows carried to Stage 5 |
 | 5 | [Packaging & distribution](stage-5-packaging.md) | 🔒 **Frozen** — public repo, MIT, CI green on both platforms, installers built; updater and attribution carried to Stage 6 |
-| 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 📋 **Planned** — self-update on Windows, and the licence manifest distribution now obliges |
-| 7 | [Session persistence](stage-7-session-persistence.md) | 🚧 **In progress** — tabs restore on connect; hands-on confirmation pending |
+| 6 | [Updates & attribution](stage-6-updates-and-attribution.md) | 🔒 **Frozen** — updater built and version taken from the tag; never run against a published release, attribution still not shipped |
+| 7 | [Session persistence](stage-7-session-persistence.md) | 🔒 **Frozen** — tabs restore on connect, S1-S8 tested; hands-on confirmation carried to Stage 8 |
+| 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 📋 **Planned** — publish, prove the updater, ship the licence notices |
 
 ## Rules
 

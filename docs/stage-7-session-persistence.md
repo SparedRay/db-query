@@ -1,9 +1,37 @@
 # Stage 7 — Session persistence
 
+> ## 🔒 FROZEN — do not modify
+>
+> This tracker covers **Stage 7**, and its scope is delivered. Tabs, their
+> contents, their order and the one in front survive a quit; a workspace waits
+> in memory and materialises when its connection opens. **S1-S8 are answered by
+> test** — 17 UI tests on both engines and 6 Rust tests — and two of the
+> load-bearing ones were confirmed by removing the fix and watching them fail:
+> the `onConnected` await (nine failures) and the pending-workspace merge.
+>
+> **Two things carry to
+> [Stage 8](stage-8-attribution-and-the-first-release.md):**
+>
+> - **S9 — nobody has quit the real app and reopened it.** Everything here is
+>   proven in a browser against a stubbed backend, which is the right place for
+>   the logic and cannot answer whether the file lands where `app_config_dir()`
+>   says on Windows.
+> - **D4 — tabs stored under a profile that no longer exists.** `onRemoved`
+>   forgets them while the app is running; a session file that was hand-edited,
+>   or crashed mid-removal, is not covered.
+>
+> One pre-existing bug was **found and deliberately not fixed** here: the
+> "Connected to …" status line has never been visible, because the first tab
+> activation overwrites it. Recorded in §5 rather than fixed, since it is not
+> this stage's scope.
+>
+> Corrections belong in the current stage's tracker with a link back here.
+
 **Goal:** the app comes back the way you left it. Tabs, their contents and their
 place in the workspace survive a quit, a crash and an update.
 **Builds on:** [Stage 6 — Updates & attribution](stage-6-updates-and-attribution.md).
-**Status:** 🚧 In progress — restore-on-connect built 2026-09-08.
+**Status:** 🔒 Frozen 2026-09-08 — restore-on-connect delivered and tested;
+hands-on confirmation (S9) and D4 carried to Stage 8.
 
 ---
 

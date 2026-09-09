@@ -1,9 +1,48 @@
 # Stage 6 — Updates & attribution
 
+> ## 🔒 FROZEN — do not modify
+>
+> This tracker covers **Stage 6**. The updater is **built**: the keypair exists,
+> `tauri-plugin-updater` is wired to a signed `latest.json` endpoint, the app
+> asks before installing and refuses honestly on Linux, and the whole path is
+> covered by 4 Rust and 11 UI tests on both engines. Alongside it the stage
+> delivered a light theme, loaders, a settings dialog, the value viewer, panel
+> styling, `SET` reported as a statement rather than a result, definitions for
+> views and tables, headerless copy by default, and — last — an app version that
+> comes from the release tag.
+>
+> **It freezes with two things undone, and neither is a detail.**
+>
+> - **No release has ever been published, so the updater has never run.**
+>   Measured on 2026-09-08, not reported: three tags exist (`v0.1.0`, `v0.1.1`,
+>   `v0.2.0`), `GET /releases` returns `[]`, and the updater endpoint 404s.
+>   **U1-U4 are all unanswered** — no confirmed double-click install, no
+>   confirmed pair of installers, no update ever applied, and no wrong-key
+>   manifest ever refused by anything but a UI-layer stub. The one blocking
+>   step is not ours: `TAURI_SIGNING_PRIVATE_KEY` is still not a repo secret,
+>   and the release workflow now refuses to start without it.
+> - **Attribution still does not ship.** No `cargo about`, no
+>   `THIRD-PARTY-LICENSES` in the bundle, no About dialog. This is **Stage 5's
+>   P7 carried a second time**, and §1 of this tracker argued it is an
+>   obligation rather than a nicety — installers are being built for
+>   distribution, and MIT, BSD and ISC all require their notices to travel with
+>   the binary while `option-ext` is MPL-2.0.
+>
+> U7 *is* met: CI is green on Linux and Windows, and the Stage 0-5 suites pass
+> there on every push.
+>
+> All of the above carries to
+> [Stage 8](stage-8-attribution-and-the-first-release.md), together with the
+> Phase 4 consistency debts.
+>
+> Corrections belong in the current stage's tracker with a link back here.
+
 **Goal:** finish what shipping started. The app installs; it does not yet update
 itself, and it does not yet carry the attribution that distributing it obliges.
 **Builds on:** [Stage 5 — Packaging & distribution](stage-5-packaging.md) (frozen).
-**Status:** 📋 Planned — **not started**.
+**Status:** 🔒 Frozen 2026-09-08 — updater built and version-from-tag fixed;
+**never exercised against a published release**, and **attribution still not
+shipped**. Both carried to Stage 8.
 
 ---
 
@@ -36,7 +75,7 @@ Two of the items below are not polish:
 - [ ] **U4 — An update signed with the wrong key is refused**, and says so. The half of an updater that matters.
 - [ ] **U5 — Attribution ships in the bundle** and is reachable from inside the app.
 - [ ] **U6 — The audit covers the Windows tree**, not just Linux.
-- [ ] **U7 — Nothing regressed.** Stages 0-5 suites pass on both platforms.
+- [x] **U7 — Nothing regressed.** Stages 0-5 suites pass on both platforms, on every push.
 
 ---
 
