@@ -16,8 +16,8 @@ decisions that were corrected along the way.
 | 7 | [Session persistence](stage-7-session-persistence.md) | 🔒 **Frozen** — tabs restore on connect, S1-S8 tested; hands-on confirmation carried to Stage 8 |
 | 8 | [Attribution & the first real release](stage-8-attribution-and-the-first-release.md) | 🚧 **In progress** — licence notices ship and are readable in-app; publishing and proving the updater still open |
 | 9 | [Query history](stage-9-query-history.md) | 🚧 **In progress** — recorded, searchable and safe; hands-on confirmation pending |
-| 10 | [An assistant that writes SQL](stage-10-assistant.md) | 🚧 **Experimental** — proposes SQL, never runs it; Anthropic or any OpenAI-compatible server, local included; unverified against a real endpoint |
-| 11 | [A second engine: Elasticsearch SQL](stage-11-elasticsearch.md) | 🚧 **Built** — engine trait + capabilities; Elasticsearch runs end to end against a live cluster; not yet clicked through |
+| 10 | [An assistant that writes SQL](stage-10-assistant.md) | 🚧 **Experimental** — proposes SQL, never runs it; Anthropic or any OpenAI-compatible server, local included; verified against a local model; schema is loaded before the question so the model does not guess |
+| 11 | [A second engine: Elasticsearch SQL](stage-11-elasticsearch.md) | 🚧 **Built** — engine trait + capabilities; Elasticsearch runs end to end against a live cluster; reviewed hands-on 2026-09-09 (§11) |
 
 ## Rules
 

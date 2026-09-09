@@ -72,8 +72,13 @@ echo "fixture ready on 127.0.0.1:3306 (root / devpassword, database poc)"
 description = "Stop and remove the MySQL fixture container"
 run = "podman stop db-query-mysql && podman rm db-query-mysql"
 
+# The seed deletes `orders` before rebuilding it, and gives every document an
+# explicit `_id`. Both matter: `{"index":{}}` mints a new id per run, so the
+# original seed *appended* three more documents each time it was run and the
+# live tests started failing on `rows.len() == 3`. A fixture that is not
+# idempotent is a fixture that lies the second time you use it.
 [tasks.es-up]
-description = "Start an Elasticsearch fixture (security off) and seed an index"
+description = "Start an Elasticsearch fixture (security off) and re-seed an index"
 run = """
 podman run -d --name db-query-es \
   -e discovery.type=single-node \
@@ -82,6 +87,7 @@ podman run -d --name db-query-es \
   -p 9200:9200 docker.elastic.co/elasticsearch/elasticsearch:8.15.0 \
   || podman start db-query-es
 until curl -sf http://localhost:9200 >/dev/null 2>&1; do sleep 2; done
+curl -s -X DELETE http://localhost:9200/orders >/dev/null
 curl -sf -X PUT http://localhost:9200/orders -H 'content-type: application/json' -d '{
   "mappings": {"properties": {
     "user": {"type": "keyword"},
@@ -90,11 +96,11 @@ curl -sf -X PUT http://localhost:9200/orders -H 'content-type: application/json'
   }}
 }' >/dev/null || true
 curl -sf -X POST http://localhost:9200/orders/_bulk -H 'content-type: application/x-ndjson' --data-binary '
-{"index":{}}
+{"index":{"_id":"1"}}
 {"user":"ada","total":120.5,"created_at":"2026-01-02T00:00:00Z"}
-{"index":{}}
+{"index":{"_id":"2"}}
 {"user":"grace","total":80.0,"created_at":"2026-01-03T00:00:00Z"}
-{"index":{}}
+{"index":{"_id":"3"}}
 {"user":"ada","total":15.25,"created_at":"2026-01-04T00:00:00Z"}
 ' >/dev/null
 curl -sf -X POST http://localhost:9200/orders/_refresh >/dev/null

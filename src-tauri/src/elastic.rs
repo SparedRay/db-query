@@ -511,10 +511,48 @@ impl crate::engine::Engine for ElasticEngine {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+
+    fn quote_ident(&self, name: &str) -> Result<String, String> {
+        Ok(quote_ident(name))
+    }
+
+    /// No prefix. A catalog here is a *remote cluster*, not a schema, and
+    /// `"catalog"."orders"` is not how you name a local index — the server
+    /// answers `SELECT * FROM "orders"`. Qualifying it the MySQL way produced a
+    /// snippet that could not run, which is what double-clicking an index did
+    /// before this existed.
+    fn qualify(&self, _ns: &str, table: &str) -> Result<String, String> {
+        Ok(quote_ident(table))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    /// The bug this fixes: double-clicking an index produced
+    /// ``SELECT * FROM `catalog`.`orders` `` — MySQL quoting and a prefix that
+    /// is not a schema — which Elasticsearch rejects outright.
+    #[test]
+    fn the_browse_snippet_is_valid_for_this_engine() {
+        use crate::engine::Engine;
+        let e = ElasticEngine::new("http://localhost:9200", Auth::None, None);
+        let s = e.select_snippet("my_cluster", "orders", 100).unwrap();
+        assert!(s.contains("FROM \"orders\""), "{s}");
+        assert!(!s.contains('`'), "no backticks in this dialect: {s}");
+        assert!(
+            !s.contains("my_cluster"),
+            "a catalog is not a table prefix: {s}"
+        );
+        assert!(s.contains("LIMIT 100"), "{s}");
+    }
+
+    #[test]
+    fn an_index_name_with_a_quote_is_escaped_not_broken() {
+        use crate::engine::Engine;
+        let e = ElasticEngine::new("http://localhost:9200", Auth::None, None);
+        let s = e.select_snippet("c", "we\"ird", 5).unwrap();
+        assert!(s.contains("\"we\"\"ird\""), "{s}");
+    }
+
     use super::*;
     use crate::decode::TypeHint;
 

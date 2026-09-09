@@ -442,15 +442,43 @@ async fn assistant_send(
             Ok(server) => {
                 let version = server.server_version.clone();
                 caps = Some(server.capabilities.clone());
-                let text = match &db {
-                    Some(db) => server
-                        .schema_cache
-                        .lock()
+
+                // An engine with no namespaces — a local Elasticsearch cluster
+                // has no catalogs — describes itself under the empty one. For
+                // MySQL an empty schema name simply matches nothing, which is
+                // the right answer when no database has been chosen.
+                let ns = db.as_deref().unwrap_or("");
+
+                // Load the shape *before* rendering it. The cache used to be
+                // whatever the user had happened to expand in the tree, so the
+                // model was handed "columns not loaded" and invented the rest.
+                // A failure here is not fatal: an unreachable server should
+                // produce a thinner prompt, not a refused question.
+                let warmed =
+                    schema::warm_for_assistant(&state, id, ns, schema::ASSISTANT_TABLE_BUDGET)
                         .await
-                        .get(db)
-                        .map(|s| assistant::render_schema(db, s)),
-                    None => None,
-                };
+                        .unwrap_or_default();
+
+                let text = server
+                    .schema_cache
+                    .lock()
+                    .await
+                    .get(ns)
+                    .map(|s| assistant::render_schema(ns, s))
+                    .map(|rendered| {
+                        // Say so when the budget bit. Silently truncating is
+                        // how a model ends up confidently sure a table has no
+                        // columns.
+                        if warmed.tables > warmed.detailed {
+                            format!(
+                                "{rendered}\n(Columns were loaded for {} of {} tables; ask the \
+                                 user to open the others in the tree if you need them.)\n",
+                                warmed.detailed, warmed.tables
+                            )
+                        } else {
+                            rendered
+                        }
+                    });
                 (version, text)
             }
             Err(_) => ("unknown".to_string(), None),
@@ -660,9 +688,21 @@ fn app_defaults() -> AppDefaults {
     }
 }
 
+/// Browse a table — the double-click action.
+///
+/// Takes a connection now, because the snippet is dialect-specific: a
+/// backtick-quoted, catalog-qualified `SELECT` is valid MySQL and a syntax
+/// error on Elasticsearch. The engine decides; this only asks.
 #[tauri::command]
-fn generate_select(db: String, table: String, limit: u32) -> Result<String, String> {
-    sqlgen::generate_select(&db, &table, limit)
+async fn generate_select(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+    table: String,
+    limit: u32,
+) -> Result<String, String> {
+    let server = session::server(&state, &connection_id).await?;
+    server.engine.select_snippet(&db, &table, limit)
 }
 
 #[tauri::command]

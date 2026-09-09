@@ -95,4 +95,18 @@ impl Engine for MysqlEngine {
     async fn cancel(&self, state: &AppState, tab_id: &str) -> Result<(), String> {
         crate::session::mysql_cancel_query(state, tab_id).await
     }
+
+    fn quote_ident(&self, name: &str) -> Result<String, String> {
+        crate::sqlgen::quote_ident(name)
+    }
+
+    fn qualify(&self, ns: &str, table: &str) -> Result<String, String> {
+        crate::sqlgen::qualify(ns, table)
+    }
+
+    /// Delegated rather than defaulted, so the generator the live MySQL tests
+    /// exercise stays the one the app actually calls.
+    fn select_snippet(&self, ns: &str, table: &str, limit: u32) -> Result<String, String> {
+        crate::sqlgen::generate_select(ns, table, limit)
+    }
 }

@@ -94,6 +94,69 @@ pub struct DbSchema {
     pub routines: Option<Vec<RoutineRef>>,
 }
 
+/// How many tables get their columns loaded when describing a database to the
+/// assistant.
+///
+/// A cap rather than "all of them" because columns are fetched per table: a
+/// 500-table warehouse would be 500 round trips before the first word of an
+/// answer. Sixty is roughly a screenful of `render_schema` and a few thousand
+/// tokens — enough that the model stops guessing, small enough that the wait is
+/// not noticed. Table *names* are never capped; they cost one query for all of
+/// them, and knowing a table exists is most of the value.
+pub const ASSISTANT_TABLE_BUDGET: usize = 60;
+
+/// What [`warm_for_assistant`] managed to load.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Warmed {
+    /// Tables and views this database has.
+    pub tables: usize,
+    /// How many of them now have their columns cached.
+    pub detailed: usize,
+}
+
+/// Load enough of a database's shape to describe it to the assistant.
+///
+/// # Why this is not "running queries automatically"
+///
+/// It runs no user SQL and executes nothing the user wrote. It calls the same
+/// introspection the schema tree calls when you expand a node — the engine's
+/// `tables` and `columns` — which is the app describing its own connection, not
+/// the model reaching a database. Nothing here is recorded as history, nothing
+/// appears in the grid, and the assistant still cannot execute a statement.
+///
+/// Without it the model is told "columns not loaded" for every table nobody
+/// happened to click, and so it invents column names — which is the one failure
+/// mode that makes a SQL assistant worse than no assistant.
+///
+/// Results land in the ordinary schema cache, so this is paid once per database
+/// per connection, and the tree gets the benefit too.
+pub async fn warm_for_assistant(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    budget: usize,
+) -> Result<Warmed, String> {
+    let tables = list_tables(state, connection_id, db).await?;
+    let mut warmed = Warmed {
+        tables: tables.len(),
+        detailed: 0,
+    };
+
+    for t in tables.iter().take(budget) {
+        // Per table, and tolerant: a view whose definition no longer resolves
+        // cannot be described, and that must cost us that one table rather than
+        // the whole schema. `list_columns` is cache-first, so a table the tree
+        // already expanded costs nothing here.
+        if list_columns(state, connection_id, db, &t.name)
+            .await
+            .is_ok()
+        {
+            warmed.detailed += 1;
+        }
+    }
+    Ok(warmed)
+}
+
 /// Drop any cached introspection for `db`, so the next expand refetches.
 pub async fn refresh(state: &AppState, connection_id: &str, db: &str) -> Result<(), String> {
     let server = server(state, connection_id).await?;

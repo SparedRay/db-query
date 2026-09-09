@@ -899,7 +899,7 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const browse = () =>
     void showGenerated(
       t.name,
-      () => api.generateSelect(db, t.name, browseLimit),
+      () => api.generateSelect(connId, db, t.name, browseLimit),
       // The one place the source table is known for certain, which is what lets
       // an exported CREATE TABLE be the server's own rather than a guess.
       { connectionId: connId, db, table: t.name },

@@ -282,3 +282,69 @@ async fn the_schema_tree_sees_indices_and_their_fields() {
 
     session::disconnect(&state, C).await.unwrap();
 }
+
+/// The double-click action, end to end.
+///
+/// A generated snippet is only correct if the server will run it, and the
+/// previous one — MySQL backticks, catalog-qualified — would not. Unit tests
+/// pin the *shape* of the string; only the cluster can say it parses.
+#[tokio::test]
+#[ignore]
+async fn the_browse_snippet_a_double_click_generates_actually_runs() {
+    let state = AppState::default();
+    session::connect(&state, profile(), String::new())
+        .await
+        .expect("connect failed — is the fixture up?");
+    session::open_tab(&state, C, T).await.unwrap();
+
+    let server = session::server(&state, C).await.unwrap();
+    let sql = server.engine.select_snippet("", "orders", 2).unwrap();
+    println!("generated: {sql}");
+
+    let result = db_query_lib::exec::run_script(&state, T, &sql, true, None)
+        .await
+        .expect("run_script failed");
+
+    assert_eq!(result.statements.len(), 1);
+    match &result.statements[0].outcome {
+        db_query_lib::exec::Outcome::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 2, "LIMIT 2 should return two documents");
+        }
+        other => panic!("the cluster rejected the generated snippet: {other:?}"),
+    }
+
+    session::disconnect(&state, C).await.unwrap();
+}
+
+/// The same warm-up, on an engine whose namespaces are not schemas.
+///
+/// Proves it is the trait being called and not MySQL introspection wearing a
+/// different name: a cluster has no `information_schema`, and its columns come
+/// from `DESCRIBE`.
+#[tokio::test]
+#[ignore]
+async fn the_assistant_prompt_is_warmed_for_a_cluster_too() {
+    let state = AppState::default();
+    session::connect(&state, profile(), String::new())
+        .await
+        .expect("connect failed — is the fixture up?");
+
+    let warmed = db_query_lib::schema::warm_for_assistant(
+        &state,
+        C,
+        "",
+        db_query_lib::schema::ASSISTANT_TABLE_BUDGET,
+    )
+    .await
+    .expect("warm failed");
+    assert!(warmed.tables >= 1, "no indices found: {warmed:?}");
+    assert_eq!(warmed.detailed, warmed.tables);
+
+    let server = session::server(&state, C).await.unwrap();
+    let cache = server.schema_cache.lock().await;
+    let rendered = db_query_lib::assistant::render_schema("", cache.get("").unwrap());
+    assert!(!rendered.contains("columns not loaded"), "{rendered}");
+    assert!(rendered.contains("orders"), "{rendered}");
+    // The mapped fields, which is the whole point of warming.
+    assert!(rendered.contains("total"), "{rendered}");
+}

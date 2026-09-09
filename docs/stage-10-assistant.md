@@ -103,7 +103,7 @@ is why the crate count is unchanged.
 - [x] **A5 — The key is in the keychain**, never in a config file, never read back out.
 - [x] **A6 — A mid-stream failure keeps the partial answer.**
 - [x] **A7 — With no key the chat says so and cannot be used.**
-- [ ] **A8 — Confirmed against a real endpoint.** Three ignored tests in `assistant_live.rs`: Anthropic with a key, a rejected key, and a local Ollama needing no key at all. None has been run — there is no key and no local server on this machine.
+- [x] **A8 — Confirmed against a real endpoint** (local half, 2026-09-09; Anthropic half still needs a key). Three ignored tests in `assistant_live.rs`: Anthropic with a key, a rejected key, and a local Ollama needing no key. The Ollama one now passes against `mise run ollama-up` — see §*Run, 2026-09-09*, including the two bugs it found.
 
 ---
 

@@ -164,6 +164,42 @@ pub trait Engine: Send + Sync {
 
     /// Stop whatever the tab is running. Best-effort by nature.
     async fn cancel(&self, state: &crate::session::AppState, tab_id: &str) -> Result<(), String>;
+
+    /// This dialect's spelling of an identifier.
+    ///
+    /// MySQL uses backticks, Elasticsearch and the SQL standard use double
+    /// quotes, and Snowflake would use double quotes too — so this belongs to
+    /// the engine, not to a shared generator that happened to be written first.
+    fn quote_ident(&self, name: &str) -> Result<String, String>;
+
+    /// How a table is named when a namespace is in play.
+    ///
+    /// Defaulted to `ns.table` because that is what most engines do. An engine
+    /// whose namespaces are not a table prefix — Elasticsearch's catalogs are
+    /// remote clusters, not schemas — overrides it and drops the prefix.
+    fn qualify(&self, ns: &str, table: &str) -> Result<String, String> {
+        Ok(format!(
+            "{}.{}",
+            self.quote_ident(ns)?,
+            self.quote_ident(table)?
+        ))
+    }
+
+    /// The double-click action: browse a table's first rows.
+    ///
+    /// A default rather than free-standing code, so a new engine gets something
+    /// correct without writing anything, and can still override when its
+    /// dialect disagrees — `LIMIT` is not universal (Snowflake and SQL Server
+    /// spell it differently), and this is the hook where that is said.
+    fn select_snippet(&self, ns: &str, table: &str, limit: u32) -> Result<String, String> {
+        if limit == 0 {
+            return Err("A browse limit of 0 would return nothing.".into());
+        }
+        Ok(format!(
+            "SELECT *\nFROM {}\nLIMIT {limit};\n",
+            self.qualify(ns, table)?
+        ))
+    }
 }
 
 /// Why this engine will not run a statement, if it will not.

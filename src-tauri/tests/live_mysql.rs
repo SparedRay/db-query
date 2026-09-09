@@ -2010,3 +2010,69 @@ async fn a_credential_statement_is_never_written_down() {
     .await;
     session::disconnect(&state, C).await.unwrap();
 }
+
+/// The assistant must be handed real columns, not "columns not loaded".
+///
+/// This is the bug the feature exists for: the prompt was built from whatever
+/// the user happened to have expanded in the schema tree, so asking a question
+/// before touching the tree described every table as having no columns — and a
+/// model told that a table has no columns invents some.
+///
+/// Deliberately expands nothing first. A fresh connection is exactly the state
+/// a user is in when they open the chat and type their first question.
+#[tokio::test]
+#[ignore]
+async fn the_assistant_prompt_carries_columns_nobody_expanded() {
+    let state = connected().await;
+
+    let warmed = schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+        .await
+        .expect("warm failed");
+    assert!(warmed.tables >= 4, "fixture should have tables: {warmed:?}");
+    assert_eq!(
+        warmed.detailed, warmed.tables,
+        "the fixture is well under the budget, so every table should be detailed"
+    );
+
+    let server = session::server(&state, C).await.unwrap();
+    let cache = server.schema_cache.lock().await;
+    let rendered = db_query_lib::assistant::render_schema("poc", cache.get("poc").unwrap());
+
+    assert!(
+        !rendered.contains("columns not loaded"),
+        "the model would have to guess these: {rendered}"
+    );
+    // Names and types, from the server rather than from the model's priors.
+    assert!(rendered.contains("TABLE `users`"), "{rendered}");
+    assert!(rendered.contains("email"), "{rendered}");
+    assert!(rendered.contains("VIEW `user_totals`"), "{rendered}");
+
+    // The rule this whole feature had to respect: introspection is not
+    // execution. Nothing the user could have run was run.
+    assert!(
+        server.introspection_count.load(Ordering::SeqCst) > 0,
+        "the warm-up should have introspected"
+    );
+}
+
+/// Warming twice must not re-query: the cache is what makes the second question
+/// as fast as the first.
+#[tokio::test]
+#[ignore]
+async fn warming_a_second_time_costs_nothing() {
+    let state = connected().await;
+    schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+        .await
+        .unwrap();
+    let server = session::server(&state, C).await.unwrap();
+    let after_first = server.introspection_count.load(Ordering::SeqCst);
+
+    schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+        .await
+        .unwrap();
+    assert_eq!(
+        server.introspection_count.load(Ordering::SeqCst),
+        after_first,
+        "the second warm-up went back to the server"
+    );
+}

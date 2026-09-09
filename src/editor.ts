@@ -3,10 +3,16 @@
 // asks the Rust splitter, so execution and cursor detection cannot disagree.
 
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, dropCursor,
+  rectangularSelection, crosshairCursor, highlightSpecialChars,
+} from "@codemirror/view";
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo } from "@codemirror/commands";
 import { autocompletion, completionKeymap, closeBrackets } from "@codemirror/autocomplete";
-import { bracketMatching, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import {
+  bracketMatching, syntaxHighlighting, defaultHighlightStyle, indentOnInput,
+} from "@codemirror/language";
 import { sql, MySQL, type SQLNamespace } from "@codemirror/lang-sql";
 import {
   forceLinting, linter, lintGutter, type Diagnostic as CmDiagnostic,
@@ -98,9 +104,34 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     highlightActiveLine(),
     autocompletion(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+
+    // The rest of what a text editor is expected to be. These were missing, and
+    // their absence is invisible until someone reaches for one: without
+    // `search` there is no Ctrl+F at all, and a SQL buffer long enough to need
+    // scrolling is long enough to need finding.
+    search({ top: true }),
+    highlightSelectionMatches(),
+    drawSelection(),
+    dropCursor(),
+    indentOnInput(),
+    highlightSpecialChars(),
+    rectangularSelection(),
+    crosshairCursor(),
+    EditorState.allowMultipleSelections.of(true),
+
     // Run keys come first so they win over the default keymap.
     runKeys,
-    keymap.of([...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
+    // Redo, spelled the way every editor spells it. `historyKeymap` binds
+    // Ctrl+Shift+Z only on the platforms it recognises as Linux, and Ctrl+Y
+    // only where it does not — so on any platform one of the two habits fails.
+    // Binding both, unconditionally, costs nothing and surprises nobody.
+    keymap.of([
+      { key: "Mod-Shift-z", preventDefault: true, run: redo },
+      { key: "Mod-y", preventDefault: true, run: redo },
+    ]),
+    keymap.of([
+      ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab,
+    ]),
     schemaCompartment.of(sql({ dialect: MySQL, upperCaseKeywords: true })),
     lintCompartment.of([]),
     themeCompartment.of(darkTheme),
@@ -117,7 +148,8 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
 export const STARTER_DOC =
   "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n" +
   "-- Ctrl+Shift+Enter runs the whole buffer.\n" +
-  "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n\n" +
+  "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n" +
+  "-- Ctrl+F find · Ctrl+Z undo · Ctrl+Shift+Z redo\n\n" +
   "SELECT 1;\n";
 
 export type LintSource = (view: EditorView) => Promise<CmDiagnostic[]>;

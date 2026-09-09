@@ -371,12 +371,90 @@ rather than a crash in someone's session.
 
 ## 10. What is still open
 
-- **Nobody has clicked through it.** Every layer is tested, including three live
-  tests through the app's own command path, but no human has connected the UI to
-  a cluster and expanded the tree.
+- ~~**Nobody has clicked through it.**~~ Done 2026-09-09 — see §11, which is
+  what that review found.
 - **Lint is still MySQL-flavoured** (§6 Phase 3). Schema-aware checks work
   because they read the tree; dialect-specific rules have not been audited.
 - **A new tab's `dialect` still says "mysql"** regardless of its connection,
   which affects syntax highlighting rather than correctness.
 - **Export (D9)** goes through the in-memory path for a cluster, which is right,
   but the streaming path's absence has not been surfaced in the UI.
+
+---
+
+## 11. First hands-on review — 2026-09-09
+
+The first time a human clicked through it. Three reports, all three real, and
+one more found while fixing them. Corrections live here rather than in the
+stages that introduced them, per the rule about frozen trackers — the editor
+keymap belongs to Stage 1 and the assistant schema to
+[Stage 10](stage-10-assistant.md).
+
+### The browse snippet was MySQL-only
+
+Double-clicking an index generated ``SELECT * FROM `catalog`.`orders` ``:
+backtick quoting the cluster rejects, and a catalog prefix that is not a schema.
+
+`generate_select` was a **pure function that never saw the connection** — it
+could not have been right for two engines. It now goes through the engine, and
+the trait gained the three dialect primitives that decision needs:
+`quote_ident`, `qualify` (defaulted to `ns.table`) and `select_snippet`
+(defaulted to `SELECT * … LIMIT n`). Elasticsearch overrides `qualify` to drop
+the prefix entirely; MySQL delegates to the existing `sqlgen` generator so the
+live tests keep covering the path the app actually calls.
+
+This is the seam earning its keep: a Snowflake engine gets a correct browse
+snippet by writing one method, and gets `LIMIT` wrong loudly rather than
+quietly, because the default is the thing it would override.
+
+**A unit test pins the string; a live test runs it against the cluster.** Only
+the second one could have caught the original bug.
+
+### The assistant was guessing at the schema
+
+`assistant_send` read the schema **only from the cache**, which is populated by
+expanding the tree. Ask a question on a fresh connection and the model was told
+`(columns not loaded)` for every table — and a model told a table has no columns
+invents some.
+
+`schema::warm_for_assistant` now loads the shape before the prompt is built.
+
+**This is not "running queries automatically".** It calls the engine's `tables`
+and `columns` — the same introspection an expand does. No user SQL runs, nothing
+is recorded in history, nothing reaches the grid, and the assistant still cannot
+execute a statement. The standing rule is about *the user's* statements and the
+model's inability to run them; both are intact.
+
+Tradeoffs, taken deliberately:
+
+| | |
+|---|---|
+| **Latency** | Columns are per table, so the first question on a database pays N round trips. Capped at `ASSISTANT_TABLE_BUDGET` (60) and cached, so it is paid once. |
+| **Prompt size** | ~60 tables of columns is a few thousand tokens per question. Table *names* are never capped — one query for all of them, and knowing a table exists is most of the value. |
+| **Truncation** | When the budget bites, the prompt says how many of how many were detailed rather than implying the rest are empty. |
+| **Privacy** | Unchanged in kind, larger in degree: more table and column names leave the machine. Still names and types only — `render_schema` cannot see row data by construction — and the chat header already says so. A local model sends nothing anywhere. |
+
+### The editor was missing most of a text editor
+
+Ctrl+Z was reported as broken. It was not — undo, redo and per-tab history all
+pass on both engines, and there are now tests saying so. What was missing was
+everything around it: **`@codemirror/search` was never installed, so Ctrl+F did
+nothing at all**, and Ctrl+Shift+Z *undid* rather than redoing, because
+`historyKeymap` binds it only on platforms it recognises as Linux.
+
+Added: `search`, `highlightSelectionMatches`, `drawSelection`, `dropCursor`,
+`indentOnInput`, `highlightSpecialChars`, `rectangularSelection`,
+`crosshairCursor`, multiple selections, and explicit unconditional bindings for
+both redo spellings. The starter document now names the keys, because a
+shortcut nobody can discover is a shortcut nobody has.
+
+None of this is visible until someone reaches for the key, which is how it
+survived eleven stages. `tests/ui/editor-keys.spec.ts` is the regression.
+
+### The Elasticsearch fixture was not idempotent
+
+Found by the live tests failing on `rows.len() == 3` after finding six. The
+seed's `{"index":{}}` mints a fresh document id per run, so **every `es-up`
+appended another copy of the fixture data**. `es-up` now deletes the index first
+and gives each document an explicit `_id`; running it twice leaves three
+documents. A fixture that is not idempotent lies the second time you use it.

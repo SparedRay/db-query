@@ -530,8 +530,8 @@ export const api = {
   // --- generated SQL. Every one of these returns text for the user to read
   // and run themselves; nothing here executes anything.
   appDefaults: () => invoke<AppDefaults>("app_defaults"),
-  generateSelect: (db: string, table: string, limit: number) =>
-    invoke<string>("generate_select", { db, table, limit }),
+  generateSelect: (connectionId: string, db: string, table: string, limit: number) =>
+    invoke<string>("generate_select", { connectionId, db, table, limit }),
   generateDrop: (target: DropTarget) => invoke<string>("generate_drop", { target }),
   generateCall: (connectionId: string, db: string, name: string) =>
     invoke<string>("generate_call", { connectionId, db, name }),

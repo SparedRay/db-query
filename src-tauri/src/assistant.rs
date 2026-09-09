@@ -142,7 +142,14 @@ pub enum StreamEvent {
 /// the model the table exists without inventing columns for it.
 pub fn render_schema(db: &str, schema: &DbSchema) -> String {
     let mut out = String::new();
-    out.push_str(&format!("Database `{db}`\n"));
+    // An engine without namespaces — a local Elasticsearch cluster has no
+    // catalogs — describes itself under the empty one, and "Database ``" reads
+    // as a database whose name we failed to find rather than as its absence.
+    if db.is_empty() {
+        out.push_str("Schema\n");
+    } else {
+        out.push_str(&format!("Database `{db}`\n"));
+    }
 
     let tables = schema.tables.as_deref().unwrap_or_default();
     if tables.is_empty() {
@@ -501,6 +508,22 @@ impl Proposals {
 
 #[cfg(test)]
 mod tests {
+    /// An engine with no namespaces must not be described as a nameless one.
+    #[test]
+    fn an_empty_namespace_is_not_rendered_as_an_empty_name() {
+        let schema = DbSchema {
+            tables: Some(vec![crate::schema::TableRef {
+                name: "orders".into(),
+                kind: "TABLE".into(),
+            }]),
+            columns: Default::default(),
+            routines: None,
+        };
+        let out = render_schema("", &schema);
+        assert!(!out.contains("``"), "{out}");
+        assert!(out.starts_with("Schema"), "{out}");
+    }
+
     use super::*;
     use crate::schema::{ColumnInfo, TableRef};
 
