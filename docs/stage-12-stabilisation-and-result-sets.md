@@ -376,10 +376,46 @@ different characters:
 - Availability and text-vs-emoji presentation differ by platform. `⚙` in
   particular flips to a colour emoji on some systems and not others.
 
-**No icon pack.** Seven shapes did not justify a dependency and a licence
+**No icon pack.** The shapes did not justify a dependency and a licence
 obligation, so `src/icons.ts` draws them: one 16-unit grid, one stroke width,
-`currentColor` throughout, in a fixed 14px box. They inherit the theme, scale
-with the font, and every label now starts at the same x.
+`currentColor` throughout, in a fixed box. They inherit the theme, scale with
+the font, and every label now starts at the same x.
+
+### Then the rest of the chrome, for the same reason
+
+The tree was where it was most visible, but not where it stopped. A sweep for
+non-ASCII characters in `src/` and `index.html` found the rail's own buttons
+(`✦` assistant, `↺` history, `⚙` settings), the tree's refresh (`⟳`), the tab
+strip's busy marker (`◴`) and its failed-statement badge (`✕`), and the tree's
+open/closed twisties (`▸` `▾`).
+
+`✦`, `↺` and `◴` are the risky ones — thin font coverage, and a missing glyph
+renders as a hollow box. `⚙` is worse than missing: it flips to a **colour
+emoji** on some platforms, so the button that is meant to be quiet chrome
+becomes the loudest thing on screen.
+
+All now come from the same set. Three details worth keeping:
+
+- **The twisty is one chevron, rotated by CSS**, not two characters. Two glyphs
+  can disagree about size and baseline; one drawing cannot.
+- **The busy marker reuses the app's existing `.spinner`.** A glyph that spins
+  is a glyph that might not exist.
+- **The rail's icons are injected from `icons.ts`**, not written into
+  `index.html`. The same paths in two files is the same drawing in two files,
+  and they drift.
+
+**The SVG swap broke clicking a result tab**, and only a click test could have
+seen it. A `display: block` SVG inside a plain `inline` span makes that span's
+box stretch to the whole line — so the statement tab's ✕ became a 159px hit
+area covering the tab, and clicking a tab to *select* it closed it instead. The
+containers are `inline-flex` now. A screenshot showed nothing wrong: the icon
+was drawn in the right place and the right size; it was the invisible box
+around it that had swallowed the tab.
+
+The settings icon went through two drafts: a cog drawn as a circle with eight
+radiating lines reads as a **sun** at 16px — indistinguishable from a
+brightness control. It is sliders now. A cog's teeth need more pixels than this
+to be teeth.
 
 ### A quick filter over what is loaded
 

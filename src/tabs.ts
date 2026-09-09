@@ -497,8 +497,10 @@ export class TabManager {
 
       if (tab.busy) {
         const spin = document.createElement("span");
-        spin.className = "stab-busy";
-        spin.textContent = "◴";
+        // The app's own spinner, not `◴` — a glyph with thin font coverage
+        // that renders as a hollow box wherever it is missing, and cannot be
+        // sized or coloured like the rest of the chrome.
+        spin.className = "stab-busy spinner";
         spin.title = "A query is running in this tab";
         el.append(spin);
       }

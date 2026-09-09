@@ -235,6 +235,7 @@ input.num {
   font-size: 15px; line-height: 1; cursor: pointer;
 }
 .rail-cog:hover { color: var(--fg); background: var(--btn-bg); }
+.rail-cog svg { width: 16px; height: 16px; display: block; }
 .rail::-webkit-scrollbar { display: none; }
 
 .rail-item {
@@ -296,7 +297,32 @@ input.num {
 .tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
 .node { display: flex; align-items: center; gap: 5px; padding: 3px 10px; cursor: pointer; white-space: nowrap; font-size: 12.5px; }
 .node:hover { background: var(--bg-hover); }
-.node .twisty { width: 12px; color: var(--fg-dim); flex: 0 0 auto; font-size: 10px; }
+/* A chevron, rotated — not two glyphs. One drawing means the open and closed
+   states cannot disagree about size or baseline, which two characters from
+   whatever font happens to have them can and did. */
+.node .twisty {
+  width: 12px; height: 12px; color: var(--fg-dim); flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.node .twisty svg {
+  width: 10px; height: 10px; display: block;
+  transition: transform 90ms ease;
+}
+.node .twisty.open svg { transform: rotate(90deg); }
+/* Inline SVG controls that sit in a line of text. One rule, so a new one
+   cannot arrive at a different size. */
+/* The container must be inline-flex, not plain inline. A `display: block` SVG
+   inside an `inline` span makes that span's box stretch to the whole line —
+   which turned the statement tab's ✕ into a 159px-wide hit area covering the
+   tab, so clicking a tab to *select* it closed it instead. Invisible in a
+   screenshot; found by a click test. */
+.icon-btn, .tab .badge, .tab .tab-close, .node .meta.icon-btn {
+  display: inline-flex; align-items: center;
+}
+.icon-btn svg, .tab .badge svg, .tab .tab-close svg {
+  width: 11px; height: 11px; display: block;
+}
+
 /* --- schema tree quick filter ------------------------------------------- */
 
 .tree-filter { display: flex; align-items: center; gap: 6px; padding: 5px 8px; }
@@ -381,7 +407,9 @@ input.num {
   border-top-color: var(--conn-colour, var(--accent));
 }
 .stab-label { overflow: hidden; text-overflow: ellipsis; }
-.stab-busy { color: var(--conn-colour, var(--accent)); font-size: 11px; animation: spin 1.1s linear infinite; }
+/* The shared `.spinner` ring, tinted to the connection. It used to be the glyph
+   `◴`, which is not in every font. */
+.stab-busy { border-top-color: var(--conn-colour, var(--accent)); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* One mark, three states: × normally, • when dirty, × again on hover so the

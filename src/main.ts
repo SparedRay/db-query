@@ -612,7 +612,8 @@ function node(cls: string, label: string, twisty: string, name: IconName) {
   n.className = `node ${cls}`;
   const t = document.createElement("span");
   t.className = "twisty";
-  t.textContent = twisty;
+  // Leaves pass "" and get no chevron at all — a column has nothing to open.
+  if (twisty) t.append(icon("chevron"));
   const ic = document.createElement("span");
   ic.className = "icon";
   ic.append(icon(name));
@@ -726,6 +727,16 @@ function refilterTree() {
       : `${matches} of ${searched}`;
 }
 
+// The rail's own buttons, from the same set as the tree's. Markup in the HTML
+// would put the same paths in two places and let them drift.
+for (const [el, name] of [
+  [els.btnAssistant, "assistant"],
+  [els.btnHistory, "history"],
+  [els.btnSettings, "settings"],
+] as const) {
+  el.append(icon(name));
+}
+
 els.treeFilter.addEventListener("input", refilterTree);
 els.treeFilter.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
@@ -752,14 +763,14 @@ new MutationObserver(() => refilterTree()).observe(els.tree, {
 
 function buildDbNode(connId: string, db: string): HTMLElement {
   const wrap = document.createElement("div");
-  const { n, twisty } = node("db", db, "▸", "database");
+  const { n, twisty } = node("db", db, "\u25b8", "database");
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
 
   const refresh = document.createElement("span");
-  refresh.className = "meta";
-  refresh.textContent = "⟳";
+  refresh.className = "meta icon-btn";
+  refresh.append(icon("refresh"));
   refresh.title = "Refresh this database";
   refresh.onclick = async (e) => {
     e.stopPropagation();
@@ -793,7 +804,7 @@ function buildDbNode(connId: string, db: string): HTMLElement {
       }
     }
     children.hidden = !children.hidden;
-    twisty.textContent = children.hidden ? "▸" : "▾";
+    twisty.classList.toggle("open", !children.hidden);
     if (!children.hidden && !children.dataset.loaded) {
       await loadDbChildren(connId, db, children, n);
     }
@@ -882,7 +893,7 @@ function buildGroup(
 
   const toggle = () => {
     children.hidden = !children.hidden;
-    twisty.textContent = children.hidden ? "\u25b8" : "\u25be";
+    twisty.classList.toggle("open", !children.hidden);
     if (!children.hidden && !children.dataset.loaded) {
       children.replaceChildren(...build());
       children.dataset.loaded = "1";
@@ -927,7 +938,7 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
 
   const expand = async () => {
     children.hidden = !children.hidden;
-    twisty.textContent = children.hidden ? "\u25b8" : "\u25be";
+    twisty.classList.toggle("open", !children.hidden);
     if (!children.hidden && !children.dataset.loaded) {
       n.classList.add("loading");
       try {

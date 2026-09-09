@@ -6,6 +6,7 @@
 
 import type { CellValue, ColumnMeta, ScriptResult, StatementResult } from "./api";
 import { binaryPlaceholder, isBinaryCell } from "./api";
+import { icon } from "./icons";
 import { showValue } from "./dialog";
 import { contextMenu } from "./menu";
 
@@ -170,7 +171,7 @@ export class ResultView {
       } else if (s.outcome.type === "affected") {
         badge.textContent = `${s.outcome.rows} affected`;
       } else {
-        badge.textContent = "✕";
+        badge.append(icon("close"));
         t.classList.add("errored");
       }
       t.append(badge);
@@ -179,7 +180,7 @@ export class ResultView {
       // destructive and selecting is not, and the two must not be a few pixels
       // apart with nothing to tell them apart.
       const close = el("span", "tab-close");
-      close.textContent = "\u00d7";
+      close.append(icon("close"));
       close.title = `Close result ${i + 1}`;
       close.setAttribute("role", "button");
       close.onclick = (e) => {
