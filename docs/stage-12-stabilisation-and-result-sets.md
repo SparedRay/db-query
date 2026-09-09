@@ -815,3 +815,69 @@ not be spread apart.
 9 UI tests (both engines), 8 new Rust tests. Three confirmed able to fail before
 being trusted: dropping the `DELIMITER` chunking reddens two, and pinning the
 cursor to 0 reddens the cursor test. 288 Rust unit tests and 534 UI tests pass.
+
+---
+
+## 19. The editor's selection was never visible on the dark theme — 2026-09-09
+
+Reported as a Windows problem: Ctrl+A "seems weird", the text does not look
+highlighted, and it is fine on Linux. **It is not a Windows problem.** It is a
+dark-theme problem, and the platform was a coincidence of which theme each
+machine happened to be on.
+
+### What was wrong
+
+`themeRules` carried a rule meant to colour the selection:
+
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": { … }
+
+CodeMirror's own base theme carries this one:
+
+    "&dark.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": { background: "#233" }
+
+Five classes to our three. **Ours never applied, in either theme**, and had not
+since `drawSelection` was added — the rule was written at the same time and
+looked like it worked. Measured in a browser rather than reasoned about: the
+painted band was `rgb(34,51,51)` in both themes.
+
+On the dark theme that is `#233` on a `#16181d` ground — a contrast ratio of
+**1.34:1**, which is to say invisible. On the light theme it fell back to
+CodeMirror's `#d7d4f0`, a perfectly reasonable lavender, which is exactly why
+nobody saw the bug on one machine and did on the other.
+
+### The fix, and why the selector is written out longhand
+
+The selector now matches the shape the base theme uses, because that shape *is*
+the specificity — it is load-bearing, not decoration, and there is a comment
+next to it saying so. The blurred state got the same treatment: its base rule
+has two classes and ours had one.
+
+The colours moved to their own tokens, `--sel-editor-bg` and
+`--sel-editor-bg-blur`, rather than borrowing `--sel-header-bg`. The two roles
+sit on different grounds — a selected grid header is a chip on `--bg-raised`,
+this is a band behind body text on `--bg` — and reusing the header colour scored
+only 1.56:1. Chosen by measurement: **2.20:1** against the editor background,
+with `--fg` still at 5.76:1 on top of it, which is the constraint that stops
+"make it brighter" from being the whole answer.
+
+### The test asserts a contrast ratio, not a colour
+
+`tests/ui/editor-selection.spec.ts` computes WCAG relative luminance in the page
+and asserts the band is distinguishable from the ground **and** that the text
+stays readable on it. A colour assertion would pass again the moment somebody
+renamed a token; this fails whenever the selection stops being something a
+person can see, however that happens. Restoring the old selector reddens it in
+both themes, at 1.34 and 1.44 — checked, not assumed.
+
+### Two things found on the way
+
+The caret is fine, and fine **by accident**: `drawSelection` forces
+`caret-color: transparent !important` on `.cm-content`, so our `caretColor` rule
+there is inert too, and the visible caret is `.cm-cursor` in the base theme's
+black / `#ddd`. Both happen to be right. The dead rule is kept as the fallback
+if `drawSelection` ever goes, with a comment saying it is currently overridden —
+a rule that looks like it works and does not is the whole subject of this
+section.
+
+`drawSelection` does hide the native selection, so there is no second highlight
+underneath and no `::selection` rule of ours to write.
