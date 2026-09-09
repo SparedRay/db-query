@@ -1,0 +1,30 @@
+{{!--
+  Plain text, not HTML.
+
+  The manifest has to be readable *inside the app*, and the app already has a
+  scrollable value viewer that takes text. Rendering HTML would mean either a
+  second viewer or an external browser, and neither buys anything: this is a
+  list of names and licence texts.
+
+  Every value is in triple braces: handlebars escapes for HTML by default, and
+  in a text file that turns every quotation mark of every licence into &quot;.
+
+  Only the Rust half is rendered here — `scripts/attribution.mjs` wraps it with
+  the header, the npm packages that actually reach the bundle, and this
+  project's own licence.
+--}}
+CRATES ({{#each overview}}{{{name}}}: {{{count}}}{{#unless @last}}, {{/unless}}{{/each}})
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+================================================================================
+
+Applies to:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}}  ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

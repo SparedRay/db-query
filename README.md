@@ -80,6 +80,23 @@ mise run test-live  # tests needing the fixture and a keychain
 mise run db-down    # tear the fixture down
 ```
 
+## Third-party licences
+
+The app ships the notices its dependencies require — `THIRD-PARTY-LICENSES.txt`,
+generated **per target** and readable from *Settings → About*.
+
+Generating it needs one tool, once:
+
+```bash
+cargo install cargo-about --locked --features cli
+npm run attribution
+```
+
+It runs automatically as part of `tauri build`, so a bundle cannot be produced
+without it. The file is not committed: it is ~390KB and target-specific, and a
+Linux-generated copy inside a Windows installer would be wrong rather than
+merely short.
+
 ## Releasing
 
 ```bash

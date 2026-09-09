@@ -1,0 +1,50 @@
+# What ships, and under what terms.
+#
+# Generates THIRD-PARTY-LICENSES.html from the *resolved dependency graph*, so
+# the manifest describes the binary rather than the lockfile. Run it per target:
+# the Windows build links ~24 `windows-*` crates the Linux build does not, and a
+# Linux-generated file shipped inside setup.exe would be wrong rather than
+# merely short.
+#
+#   cargo about generate --target x86_64-unknown-linux-gnu ... --fail
+#
+# `--fail` is not optional in CI: a crate whose licence cannot be resolved is
+# exactly the case a manifest exists to cover, and a silent gap in it is worse
+# than no manifest at all.
+
+# Order is preference, not just permission. MIT first means every
+# `Apache-2.0 OR MIT` crate resolves to MIT — one licence text instead of two,
+# and the same choice throughout.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    # File-level copyleft, and deliberately accepted. Exactly one MPL crate
+    # reaches the binary — `option-ext`, via dirs -> tauri. The other four
+    # (cssparser, selectors, dtoa-short, brotli) are proc-macro dependencies
+    # that compile for the host and are dropped by ignore-build-dependencies
+    # below. See §2 of the Stage 5 tracker for how that was established.
+    "MPL-2.0",
+]
+
+# Build and dev dependencies compile for the *host* and are not linked into what
+# we hand anyone, so attributing them would overstate what ships. This is the
+# option that keeps the manifest honest — and it is what reduces the five MPL
+# crates to the one that actually matters.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Targets are passed on the command line instead, one run per platform.
+targets = []
+
+[private]
+# This crate itself is not published to crates.io and does not attribute itself.
+ignore = true

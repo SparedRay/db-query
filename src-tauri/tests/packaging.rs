@@ -90,3 +90,42 @@ fn the_updater_has_a_public_key() {
         .unwrap_or_default();
     assert!(!pubkey.trim().is_empty(), "the updater needs a pubkey");
 }
+
+/// The licence notices must be **in the bundle**.
+///
+/// Generating them and forgetting to ship them is the failure mode that looks
+/// exactly like success: the file exists in the tree, CI is green, and every
+/// installer goes out without it.
+#[test]
+fn the_licence_notices_are_bundled() {
+    let cfg = config();
+    let resources = cfg["bundle"]["resources"]
+        .as_array()
+        .expect("bundle.resources must list the licence file");
+    assert!(
+        resources
+            .iter()
+            .any(|r| r.as_str() == Some(db_query_lib::LICENSES_FILE)),
+        "bundle.resources must contain {} — otherwise the notices are generated \
+         and then left behind. Found: {resources:?}",
+        db_query_lib::LICENSES_FILE
+    );
+}
+
+/// And they must be **generated**, or the resource is a broken path.
+///
+/// `beforeBuildCommand` is the only hook that runs for every bundle on every
+/// platform, which is why the generator lives there rather than in a release
+/// workflow someone could forget to copy.
+#[test]
+fn packaging_generates_the_licence_notices() {
+    let cfg = config();
+    let before = cfg["build"]["beforeBuildCommand"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        before.contains("attribution"),
+        "beforeBuildCommand must generate the licence notices, or a bundle can \
+         be built without them. Found: {before:?}"
+    );
+}

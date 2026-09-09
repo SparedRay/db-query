@@ -81,6 +81,18 @@ jobs:
       - name: Build frontend (also typechecks)
         run: npm run build
 
+      # Attribution was deferred through two whole stages because nothing ever
+      # failed without it. Generating it here — on both platforms, per target —
+      # is what turns "we should ship the notices" into something that breaks
+      # when it stops being true. `--fail` inside the generator means a crate
+      # whose licence cannot be resolved stops the build.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Generate third-party licences
+        run: npm run attribution
+
       # --- the rest of `mise run check` ---
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml
@@ -149,6 +161,18 @@ jobs:
       # See the Linux job: dist/ must exist before cargo compiles anything.
       - name: Build frontend (also typechecks)
         run: npm run build
+
+      # Attribution was deferred through two whole stages because nothing ever
+      # failed without it. Generating it here — on both platforms, per target —
+      # is what turns "we should ship the notices" into something that breaks
+      # when it stops being true. `--fail` inside the generator means a crate
+      # whose licence cannot be resolved stops the build.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Generate third-party licences
+        run: npm run attribution
 
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml

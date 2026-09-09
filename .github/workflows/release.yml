@@ -133,6 +133,14 @@ jobs:
       #
       # After `npm ci` on purpose: the install runs against the lockfile as
       # committed, and only then does the version move.
+      # `beforeBuildCommand` generates the licence notices for whichever platform
+      # is building, so every bundle carries them. Without this the build fails
+      # rather than silently shipping without notices — which is the point.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
       - name: Stamp the version from the tag
         if: steps.mode.outputs.publish == 'true'
         run: node scripts/set-version.mjs "${{ steps.mode.outputs.tag }}"

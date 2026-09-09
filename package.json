@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:ui": "playwright test --project=chromium",
-    "test:ui:webkit": "playwright test --project=webkit"
+    "test:ui:webkit": "playwright test --project=webkit",
+    "attribution": "node scripts/attribution.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.0",
@@ -20,8 +21,7 @@
     "@codemirror/lint": "^6.9.7",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.43.11",
-    "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-updater": "^2.11.0"
+    "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

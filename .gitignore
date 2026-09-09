@@ -1,6 +1,11 @@
 node_modules/
 dist/
 src-tauri/target/
+
+# Generated per target at package time by scripts/attribution.mjs. Not
+# committed: it is ~390KB, and a Linux-generated copy would be wrong inside a
+# Windows bundle. CI regenerates it for the platform it is building.
+src-tauri/THIRD-PARTY-LICENSES.txt
 *.log
 .DS_Store
 

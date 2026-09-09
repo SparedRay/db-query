@@ -27,6 +27,10 @@ use split::SplitOutput;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+/// Shipped as a bundle resource; see `third_party_licenses`. Named once so the
+/// packaging test and the command cannot drift apart.
+pub const LICENSES_FILE: &str = "THIRD-PARTY-LICENSES.txt";
+
 // -------------------------------------------------------------- saved profiles
 
 /// The saved-connection list as the UI receives it. Separate from
@@ -769,6 +773,30 @@ async fn save_file_dialog(
     }
 }
 
+/// The licence notices this build is obliged to carry.
+///
+/// Generated per target at package time by `scripts/attribution.mjs` and shipped
+/// as a bundle resource, because a file that lives only in the repository
+/// discharges nothing for someone who installed the `.deb`.
+///
+/// A build run straight from a source tree may not have one — the generator is
+/// part of packaging, not of `cargo run` — so the absence says what to do rather
+/// than reading as a failure.
+#[tauri::command]
+fn third_party_licenses(app: tauri::AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .resolve(LICENSES_FILE, tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("Cannot locate {LICENSES_FILE}: {e}"))?;
+
+    std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "This build carries no licence file. It is generated when the app is              packaged; from a source tree, run:\n\n    npm run attribution\n\n             Expected at {}",
+            path.display()
+        )
+    })
+}
+
 /// Ask the update endpoint whether there is anything newer.
 ///
 /// Errors are *returned*, never thrown away: a check that fails silently is
@@ -860,6 +888,7 @@ pub fn run() {
             list_routines,
             routine_ddl,
             table_ddl,
+            third_party_licenses,
             load_session,
             save_session,
             app_defaults,

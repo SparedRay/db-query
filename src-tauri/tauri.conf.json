@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run attribution",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,6 +28,9 @@
     "active": true,
     "targets": [
       "deb"
+    ],
+    "resources": [
+      "THIRD-PARTY-LICENSES.txt"
     ],
     "icon": [
       "icons/32x32.png",

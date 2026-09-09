@@ -16,7 +16,7 @@ import {
   type UpdateStatus,
 } from "./api";
 import { copyText } from "./clipboard";
-import { choose } from "./dialog";
+import { choose, showValue } from "./dialog";
 import { createTheme, type ThemePref } from "./theme";
 import { FONTS, applyAppearance, load as loadSettings, save as saveSettings } from "./settings";
 import { contextMenu } from "./menu";
@@ -70,6 +70,7 @@ const els = {
   setVersion: $<HTMLElement>("set-version"),
   setCheckUpdate: $<HTMLButtonElement>("set-check-update"),
   setUpdateNote: $<HTMLElement>("set-update-note"),
+  setLicences: $<HTMLButtonElement>("set-licences"),
   setClose: $<HTMLButtonElement>("set-close"),
   exportDialog: $<HTMLDialogElement>("export-dialog"),
   exportForm: $<HTMLFormElement>("export-form"),
@@ -1515,6 +1516,26 @@ for (const el of [
 els.setTheme.onchange = commit;
 els.btnSettings.onclick = () => openSettings();
 els.setClose.onclick = () => els.settingsDialog.close();
+
+/**
+ * The licence notices, in the viewer that already exists for long values.
+ *
+ * Shipping the file is the obligation; being able to read it from inside the
+ * app is what makes shipping it mean anything. It goes through `showValue`
+ * rather than a browser because that dialog is already scrollable, already
+ * escapes its content, and already closes on Escape.
+ */
+els.setLicences.onclick = async () => {
+  els.setLicences.disabled = true;
+  try {
+    showValue("Third-party licences", await api.thirdPartyLicenses());
+  } catch (err) {
+    // A source build has no generated file, and the error says how to make one.
+    showValue("Third-party licences", String(err));
+  } finally {
+    els.setLicences.disabled = false;
+  }
+};
 
 /** The running version, which every check reports whatever else it finds. */
 async function showVersion() {

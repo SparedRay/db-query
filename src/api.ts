@@ -374,6 +374,12 @@ export const api = {
   loadSession: () => invoke<SessionLoad>("load_session"),
   saveSession: (session: SessionStore) => invoke<void>("save_session", { session }),
 
+  /**
+   * The licence notices this build ships. Generated per target at package time;
+   * a source build gets an error explaining how to generate one.
+   */
+  thirdPartyLicenses: () => invoke<string>("third_party_licenses"),
+
   // --- self-update. `updateCheck` is safe to call unattended; `updateInstall`
   // must only ever follow an explicit yes from the user.
   updateCheck: () => invoke<UpdateStatus>("update_check"),
