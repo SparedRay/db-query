@@ -24,7 +24,8 @@
 // Usage: node scripts/attribution.mjs [--target <triple>] [--out <path>]
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -113,8 +114,18 @@ function npmSection() {
 // ----------------------------------------------------------------- rust half
 
 function rustSection() {
+  // Written to a file rather than captured from stdout.
+  //
+  // cargo-about *refuses* to write to a redirected stdout under PowerShell —
+  // it exits non-zero telling you to use `--output-file` — because PowerShell
+  // mangles the encoding of piped output. Capturing stdout is exactly what
+  // `execFileSync` does, so on Windows CI this failed every time while working
+  // perfectly on Linux. An absolute path, because the command runs in
+  // `src-tauri`.
+  const dir = mkdtempSync(join(tmpdir(), "db-query-about-"));
+  const file = join(dir, "licences.txt");
   try {
-    return execFileSync(
+    execFileSync(
       "cargo",
       [
         "about",
@@ -122,6 +133,8 @@ function rustSection() {
         "about.hbs",
         "--target",
         target,
+        "--output-file",
+        file,
         // A crate whose licence cannot be resolved is precisely the case this
         // file exists to cover. Failing is the point.
         "--fail",
@@ -137,6 +150,24 @@ function rustSection() {
       );
     }
     throw new Error(`cargo about failed:\n${err.stderr ?? err.message}`);
+  }
+
+  // Read outside the catch above: an ENOENT from *this* would be reported as
+  // "cargo-about is not installed", which is the one thing it is not.
+  try {
+    const text = readFileSync(file, "utf8");
+    if (text.trim().length < 1000) {
+      throw new Error(
+        `cargo about wrote ${text.length} bytes, which cannot be a licence ` +
+          "manifest for 300-odd crates.",
+      );
+    }
+    // Exactly one trailing newline. Writing to a file drops the one stdout got,
+    // and normalising here keeps the assembled document byte-identical across
+    // platforms rather than one blank line different on Windows.
+    return `${text.trimEnd()}\n`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
