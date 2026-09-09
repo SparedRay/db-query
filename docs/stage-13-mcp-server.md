@@ -500,3 +500,53 @@ because an IPC promise cannot resolve before module evaluation ends. That is a
 coincidence, not a guarantee, and the failure it would eventually produce is a
 `ReferenceError` inside a `void`ed promise — a server that silently never
 starts, which is the same symptom by a different road.
+
+---
+
+## 14. `stop` did not stop — 2026-09-09
+
+Reported from use, with the diagnosis attached: *"tried regenerating and now it
+says another app is using the port. Could it be that it does not really stop the
+old MCP before starting a new one with the new key?"*
+
+That is exactly what it was. The other app was this one.
+
+    pub async fn stop(state: &McpState) {
+        if let Some(running) = state.running.lock().await.take() {
+            running.stop.cancel();          // asks the accept loop to end
+        }                                    // ...and returns without waiting
+    }
+
+The `TcpListener` is owned by the spawned accept task, so the socket stays bound
+until that task ends. Cancelling the token only *schedules* that. And
+`start_with_token` calls `stop` and then immediately binds — so restarting on
+the same port was a race with itself, which is precisely what regenerating a
+token does.
+
+`stop` now awaits the accept task's `JoinHandle`, which turns "asked" into
+"done". The lock is released before the await, per the lock discipline in
+`session.rs`.
+
+### Why nine tests missed it
+
+Every existing test binds **port 0** and is handed a different port each time,
+so none of them ever rebound the one already in use — the single case the
+feature actually performs. `a_restart_with_a_new_token_stops_accepting_the_old_one`
+models regeneration and still missed it, because it too took a fresh port.
+
+Two tests now cover it: one restarts on the port it is already using, the other
+does ten stop/start cycles on one port. Both fail against the old `stop`.
+
+**And two sleeps came out.** `off_means_nothing_is_listening` and
+`restarting_releases_the_previous_port` each waited 200ms "for the listener to
+be dropped" — which is to say they were written *around* this bug without
+noticing it, and would have passed throughout its life. `stop` is now
+synchronous in the only sense that matters, so the waits are gone and the file
+runs in 0.09s instead of 0.29s. A test that sleeps is a test that hides a race.
+
+### The retry in §13 stays
+
+That one covers a **different** race: a new process binding a port the previous
+process has not yet released, which no amount of correctness inside one process
+can prevent. This section is the half that was ours to fix, and it should have
+been fixed here rather than papered over there.
