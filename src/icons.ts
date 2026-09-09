@@ -29,6 +29,15 @@ export type IconName =
   | "function"
   | "key"
   | "column"
+  // One per column-type family (`src/coltype.ts`). A column's type is already
+  // written beside it; these are for reading the shape of a table at a glance
+  // rather than for reading the type.
+  | "type-numeric"
+  | "type-text"
+  | "type-temporal"
+  | "type-bool"
+  | "type-binary"
+  | "type-object"
   // Chrome, for the same reason as the tree: `✦` and `↺` and `◴` are glyphs
   // with thin font coverage, and a missing one renders as a hollow box.
   | "chevron"
@@ -63,6 +72,33 @@ const PATHS: Record<IconName, string> = {
   function: '<path d="M5.9 13V5.9c0-1.7 1-2.7 2.5-2.7.5 0 .9.1 1.3.3"/><path d="M4.2 7.6h4.9"/>',
   key: '<circle cx="6" cy="6.1" r="2.7"/><path d="M7.9 8l4.6 4.6"/><path d="M10.6 12.2l1.3-1.3"/>',
   column: '<circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>',
+
+  // A hash, which is what a number column is called in half the tools that
+  // have one.
+  "type-numeric":
+    '<path d="M6.6 3.4L5.2 12.6"/><path d="M11 3.4L9.6 12.6"/>' +
+    '<path d="M3.3 6.6h9.4"/><path d="M3.3 9.6h9.4"/>',
+  // A letter, for the types that hold letters.
+  "type-text": '<path d="M3.7 12.6L8 3.4l4.3 9.2"/><path d="M5.5 9.6h5"/>',
+  // A calendar. The clock was taken by the history button, and two clocks a
+  // few pixels apart would be worse than either.
+  "type-temporal":
+    '<rect x="2.6" y="4" width="10.8" height="9" rx="1.4"/>' +
+    '<path d="M2.6 7h10.8"/><path d="M5.7 2.5v2.6M10.3 2.5v2.6"/>' +
+    '<circle cx="6.1" cy="10" r=".85" fill="currentColor" stroke="none"/>',
+  // A switch, which is the one control that means exactly two states.
+  "type-bool":
+    '<rect x="2.2" y="5" width="11.6" height="6" rx="3"/>' +
+    '<circle cx="10.7" cy="8" r="1.9"/>',
+  // "10". Digits this small are a gamble, but these two are the only pair
+  // everyone reads as *bytes* rather than as a quantity.
+  "type-binary":
+    '<path d="M4.4 5.3l1.5-1.1v7.6"/><path d="M4.3 11.8h3.2"/>' +
+    '<ellipse cx="11" cy="8" rx="2.1" ry="3.8"/>',
+  // Braces: JSON, and the document types that are JSON by another name.
+  "type-object":
+    '<path d="M6.4 3.3c-1.5 0-1.8.5-1.8 1.9v1.3c0 .9-.4 1.4-1.3 1.5.9.1 1.3.6 1.3 1.5v1.3c0 1.4.3 1.9 1.8 1.9"/>' +
+    '<path d="M9.6 3.3c1.5 0 1.8.5 1.8 1.9v1.3c0 .9.4 1.4 1.3 1.5-.9.1-1.3.6-1.3 1.5v1.3c0 1.4-.3 1.9-1.8 1.9"/>',
 
   // Points right; CSS rotates it 90° when its node is open, so the open and
   // closed states cannot drift apart the way two separate glyphs can.

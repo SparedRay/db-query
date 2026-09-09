@@ -26,6 +26,7 @@ import {
 } from "./settings";
 import { contextMenu } from "./menu";
 import { icon, type IconName } from "./icons";
+import { columnIcon } from "./coltype";
 import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
 import { TabManager, clearResult, type ScriptTab } from "./tabs";
@@ -94,6 +95,7 @@ const els = {
   histClear: $<HTMLButtonElement>("hist-clear"),
   histClose: $<HTMLButtonElement>("hist-close"),
   settingsDialog: $<HTMLDialogElement>("settings-dialog"),
+  settingsNav: $<HTMLElement>("settings-nav"),
   setTheme: $<HTMLSelectElement>("set-theme"),
   setFont: $<HTMLSelectElement>("set-font"),
   setFontSize: $<HTMLInputElement>("set-font-size"),
@@ -1013,10 +1015,20 @@ function buildColumnNode(
   table: string,
   c: ColumnInfo,
 ): HTMLElement {
-  const { n: cn } = node("column", c.name, "", c.key === "PRI" ? "key" : "column");
+  // The icon slot carries the *type* now, so a table can be read at a glance —
+  // which of these is a number, which is text, which is a document. The key
+  // moved to the meta side rather than losing to it: a primary key is also a
+  // column of some type, and only one of the two can be the icon.
+  const { n: cn } = node("column", c.name, "", columnIcon(c.dataType));
   const meta = document.createElement("span");
   meta.className = "meta";
-  meta.textContent = c.dataType + (c.nullable ? "" : " \u00b7");
+  if (c.key === "PRI") {
+    cn.classList.add("pk");
+    const k = icon("key");
+    k.classList.add("key-mark");
+    meta.append(k);
+  }
+  meta.append(c.dataType + (c.nullable ? "" : " \u00b7"));
   cn.append(meta);
   // No double-click action on a column, so a plain click can still insert the
   // name — the fastest way to build a select list while writing.
@@ -1735,6 +1747,63 @@ for (const f of FONTS) {
   els.setFont.append(new Option(f.label, f.stack));
 }
 
+/**
+ * The settings dialog's vertical tabs.
+ *
+ * One pane is visible at a time, which is the whole point: the sections have
+ * nothing to do with each other, and stacking them made every one of them as
+ * tall as the tallest.
+ *
+ * The panes are hidden with `hidden` rather than removed, so the controls keep
+ * their identity — `commit()` reads all of them on every change, and a pane
+ * that had to be rebuilt would drop the value being typed into it.
+ *
+ * A **roving tabindex**: Tab reaches the strip once and arrows move within it,
+ * which is how a tablist is expected to behave and, more practically, what
+ * stops Tab from walking through five section buttons to reach a field.
+ */
+const settingsTabs = Array.from(
+  els.settingsNav.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+);
+/** Remembered for the session, not persisted: reopening settings to change the
+ *  same thing again is the common case, and a new launch is a new task. */
+let settingsSection = settingsTabs[0]?.id ?? "";
+
+function showSettingsSection(tabId: string) {
+  const target = settingsTabs.find((t) => t.id === tabId) ?? settingsTabs[0];
+  if (!target) return;
+  settingsSection = target.id;
+  for (const t of settingsTabs) {
+    const on = t === target;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    const pane = document.getElementById(t.getAttribute("aria-controls") ?? "");
+    if (pane) pane.hidden = !on;
+  }
+}
+
+for (const t of settingsTabs) t.onclick = () => showSettingsSection(t.id);
+
+els.settingsNav.addEventListener("keydown", (e) => {
+  const at = settingsTabs.findIndex((t) => t.id === settingsSection);
+  const to =
+    e.key === "ArrowDown" || e.key === "ArrowRight"
+      ? at + 1
+      : e.key === "ArrowUp" || e.key === "ArrowLeft"
+        ? at - 1
+        : e.key === "Home"
+          ? 0
+          : e.key === "End"
+            ? settingsTabs.length - 1
+            : -1;
+  if (to < 0 || to >= settingsTabs.length) return;
+  e.preventDefault();
+  showSettingsSection(settingsTabs[to].id);
+  // Moving selection moves focus with it: a tablist where the highlight and
+  // the focus ring are on different buttons is a tablist nobody can follow.
+  settingsTabs[to].focus();
+});
+
 function openSettings() {
   els.setTheme.value = theme.current();
   els.setFont.value = settings.fontFamily;
@@ -1744,6 +1813,7 @@ function openSettings() {
   els.setTimeout.value = String(settings.timeoutSecs);
   els.setBrowse.value = String(settings.browseLimit);
   els.setUpdateNote.hidden = true;
+  showSettingsSection(settingsSection);
   els.settingsDialog.showModal();
   void showVersion();
 }

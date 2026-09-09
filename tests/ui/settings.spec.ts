@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, installBackend, schemaBackend } from "./harness";
+import { calls, connect, installBackend, schemaBackend, settingsSection } from "./harness";
 
 /**
  * The settings dialog: appearance, session defaults, and the manual update
@@ -63,6 +63,7 @@ test("settings survive a reload", async ({ page }) => {
   await open(page);
   await page.fill("#set-font-size", "15");
   await page.locator("#set-font-size").dispatchEvent("change");
+  await settingsSection(page, "editor");
   await page.uncheck("#set-autolimit");
   await page.click("#set-close");
 
@@ -75,6 +76,7 @@ test("settings survive a reload", async ({ page }) => {
 test("session defaults are applied to the controls at boot", async ({ page }) => {
   await connect(page, schemaBackend);
   await open(page);
+  await settingsSection(page, "editor");
   await page.uncheck("#set-lint");
   await page.fill("#set-timeout", "30");
   await page.locator("#set-timeout").dispatchEvent("change");
@@ -89,6 +91,7 @@ test("session defaults are applied to the controls at boot", async ({ page }) =>
 test("the browse limit reaches the generated SELECT", async ({ page }) => {
   await connect(page, { ...schemaBackend, generate_select: () => "SELECT 1" });
   await open(page);
+  await settingsSection(page, "editor");
   await page.fill("#set-browse", "25");
   await page.locator("#set-browse").dispatchEvent("change");
   await page.click("#set-close");
@@ -129,6 +132,7 @@ test("the settings dialog reports the running version", async ({ page }) => {
     update_check: () => ({ type: "upToDate", current: "0.4.2" }),
   });
   await open(page);
+  await settingsSection(page, "updates");
   await expect(page.locator("#set-version")).toContainText("0.4.2");
 });
 
@@ -138,6 +142,7 @@ test("checking manually says so when there is nothing new", async ({ page }) => 
     update_check: () => ({ type: "upToDate", current: "0.4.2" }),
   });
   await open(page);
+  await settingsSection(page, "updates");
   await page.click("#set-check-update");
   await expect(page.locator("#set-update-note")).toContainText("latest version");
 });
@@ -157,6 +162,7 @@ test("checking manually offers an update when there is one", async ({ page }) =>
   await expect(page.locator("#btn-update")).toBeHidden();
 
   await open(page);
+  await settingsSection(page, "updates");
   await page.click("#set-check-update");
 
   await expect(page.locator("dialog.ask")).toBeVisible();
@@ -171,6 +177,62 @@ test("a build that cannot update itself explains why, here too", async ({ page }
     update_check: () => ({ type: "unsupported", reason: "install the newer .deb" }),
   });
   await open(page);
+  await settingsSection(page, "updates");
   await page.click("#set-check-update");
   await expect(page.locator("#set-update-note")).toContainText(".deb");
+});
+
+// ------------------------------------------------------------------ sections
+
+/**
+ * Settings are five unrelated subjects, so they are five panes rather than one
+ * scrolling column. What is worth pinning is that exactly one is on screen —
+ * a pane that failed to hide is the only way this arrangement can be worse
+ * than the stack it replaced.
+ */
+test("one section is shown at a time", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await open(page);
+
+  const panes = page.locator("#settings-dialog .pane");
+  await expect(panes).toHaveCount(5);
+  await expect(page.locator("#settings-dialog .pane:visible")).toHaveCount(1);
+  await expect(page.locator("#set-pane-appearance")).toBeVisible();
+
+  await settingsSection(page, "assistant");
+  await expect(page.locator("#settings-dialog .pane:visible")).toHaveCount(1);
+  await expect(page.locator("#set-pane-appearance")).toBeHidden();
+  // The controls keep their values across a switch: the panes are hidden, not
+  // rebuilt, so nothing half-typed is thrown away by looking at another one.
+  await expect(page.locator("#set-ai-base")).toHaveValue(/https/);
+});
+
+test("arrow keys move between sections, and the highlight follows", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await open(page);
+  await page.locator("#set-tab-appearance").focus();
+
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#set-pane-editor")).toBeVisible();
+  await expect(page.locator("#set-tab-editor")).toBeFocused();
+  await expect(page.locator("#set-tab-editor")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#set-tab-appearance")).toHaveAttribute("aria-selected", "false");
+
+  await page.keyboard.press("End");
+  await expect(page.locator("#set-pane-about")).toBeVisible();
+  // Past the end is not a wrap: the last section stays put.
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#set-pane-about")).toBeVisible();
+});
+
+/** Reopening to change the same thing again is the common case. */
+test("settings reopen on the section last used", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await open(page);
+  await settingsSection(page, "updates");
+  await page.click("#set-close");
+
+  await open(page);
+  await expect(page.locator("#set-pane-updates")).toBeVisible();
+  await expect(page.locator("#set-pane-appearance")).toBeHidden();
 });

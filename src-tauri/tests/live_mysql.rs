@@ -1719,6 +1719,44 @@ async fn table_ddl_handles_a_view() {
         .await
         .unwrap();
     assert!(ddl.to_uppercase().contains("VIEW"), "{ddl}");
+
+    // MySQL stores a view as one normalised line, whatever it was written as.
+    // That answer is correct and unreadable, which for "what does this view
+    // actually select?" is close to no answer at all — so it is laid out on the
+    // way to the tab. Asserted against the real server because the shape of
+    // that one line is the server's choice, not ours.
+    assert!(
+        ddl.lines().count() > 4,
+        "the view definition was not laid out:\n{ddl}"
+    );
+    let lower = ddl.to_lowercase();
+    // The clauses this particular view has — it does not filter.
+    for clause in ["\nselect", "\nfrom", "\ngroup by"] {
+        assert!(
+            lower.contains(clause),
+            "{clause:?} did not start a line:\n{ddl}"
+        );
+    }
+}
+
+/// The other half of the same rule: a **table**'s definition arrives laid out
+/// already, and must come back exactly as the server wrote it. Reformatting
+/// what MySQL formatted would be a change with nothing to gain.
+#[tokio::test]
+#[ignore]
+async fn table_ddl_leaves_the_servers_own_layout_alone() {
+    let state = connected().await;
+    let ddl = schema::table_ddl(&state, C, "poc", "users").await.unwrap();
+    assert!(ddl.contains("CREATE TABLE"), "{ddl}");
+    // The server indents columns by two spaces and keeps each on its own line.
+    assert!(
+        ddl.contains("\n  `id`"),
+        "the column layout changed:\n{ddl}"
+    );
+    assert!(
+        ddl.lines().all(|l| l.chars().count() <= 120),
+        "a line was widened:\n{ddl}"
+    );
 }
 
 // ------------------------------------- Stage 3: unbounded re-run (E8)

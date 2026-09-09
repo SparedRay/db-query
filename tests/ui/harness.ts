@@ -444,3 +444,15 @@ export async function sendOnChannel(
     [id, messages] as [number, unknown[]],
   );
 }
+
+/**
+ * Open one section of the settings dialog.
+ *
+ * Settings are vertical tabs, so a control is only clickable once its section
+ * is showing. That is a real constraint on the user too, which is why the
+ * tests go through the tab rather than reaching past it with `evaluate`.
+ */
+export async function settingsSection(page: Page, section: string) {
+  await page.click(`#set-tab-${section}`);
+  await page.locator(`#set-pane-${section}`).waitFor({ state: "visible" });
+}

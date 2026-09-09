@@ -360,7 +360,16 @@ input.num {
 .node .icon svg { width: 14px; height: 14px; display: block; }
 .node.db > .icon { color: var(--accent); }
 .node.db-active > .label { font-weight: 600; color: var(--fg-strong); }
-.node .meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; padding-left: 8px; }
+/* `inline-flex` for the same reason the result tab's ✕ needed it: a
+   block-level SVG in a plain inline box makes that box stretch to the line. */
+.node .meta {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--fg-dim); font-size: 11px; margin-left: auto; padding-left: 8px;
+}
+.node .meta svg.key-mark { width: 11px; height: 11px; display: block; color: var(--accent); flex: none; }
+/* Type icons carry less weight than the name beside them: they are a glance,
+   not a label. */
+.node.column > .icon { color: var(--fg-dim); }
 /* Loading a node's children replaces its caret with a spinner. The state was
    always set; only `opacity: .5` marked it, which nobody can see — a schema
    that takes two seconds to expand looked like a click that did nothing. */
@@ -693,14 +702,40 @@ dialog.viewer .viewer-note {
 /* --- settings dialog ------------------------------------------------------ */
 /* Capped and scrolled, like the value viewer: a settings dialog whose Close
    button falls below the fold is a dialog you cannot leave. */
-#settings-dialog[open] { width: min(460px, 92vw); }
-#settings-dialog .settings-body { max-height: 62vh; overflow: auto; }
-#settings-dialog fieldset {
-  border: 1px solid var(--border); border-radius: 6px;
-  margin: 0 0 10px; padding: 8px 12px 10px;
+#settings-dialog[open] { width: min(600px, 94vw); }
+/* Two columns: the list of sections, and the one section being read.
+
+   The height is fixed rather than fitted, so switching sections does not
+   resize the dialog under the cursor — a five-line pane and a fifteen-line one
+   would otherwise make the Close button jump. Only the pane scrolls. */
+#settings-dialog .settings-body {
+  display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 14px;
+  height: 320px; max-height: 60vh;
+}
+#settings-dialog .settings-nav {
+  display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--border); padding-right: 10px; overflow: auto;
+}
+#settings-dialog .settings-nav button {
+  appearance: none; text-align: left; cursor: pointer;
+  background: none; border: 1px solid transparent; border-radius: 5px;
+  color: var(--fg-dim); font: inherit; font-size: 12.5px; padding: 6px 9px;
+}
+#settings-dialog .settings-nav button:hover { background: var(--bg-hover); color: var(--fg); }
+#settings-dialog .settings-nav button[aria-selected="true"] {
+  background: var(--bg-hover); color: var(--fg-strong); font-weight: 600;
+}
+/* The keyboard user has to be able to see where they are: the roving tabindex
+   means only the selected tab is reachable by Tab, and arrow keys move it. */
+#settings-dialog .settings-nav button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
+}
+#settings-dialog .settings-panes { overflow: auto; padding-right: 2px; }
+#settings-dialog .pane h3 {
+  margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--fg-dim);
+  text-transform: uppercase; letter-spacing: .06em;
 }
 #settings-dialog label { margin-bottom: 7px; }
-#settings-dialog legend { font-size: 11px; color: var(--fg-dim); padding: 0 4px; }
 #settings-dialog select,
 #settings-dialog input[type="number"] {
   display: block; width: 100%; margin-top: 3px; padding: 5px 7px;

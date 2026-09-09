@@ -76,80 +76,108 @@
       </main>
     </div>
 
+    <!--
+      Sections down the side, one pane at a time.
+
+      Everything used to be stacked in one scrolling column, so finding the
+      assistant's base URL meant scrolling past fonts and update checks, and
+      every section was sized by the longest one. Vertical tabs let each pane
+      be as small as it deserves.
+    -->
     <dialog id="settings-dialog">
       <h2>Settings</h2>
 
       <div class="settings-body">
-      <fieldset>
-        <legend>Appearance</legend>
-        <label>Theme
-          <select id="set-theme">
-            <option value="system">Follow the system</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label>Code font
-          <select id="set-font"></select>
-        </label>
-        <label>Code size
-          <input type="number" id="set-font-size" min="9" max="22" step="1" />
-        </label>
-        <p class="hint">Applies to the editor and the results grid.</p>
-      </fieldset>
-
-      <fieldset>
-        <legend>Updates</legend>
-        <p class="hint" id="set-version">Checking…</p>
-        <button type="button" id="set-check-update" class="mini">Check for updates</button>
-        <p class="hint" id="set-update-note" hidden></p>
-      </fieldset>
-
-      <fieldset>
-        <legend>Defaults for new sessions</legend>
-        <label class="toggle"><input type="checkbox" id="set-autolimit" /> Auto-LIMIT</label>
-        <label class="toggle"><input type="checkbox" id="set-lint" /> Lint</label>
-        <label>Query timeout (seconds, 0 = off)
-          <input type="number" id="set-timeout" min="0" max="3600" step="1" />
-        </label>
-        <label>Rows for “Select first N rows”
-          <input type="number" id="set-browse" min="1" max="1000000" step="100" />
-        </label>
-        <p class="hint">Applied at startup; the controls above the editor still win for this session.</p>
-      </fieldset>
-
-      <fieldset>
-        <legend>Assistant</legend>
-        <label>Provider
-          <select id="set-ai-preset"></select>
-        </label>
-        <label>Base URL
-          <input type="text" id="set-ai-base" placeholder="https://…" autocomplete="off" spellcheck="false" />
-        </label>
-        <label>Model
-          <input type="text" id="set-ai-model" autocomplete="off" spellcheck="false" />
-        </label>
-        <label>API key
-          <input type="password" id="set-ai-key" placeholder="leave empty for a local model" autocomplete="off" />
-        </label>
-        <div class="ai-key-actions">
-          <button type="button" id="set-ai-save" class="mini">Save key</button>
-          <button type="button" id="set-ai-forget" class="mini">Forget key</button>
+        <div class="settings-nav" id="settings-nav" role="tablist"
+             aria-orientation="vertical" aria-label="Settings sections">
+          <button type="button" role="tab" id="set-tab-appearance"
+                  aria-controls="set-pane-appearance">Appearance</button>
+          <button type="button" role="tab" id="set-tab-editor"
+                  aria-controls="set-pane-editor">Editor</button>
+          <button type="button" role="tab" id="set-tab-assistant"
+                  aria-controls="set-pane-assistant">Assistant</button>
+          <button type="button" role="tab" id="set-tab-updates"
+                  aria-controls="set-pane-updates">Updates</button>
+          <button type="button" role="tab" id="set-tab-about"
+                  aria-controls="set-pane-about">About</button>
         </div>
-        <p class="hint" id="set-ai-note">Checking…</p>
-        <p class="hint">Keys are stored in your system keychain, one per
-          provider, never in a config file. The assistant writes SQL for you to
-          review and run — it cannot execute anything itself. Your schema's
-          table and column names are sent with each question; row data never is.</p>
-      </fieldset>
 
-      <fieldset>
-        <legend>About</legend>
-        <p class="hint">db-query is MIT licensed. It is built on open-source
-          libraries whose licences require their notices to be shipped with it.</p>
-        <button type="button" id="set-licences" class="mini">Third-party licences</button>
-      </fieldset>
+        <div class="settings-panes">
+          <section class="pane" id="set-pane-appearance" role="tabpanel"
+                   aria-labelledby="set-tab-appearance">
+            <h3>Appearance</h3>
+            <label>Theme
+              <select id="set-theme">
+                <option value="system">Follow the system</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+            <label>Code font
+              <select id="set-font"></select>
+            </label>
+            <label>Code size
+              <input type="number" id="set-font-size" min="9" max="22" step="1" />
+            </label>
+            <p class="hint">Applies to the editor and the results grid.</p>
+          </section>
 
+          <section class="pane" id="set-pane-editor" role="tabpanel"
+                   aria-labelledby="set-tab-editor" hidden>
+            <h3>Defaults for new sessions</h3>
+            <label class="toggle"><input type="checkbox" id="set-autolimit" /> Auto-LIMIT</label>
+            <label class="toggle"><input type="checkbox" id="set-lint" /> Lint</label>
+            <label>Query timeout (seconds, 0 = off)
+              <input type="number" id="set-timeout" min="0" max="3600" step="1" />
+            </label>
+            <label>Rows for “Select first N rows”
+              <input type="number" id="set-browse" min="1" max="1000000" step="100" />
+            </label>
+            <p class="hint">Applied at startup; the controls above the editor still win for this session.</p>
+          </section>
+
+          <section class="pane" id="set-pane-assistant" role="tabpanel"
+                   aria-labelledby="set-tab-assistant" hidden>
+            <h3>Assistant</h3>
+            <label>Provider
+              <select id="set-ai-preset"></select>
+            </label>
+            <label>Base URL
+              <input type="text" id="set-ai-base" placeholder="https://…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label>Model
+              <input type="text" id="set-ai-model" autocomplete="off" spellcheck="false" />
+            </label>
+            <label>API key
+              <input type="password" id="set-ai-key" placeholder="leave empty for a local model" autocomplete="off" />
+            </label>
+            <div class="ai-key-actions">
+              <button type="button" id="set-ai-save" class="mini">Save key</button>
+              <button type="button" id="set-ai-forget" class="mini">Forget key</button>
+            </div>
+            <p class="hint" id="set-ai-note">Checking…</p>
+            <p class="hint">Keys are stored in your system keychain, one per
+              provider, never in a config file. The assistant writes SQL for you to
+              review and run — it cannot execute anything itself. Your schema's
+              table and column names are sent with each question; row data never is.</p>
+          </section>
+
+          <section class="pane" id="set-pane-updates" role="tabpanel"
+                   aria-labelledby="set-tab-updates" hidden>
+            <h3>Updates</h3>
+            <p class="hint" id="set-version">Checking…</p>
+            <button type="button" id="set-check-update" class="mini">Check for updates</button>
+            <p class="hint" id="set-update-note" hidden></p>
+          </section>
+
+          <section class="pane" id="set-pane-about" role="tabpanel"
+                   aria-labelledby="set-tab-about" hidden>
+            <h3>About</h3>
+            <p class="hint">db-query is MIT licensed. It is built on open-source
+              libraries whose licences require their notices to be shipped with it.</p>
+            <button type="button" id="set-licences" class="mini">Third-party licences</button>
+          </section>
+        </div>
       </div>
 
       <menu>

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installBackend } from "./harness";
+import { installBackend, settingsSection } from "./harness";
 
 /**
  * The licence notices, reachable from inside the app.
@@ -28,6 +28,7 @@ test("the licences are readable from settings", async ({ page }) => {
   await page.goto("/");
   await openSettings(page);
 
+  await settingsSection(page, "about");
   await page.click("#set-licences");
   await expect(page.locator("dialog.viewer")).toBeVisible();
   await expect(page.locator("dialog.viewer")).toContainText("third-party licences");
@@ -47,6 +48,7 @@ test("a build with no generated file says how to generate one", async ({ page })
   await page.goto("/");
   await openSettings(page);
 
+  await settingsSection(page, "about");
   await page.click("#set-licences");
   await expect(page.locator("dialog.viewer")).toBeVisible();
   await expect(page.locator("dialog.viewer")).toContainText("npm run attribution");

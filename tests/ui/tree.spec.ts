@@ -119,12 +119,58 @@ test("a single click still expands the table's columns", async ({ page }) => {
   // By icon identity rather than by glyph: these are SVG now, and a test that
   // pinned the emoji was pinning the bug — it rendered in colour and ignored
   // the theme, unlike every other icon in the tree.
+  //
+  // The key sits beside the type rather than in the icon slot: that slot now
+  // says what the column *holds*, and a primary key holds something too.
   await expect(
-    page.locator('.node.column:has-text("id") .icon svg'),
+    page.locator('.node.column:has-text("id") .meta svg'),
   ).toHaveAttribute("data-icon", "key");
   await expect(
-    page.locator('.node.column:has-text("email") .icon svg'),
-  ).toHaveAttribute("data-icon", "column");
+    page.locator('.node.column:has-text("id") .icon svg'),
+  ).toHaveAttribute("data-icon", "type-numeric");
+  await expect(
+    page.locator('.node.column:has-text("email") .meta svg'),
+  ).toHaveCount(0);
+});
+
+/**
+ * The icon says what the column holds.
+ *
+ * It is a guess made from the type's *name*, so what is worth pinning is the
+ * mapping itself — including the fall-back, which is the one that must not
+ * quietly start claiming to know something.
+ */
+test("each column's icon says what kind of value it holds", async ({ page }) => {
+  await connect(page, {
+    list_columns: () => [
+      { name: "id", dataType: "bigint unsigned", nullable: false, key: "PRI" },
+      { name: "label", dataType: "varchar(80)", nullable: false, key: null },
+      { name: "payload", dataType: "json", nullable: true, key: null },
+      { name: "created_at", dataType: "datetime", nullable: false, key: null },
+      { name: "active", dataType: "tinyint(1)", nullable: false, key: null },
+      { name: "enabled", dataType: "boolean", nullable: false, key: null },
+      { name: "thumb", dataType: "mediumblob", nullable: true, key: null },
+      { name: "shape", dataType: "some_future_type", nullable: true, key: null },
+    ],
+  });
+  await openDatabase(page);
+  await page.locator('.node.table:has-text("users")').click();
+  await expect(page.locator('.node.column:has-text("payload")')).toBeVisible();
+
+  const iconOf = (name: string) =>
+    page.locator(`.node.column:has-text("${name}") > .icon svg`);
+
+  await expect(iconOf("id")).toHaveAttribute("data-icon", "type-numeric");
+  await expect(iconOf("label")).toHaveAttribute("data-icon", "type-text");
+  await expect(iconOf("payload")).toHaveAttribute("data-icon", "type-object");
+  await expect(iconOf("created_at")).toHaveAttribute("data-icon", "type-temporal");
+  // MySQL's boolean is a tinyint and says so; only a type that spells it out
+  // gets the switch. Claiming otherwise would mislabel every small integer.
+  await expect(iconOf("active")).toHaveAttribute("data-icon", "type-numeric");
+  await expect(iconOf("enabled")).toHaveAttribute("data-icon", "type-bool");
+  await expect(iconOf("thumb")).toHaveAttribute("data-icon", "type-binary");
+  // An unknown type keeps the plain dot rather than guessing.
+  await expect(iconOf("shape")).toHaveAttribute("data-icon", "column");
 });
 
 // --------------------------------------------------------------------- E2

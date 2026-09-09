@@ -412,8 +412,14 @@ pub(crate) async fn mysql_table_ddl(
         .or_else(|_| row.try_get("Create View"))
         .map_err(|e| friendly(&e))?;
 
+    // A view comes back as one normalised line, however it was written; a
+    // table comes back laid out already. `tidy` tells them apart by looking at
+    // the text rather than by being told which this was.
     ddl.filter(|d| !d.trim().is_empty())
-        .map(|d| format!("{};\n", d.trim_end().trim_end_matches(';')))
+        .map(|d| {
+            let d = crate::sqlfmt::tidy(d.trim_end().trim_end_matches(';'));
+            format!("{};\n", d.trim_end())
+        })
         .ok_or_else(|| format!("The server returned no definition for {qualified}."))
 }
 
@@ -460,7 +466,10 @@ pub(crate) async fn mysql_routine_ddl(
         )
     })?;
 
-    crate::sqlgen::routine_script(db, name, kind, &body)
+    // Routine bodies keep the author's own layout, so this usually changes
+    // nothing. The exception is a routine written on one line, which is
+    // otherwise unreadable for exactly as long as it stays that way.
+    crate::sqlgen::routine_script(db, name, kind, &crate::sqlfmt::tidy(&body))
 }
 
 /// The lint schema for a tab's active database: lowercased table -> columns.

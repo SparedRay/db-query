@@ -16,6 +16,7 @@ pub mod schema;
 pub mod secrets;
 pub mod session;
 pub mod split;
+pub mod sqlfmt;
 pub mod sqlgen;
 pub mod update;
 pub mod workspace;

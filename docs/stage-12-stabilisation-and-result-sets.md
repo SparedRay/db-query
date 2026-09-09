@@ -442,3 +442,116 @@ Two things the tests found:
   emptied the panel completely — including the one node that could have loaded
   the tables the filter was looking for. A filter that hides the only control
   you can click has not focused the tree, it has broken it.
+
+---
+
+## 14. Three things that were hard to read — 2026-09-09
+
+All from the same session as §13, and all the same complaint from a different
+angle: the app was showing the right thing in a shape nobody could take in.
+
+### An icon per column type
+
+The tree drew one dot for every column, so a table was a list of names with no
+shape to it. Now the icon slot says what the column *holds* — `#` for a number,
+`A` for text, `{}` for a document, a calendar, a switch, `10` for bytes — and
+an unrecognised type keeps the plain dot.
+
+`src/coltype.ts` is a lookup over **type names**, not over one engine's types:
+`varchar` and `keyword` are both text, `long` and `decimal` are both numbers.
+The vocabulary is deliberately Rust's `TypeHint` (`decode.rs`, which classifies
+*result* columns for alignment) plus `object`, which is the one shape the grid
+never needed to tell apart and the tree does.
+
+Two decisions worth writing down:
+
+- **The key moved out of the icon slot.** A primary key used to be drawn as a
+  key *instead of* a column dot, which was fine when the alternative was a dot
+  and wrong the moment the slot started carrying the type — a primary key is
+  also a column of some type. The key is now a small mark beside the type name,
+  and both facts are on screen at once.
+- **`bit` is filed with the blobs, not the booleans.** MySQL hands a `BIT`
+  column over as bytes and the grid shows it as bytes. `bit(1)` tempts you the
+  other way, and `bit(8)` is what that costs.
+- **`tinyint(1)` stays a number.** It is MySQL's boolean by convention, and
+  nothing in `information_schema` says which convention this column follows.
+  Claiming otherwise would put a switch beside every small integer in the
+  database. A test pins that, next to the one pinning `boolean`.
+
+The icon is a guess made from a type's name; the type itself is written beside
+it. That is the whole reason it is allowed to guess.
+
+### Settings became five sections instead of one column
+
+Everything was stacked in one scrolling `fieldset` column, so reaching the
+assistant's base URL meant scrolling past fonts and update checks, and every
+section was as tall as the tallest.
+
+Vertical tabs now, one pane at a time: Appearance, Editor, Assistant, Updates,
+About. The panes are **hidden, not rebuilt** — `commit()` reads every control on
+every change, and a pane that had to be reconstructed would drop whatever was
+half-typed into it. A roving tabindex makes the strip one Tab stop with arrows
+moving inside it, which is both what a tablist is supposed to do and what stops
+Tab from walking through five buttons to reach a field.
+
+The dialog's height is **fixed** rather than fitted. Sized to its content, a
+five-line pane and a fifteen-line one move the Close button every time you
+switch sections.
+
+The section is remembered for the session but not persisted: reopening settings
+to adjust the same thing again is the common case, and a new launch is a new
+task.
+
+This broke fifteen tests, all in the same way and all correctly — a control in
+a hidden pane is not clickable, which is true of the user too. They go through
+`settingsSection()` now rather than reaching past the tabs with `evaluate`.
+
+### Definitions arrive as one line, and now do not
+
+MySQL stores a **view** as a normalised one-liner: whatever you wrote, `SHOW
+CREATE VIEW` answers with a single line several hundred characters wide.
+"Examine definition…" put exactly that in a tab — correct, and for the question
+being asked, close to no answer at all.
+
+`src-tauri/src/sqlfmt.rs` lays it out. Two rules keep it from being a liability:
+
+1. **It only acts on dense text.** If every line is already under 120
+   characters, the input is returned untouched. That is what separates the
+   one-lined view from a routine someone laid out by hand — `SHOW CREATE
+   PROCEDURE` returns the body *as written*, newlines and all, and reformatting
+   that would be replacing an author's work with a machine's.
+2. **It only moves whitespace.** The output is re-lexed and compared with the
+   input token for token, and the original is returned if they differ at all.
+   A formatter that changes what a definition means ends with someone running
+   the result, so it fails closed rather than trusting its own rules to be
+   complete.
+
+The rules themselves are ordinary — clause keywords start lines, commas hang
+under their clause, a parenthesis gets lines of its own when it holds a query or
+is simply too wide to read. Three details were not ordinary, and each was found
+by a test rather than by reading the code:
+
+- **Keywords are re-emitted as written, never as matched.** The first draft
+  pushed the literal `"CASE"` and `"END"` it had matched on, which uppercased
+  half of a lowercase view — and rule 2 caught it, because `case` and `CASE` are
+  not the same token.
+- **`@` is spaced by what the author wrote.** It joins the halves of a definer
+  (`` `root`@`localhost` ``, where MySQL rejects the spaces) and introduces a
+  session variable (`SET @x = 0`, where it needs one). Nothing in the tokens
+  distinguishes them; the source's own adjacency does, so the lexer records it.
+  The same fact fixes `count(*)` versus ``CREATE TABLE `t` (…)``, which a
+  keyword list had been getting wrong.
+- **`END` closes two different things.** `CASE … END` in a select list ends an
+  expression; `IF … END IF` in a routine ends a block. Treating them alike
+  dedented the rest of the statement. A `CASE` that starts a line is a
+  statement, one that appears mid-line is a value, and the block stack
+  remembers which.
+
+Verified against the live server, not only against a fixture: the shape of that
+one line is MySQL's choice, so the test asks the real `user_totals` view for its
+definition and checks the clauses start lines — and its sibling checks a
+**table**'s definition comes back byte-identical to what the server wrote, which
+is the half that would have been easy to break quietly.
+
+The first draft of that live test asserted a `WHERE` clause the view does not
+have. The server said so.

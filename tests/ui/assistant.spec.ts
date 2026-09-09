@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, editorText, installBackend, schemaBackend, sendOnChannel } from "./harness";
+import {
+  calls, connect, editorText, installBackend, schemaBackend, sendOnChannel, settingsSection,
+} from "./harness";
 
 /**
  * The assistant chat.
@@ -215,6 +217,7 @@ test("saving a key hands it over and does not keep it in the field", async ({ pa
     assistant_set_key: () => true,
   });
   await page.click("#btn-settings");
+  await settingsSection(page, "assistant");
   await page.fill("#set-ai-key", "sk-ant-secret");
   await page.click("#set-ai-save");
 
@@ -228,6 +231,7 @@ test("saving a key hands it over and does not keep it in the field", async ({ pa
 test("forgetting the key sends null", async ({ page }) => {
   await connect(page, { assistant_status: () => READY, assistant_set_key: () => false });
   await page.click("#btn-settings");
+  await settingsSection(page, "assistant");
   await page.click("#set-ai-forget");
 
   await expect
@@ -247,6 +251,7 @@ test("forgetting the key sends null", async ({ page }) => {
  */
 async function choosePreset(page: Page, label: string) {
   await page.click("#btn-settings");
+  await settingsSection(page, "assistant");
   await page.selectOption("#set-ai-preset", { label });
 }
 
@@ -328,6 +333,7 @@ test("the choice survives a reload", async ({ page }) => {
 
   await page.reload();
   await page.click("#btn-settings");
+  await settingsSection(page, "assistant");
   await expect(page.locator("#set-ai-base")).toHaveValue("https://api.openai.com/v1");
   await expect(page.locator("#set-ai-model")).toHaveValue("some-model");
 });
