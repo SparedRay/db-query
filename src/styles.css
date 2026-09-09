@@ -36,7 +36,8 @@
      --bg-raised, this is a band behind body text on --bg. Chosen by
      measurement — 2.2:1 against the editor background, with --fg still at
      5.8:1 on top of it. CodeMirror's own default here is 1.35:1 on this
-     background, which is why select-all looked like it had done nothing. */
+     background. Both themes aim at ~2.1:1 rather than "a bit better than
+     before": a selection has to be obvious on a screen nobody tested on. */
   --sel-editor-bg: #35507f;
   /* The same, while the editor does NOT have focus: quieter, so it reads as
      "this was selected" rather than "this is". */
@@ -78,8 +79,12 @@
   --on-accent: #ffffff;
   --sel-header-bg: #c9dafc;
   --sel-cell-bg: rgba(37,99,235,.16);
-  --sel-editor-bg: #aecbfa;
-  --sel-editor-bg-blur: #e0e5ee;
+  /* 2.11:1 against white, with --fg still at 7.8:1 on top. The first attempt
+     at this used 1.65:1, which measured "better" and was still reported as
+     invisible on a different display — contrast that is only just detectable
+     on the screen it was chosen on is not contrast. */
+  --sel-editor-bg: #8ab4f8;
+  --sel-editor-bg-blur: #dde6f5;
   --danger: #dc2626;
   --danger-fg: #b3261e;
   --warn: #b45309;
