@@ -385,7 +385,8 @@ test("clicking a saved connection with a remembered password connects without pr
 test("a saved connection with no stored password opens the editor instead", async ({ page }) => {
   await installBackend(page, {
     list_profiles: () => ({
-      profiles: [{ ...SAVED, rememberPassword: false }],
+      // MySQL, nothing stored: the password is unknown, so asking is right.
+      profiles: [{ ...SAVED, rememberPassword: false, needsSecret: true }],
       warning: null,
     }),
   });
@@ -522,4 +523,63 @@ test("the connect button says Disconnect while a connection is live", async ({ p
   await expect(page.locator(".rail-item.live")).toHaveCount(0);
   await expect(page.locator("#btn-connect")).toHaveText("Connect");
   await expect(page.locator("#btn-connect")).not.toHaveClass(/danger/);
+});
+
+/**
+ * A connection that needs no secret must not be asked for one.
+ *
+ * Reported from use: an Elasticsearch cluster with no authentication opened the
+ * connect dialog on **every** click, forever, with no way to make it stop. The
+ * gate asked "is a password remembered", and a cluster with no authentication
+ * has nothing to remember — so the answer was always no.
+ */
+test("a connection that needs no secret connects without asking", async ({ page }) => {
+  await installBackend(page, {
+    list_profiles: () => ({
+      profiles: [
+        {
+          ...SAVED,
+          kind: "elasticsearch",
+          url: "http://localhost:9200",
+          auth: { type: "none" },
+          rememberPassword: false,
+          needsSecret: false,
+        },
+      ],
+      warning: null,
+    }),
+    connect_saved: () => ({
+      id: SAVED.id,
+      serverVersion: "8.15.0",
+      databases: ["docker-cluster"],
+      currentDatabase: null,
+      capabilities: { engine: "elasticsearch", namespaceLabel: "catalog" },
+    }),
+  });
+  await page.goto("/");
+
+  await page.locator(".rail-item").click();
+
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await expect(page.locator("#conn-dialog")).toBeHidden();
+  expect(await commandNames(page)).toContain("connect_saved");
+});
+
+/**
+ * An older backend does not send `needsSecret` at all, and "we do not know"
+ * must fall back to asking. Reading an absent value as "needs nothing" would
+ * turn a missing field into a silently skipped password prompt.
+ */
+test("an absent needsSecret is treated as needing one", async ({ page }) => {
+  await installBackend(page, {
+    list_profiles: () => ({
+      profiles: [{ ...SAVED, rememberPassword: false }],
+      warning: null,
+    }),
+  });
+  await page.goto("/");
+
+  await page.locator(".rail-item").click();
+  await expect(page.locator("#conn-dialog")).toBeVisible();
+  expect(await commandNames(page)).not.toContain("connect_saved");
 });

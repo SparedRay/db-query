@@ -194,6 +194,14 @@ async fn connect_saved(
         .find(|p| p.id == id)
         .ok_or_else(|| "No saved connection with that id.".to_string())?;
 
+    // A connection that needs no secret has none to load. An Elasticsearch
+    // cluster with no authentication is the ordinary case of this, and before
+    // `needs_secret` existed it was asked for a password it does not have —
+    // every time, forever, with no way to make it stop.
+    if !profile.needs_secret() {
+        return session::connect(&state, profile, String::new()).await;
+    }
+
     let secret = secrets::load(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "No password is stored for this connection.".to_string())?;

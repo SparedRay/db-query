@@ -190,7 +190,21 @@ export class ConnectionManager {
    * one, otherwise opens the editor to collect it.
    */
   async connect(entry: ConnectionEntry): Promise<{ ok: boolean; error?: string }> {
-    if (entry.saved && entry.profile.rememberPassword) {
+    // The question is "do we have what it takes", and there are two separate
+    // ways the answer is yes: a secret is stored, or none is needed at all.
+    //
+    // Only the first was ever asked, which is why a cluster with **no
+    // authentication** — nothing to remember, so nothing remembered — opened
+    // the connect dialog on every click, forever.
+    //
+    // `=== false`, not `!`: an absent `needsSecret` means "we do not know", and
+    // not knowing must fall back to asking. Keeping `rememberPassword` as an
+    // independent reason matters for the same case in reverse — were
+    // `needsSecret` ever missing or wrong, gating on it alone would prompt for
+    // every remembered password, which is precisely the Stage 2 bug two tests
+    // in `regressions.spec.ts` exist to prevent.
+    const ready = entry.profile.rememberPassword || entry.profile.needsSecret === false;
+    if (entry.saved && ready) {
       const r = await this.connectStored(entry);
       if (!r.ok && r.error) this.hooks.notify(r.error);
       return r;

@@ -173,6 +173,7 @@ mod tests {
             kind: Default::default(),
             url: String::new(),
             auth: Default::default(),
+            no_password: false,
         }
     }
 
@@ -204,17 +205,53 @@ mod tests {
         assert_eq!(v["version"], 1, "no version field to migrate from later");
     }
 
-    /// **C2's real check.** The password must not be in the file, and cannot be
-    /// even by accident, because `ConnProfile` has no field for one.
+    /// **C2's real check.** A secret must not be in the file, and cannot be even
+    /// by accident, because `ConnProfile` has no field that holds one.
+    ///
+    /// This was a substring hunt for the words "password" and "secret". It fired
+    /// on `noPassword` — a boolean saying an account *has* no password, which
+    /// leaks nothing — and a word filter cannot tell that from a field that
+    /// holds one. Weakening the filter would have been the wrong repair, so it
+    /// is replaced by something stricter: **the exact set of keys written**.
+    ///
+    /// Any new field on `ConnProfile` now fails this until someone adds it to
+    /// the list, which is a decision made on purpose rather than a word nobody
+    /// happened to choose.
     #[test]
     fn the_file_contains_no_secret() {
         let d = tmpdir();
         save_all(&d, &[sample("a")]).unwrap();
         let raw = fs::read_to_string(path_in(&d)).unwrap();
-        let lowered = raw.to_lowercase();
-        assert!(!lowered.contains("password"), "{raw}");
-        assert!(!lowered.contains("secret"), "{raw}");
-        assert!(!lowered.contains("hunter2"), "{raw}");
+
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut keys: Vec<&str> = v["profiles"][0]
+            .as_object()
+            .expect("a profile object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "allowInvalidCerts",
+                "auth",
+                "colour",
+                "database",
+                "host",
+                "id",
+                "kind",
+                "name",
+                "noPassword",
+                "port",
+                "url",
+                "user",
+            ],
+            "a field appeared in the config file that nobody reviewed: {raw}"
+        );
+
+        // And no value that could be one, however a field is spelled.
+        assert!(!raw.to_lowercase().contains("hunter2"), "{raw}");
     }
 
     #[cfg(unix)]
