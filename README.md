@@ -81,7 +81,13 @@ mise run db-down    # tear the fixture down
 mise run es-up      # start and seed the Elasticsearch fixture
 mise run test-es    # tests needing that fixture
 mise run es-down    # tear it down
+mise run ollama-up  # start a local Ollama and pull a small model
+mise run test-ollama # the assistant against that local endpoint
+mise run ollama-down # tear it down
 ```
+
+All three fixtures are rootless podman containers bound to localhost. See
+[dev/README.md](dev/README.md) for what each one seeds and why.
 
 ## Third-party licences
 

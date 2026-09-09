@@ -202,7 +202,7 @@ mod tests {
     /// Tests build their own clients, so they install the provider the app
     /// installs at startup. Idempotent, so several tests may call it.
     fn client() -> reqwest::Client {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        crate::install_tls();
         reqwest::Client::new()
     }
 

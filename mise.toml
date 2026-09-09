@@ -54,6 +54,11 @@ run = [
 description = "Set the app version everywhere (package.json, lockfile, Cargo.toml)"
 run = "node scripts/set-version.mjs"
 
+# ---------------------------------------------------------------------------
+# Local fixtures. Every one of them is rootless podman, throwaway, and bound to
+# localhost only — none of them is a service this project depends on.
+# ---------------------------------------------------------------------------
+
 [tasks.db-up]
 description = "Start the MySQL 8 fixture container and seed it"
 run = """
@@ -63,10 +68,19 @@ podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/seed.sql
 echo "fixture ready on 127.0.0.1:3306 (root / devpassword, database poc)"
 """
 
+[tasks.db-down]
+description = "Stop and remove the MySQL fixture container"
+run = "podman stop db-query-mysql && podman rm db-query-mysql"
+
 [tasks.es-up]
 description = "Start an Elasticsearch fixture (security off) and seed an index"
 run = """
-podman run -d --name db-query-es   -e discovery.type=single-node   -e xpack.security.enabled=false   -e ES_JAVA_OPTS='-Xms512m -Xmx512m'   -p 9200:9200 docker.elastic.co/elasticsearch/elasticsearch:8.15.0   || podman start db-query-es
+podman run -d --name db-query-es \
+  -e discovery.type=single-node \
+  -e xpack.security.enabled=false \
+  -e ES_JAVA_OPTS='-Xms512m -Xmx512m' \
+  -p 9200:9200 docker.elastic.co/elasticsearch/elasticsearch:8.15.0 \
+  || podman start db-query-es
 until curl -sf http://localhost:9200 >/dev/null 2>&1; do sleep 2; done
 curl -sf -X PUT http://localhost:9200/orders -H 'content-type: application/json' -d '{
   "mappings": {"properties": {
@@ -95,6 +109,41 @@ run = "podman stop db-query-es && podman rm db-query-es"
 description = "Tests needing the Elasticsearch fixture (see es-up)"
 run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic -- --ignored --test-threads=1"
 
-[tasks.db-down]
-description = "Stop and remove the MySQL fixture container"
-run = "podman stop db-query-mysql && podman rm db-query-mysql"
+# The model is small on purpose: it runs on CPU in a couple of GB, and the
+# point of the fixture is to prove the OpenAI-compatible adapter is real, not
+# to get good SQL. Override with OLLAMA_MODEL for anything else.
+#
+# Licences, both checked at source: Ollama is MIT, Qwen2.5-Coder is Apache-2.0.
+[tasks.ollama-up]
+description = "Start a local Ollama fixture and pull a small model"
+run = """
+model="${OLLAMA_MODEL:-qwen2.5-coder:1.5b}"
+podman run -d --name db-query-ollama \
+  -v db-query-ollama:/root/.ollama \
+  -p 11434:11434 docker.io/ollama/ollama:latest \
+  || podman start db-query-ollama
+until curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; do sleep 2; done
+podman exec db-query-ollama ollama pull "$model"
+echo "ollama ready on http://localhost:11434 (model: $model)"
+echo "In Settings choose the Ollama preset and enter that model name. No key needed."
+"""
+
+# The pulled model lives in a named volume, so bringing the fixture back up
+# does not re-download it. `podman volume rm db-query-ollama` reclaims the disk.
+[tasks.ollama-down]
+description = "Stop and remove the Ollama fixture (the model volume survives)"
+run = "podman stop db-query-ollama && podman rm db-query-ollama"
+
+# `--exact`, and the count checked afterwards, because `cargo test` exits 0 when
+# a filter matches nothing. A misspelled filter otherwise reports a green run
+# that contacted no server at all — which is what the first version of this task
+# did, silently, for one run.
+[tasks.test-ollama]
+description = "The assistant's local-endpoint test, against the ollama-up fixture"
+run = """
+model="${OLLAMA_MODEL:-qwen2.5-coder:1.5b}"
+OLLAMA_MODEL="$model" cargo test --manifest-path src-tauri/Cargo.toml \
+  --test assistant_live -- --ignored --exact --nocapture \
+  a_local_openai_compatible_server_streams_back | tee /tmp/db-query-ollama-test.log
+grep -q "1 passed" /tmp/db-query-ollama-test.log || { echo "no passing test — is 'mise run ollama-up' running?"; exit 1; }
+"""

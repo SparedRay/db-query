@@ -14,6 +14,17 @@
 
 use db_query_lib::assistant::{self, ChatMessage, Provider, StreamEvent};
 
+/// What `run()` does before anything builds a client — see `install_tls`.
+///
+/// These tests never call `run()`, so without this every one of them panics
+/// inside `reqwest::Client::new()` on the missing rustls provider, before a
+/// single byte reaches any server. That is exactly how they failed the first
+/// time one was run for real.
+fn client() -> reqwest::Client {
+    db_query_lib::install_tls();
+    reqwest::Client::new()
+}
+
 fn key() -> String {
     std::env::var("ANTHROPIC_API_KEY")
         .expect("set ANTHROPIC_API_KEY to run this; it is ignored by default")
@@ -32,7 +43,7 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
         content: "Write a query counting the users. One sql block, no commentary.".into(),
     }];
 
-    let response = reqwest::Client::new()
+    let response = client()
         .post(Provider::Anthropic.endpoint(assistant::ANTHROPIC_BASE))
         .header("x-api-key", key())
         .header("anthropic-version", assistant::API_VERSION)
@@ -92,7 +103,7 @@ async fn a_bad_key_is_reported_readably() {
         role: "user".into(),
         content: "hi".into(),
     }];
-    let response = reqwest::Client::new()
+    let response = client()
         .post(Provider::Anthropic.endpoint(assistant::ANTHROPIC_BASE))
         .header("x-api-key", "sk-ant-obviously-not-valid")
         .header("anthropic-version", assistant::API_VERSION)
@@ -119,10 +130,12 @@ async fn a_bad_key_is_reported_readably() {
 /// Ignored and opt-in, because it needs something listening. It is the cheapest
 /// possible proof that the second adapter is real rather than plausible:
 ///
-///     ollama serve &
-///     ollama pull llama3.1
-///     OLLAMA_MODEL=llama3.1 cargo test --manifest-path src-tauri/Cargo.toml \
-///         --test assistant_live -- --ignored ollama --nocapture
+///     mise run ollama-up
+///     mise run test-ollama
+///
+/// The filter has to name the test, not the word "ollama": `cargo test` exits 0
+/// when a filter matches nothing, so a near-miss reports a green run that
+/// contacted no server. `mise run test-ollama` checks the count for that reason.
 #[tokio::test]
 #[ignore]
 async fn a_local_openai_compatible_server_streams_back() {
@@ -147,7 +160,7 @@ async fn a_local_openai_compatible_server_streams_back() {
         content: "Write a query counting the users. One sql block, no commentary.".into(),
     }];
 
-    let response = reqwest::Client::new()
+    let response = client()
         .post(Provider::OpenAiCompatible.endpoint(&base))
         .header("content-type", "application/json")
         .json(&assistant::request(

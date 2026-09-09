@@ -1066,7 +1066,11 @@ async fn save_file_dialog(
 ///
 /// Idempotent by design: `install_default` returns `Err` if a provider is
 /// already set, which is a fact rather than a failure.
-fn install_tls() {
+///
+/// Public because integration tests build their own `reqwest` clients without
+/// ever calling [`run`], so they hit the same panic. Sharing the one function
+/// keeps the test's TLS setup identical to the app's rather than merely similar.
+pub fn install_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 

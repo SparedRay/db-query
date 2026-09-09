@@ -240,11 +240,33 @@ must never be read as local, because that mistake suppresses a true warning.
 against a local Ollama:
 
 ```
-ollama serve & ; ollama pull llama3.1
-OLLAMA_MODEL=llama3.1 cargo test --manifest-path src-tauri/Cargo.toml \
-    --test assistant_live -- --ignored ollama --nocapture
+mise run ollama-up     # podman container + qwen2.5-coder:1.5b, ~2 GB
+mise run test-ollama
 ```
 
 It needs nothing but a running server — no key, no account, no spend — which
 makes it the cheapest way to prove the second adapter is real rather than
 plausible. A8 now covers both.
+
+### Run, 2026-09-09 — and two bugs it found
+
+The local half of A8 passed: `qwen2.5-coder:1.5b`, on CPU, streamed
+```` ```sql\nSELECT COUNT(*) FROM users;\n``` ```` back through our SSE decoder
+in 3.1 s. The second adapter is real.
+
+Getting there cost two fixes, both of which had been sitting in a green repo:
+
+**The command documented above ran nothing.** `-- --ignored ollama` matched no
+test name — the test is `a_local_openai_compatible_server_streams_back` — and
+`cargo test` exits **0** when a filter matches nothing. So the documented
+command reported success while contacting no server at all. `mise run
+test-ollama` now filters `--exact` and fails if the pass count is not 1, because
+a test runner's silence is not the same as a test passing.
+
+**Every live test panicked before sending a byte.** `reqwest` is built with
+`rustls-no-provider`, so `Client::new()` panics unless a provider is installed.
+`run()` installs one — but integration tests never call `run()`. This is the
+same latent bug found during Stage 11, one layer further out: the fix had been
+applied to the app and not to anything that bypasses it. `install_tls` is now
+`pub`, `ElasticEngine::new` calls it itself so no caller has to remember, and
+the six scattered copies of the incantation are one function.

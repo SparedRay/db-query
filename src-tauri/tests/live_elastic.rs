@@ -15,7 +15,6 @@ use db_query_lib::engine::RowCap;
 use db_query_lib::httpsql::Auth;
 
 fn engine() -> ElasticEngine {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let base = std::env::var("ES_URL").unwrap_or_else(|_| "http://localhost:9200".into());
     ElasticEngine::new(&base, Auth::None, None)
 }
@@ -177,7 +176,6 @@ fn profile() -> ConnProfile {
 #[tokio::test]
 #[ignore]
 async fn a_cluster_connects_and_runs_a_script_through_the_ordinary_path() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let state = AppState::default();
 
     let info = session::connect(&state, profile(), String::new())
@@ -223,7 +221,6 @@ async fn a_cluster_connects_and_runs_a_script_through_the_ordinary_path() {
 #[tokio::test]
 #[ignore]
 async fn a_write_is_refused_before_it_reaches_the_cluster() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let state = AppState::default();
     session::connect(&state, profile(), String::new())
         .await
@@ -261,7 +258,6 @@ async fn a_write_is_refused_before_it_reaches_the_cluster() {
 #[tokio::test]
 #[ignore]
 async fn the_schema_tree_sees_indices_and_their_fields() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let state = AppState::default();
     session::connect(&state, profile(), String::new())
         .await

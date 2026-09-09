@@ -189,6 +189,11 @@ pub fn columns_from_page(page: &SqlPage) -> Vec<ColumnInfo> {
 
 impl ElasticEngine {
     pub fn new(base: &str, auth: Auth, secret: Option<String>) -> Self {
+        // Here rather than in the caller: `reqwest` is built with
+        // `rustls-no-provider`, so building a client without a provider panics.
+        // `run()` installs one at startup, but an engine constructed by a test —
+        // or by anything else that is not the app — would still panic, and did.
+        crate::install_tls();
         Self {
             client: reqwest::Client::new(),
             base: normalise_base(base),
