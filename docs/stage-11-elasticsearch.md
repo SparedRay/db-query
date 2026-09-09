@@ -279,8 +279,9 @@ shaped by the second engine and would be shaped again by the third.
 - [x] **Assistant dialect (D8).** `system_prompt` takes the capabilities: a read-only engine is told so explicitly, told it has no routines, and told what its namespaces are called. MySQL gains no restrictions it did not have
 - [x] `mise run es-up` / `es-down` / `test-es` — a container fixture and a seeded index, mirroring `db-up`
 - [x] **CI runs both engines on every push** — an Elasticsearch service container beside the MySQL one, because the risk of this stage is breaking MySQL quietly
-- [ ] Lint rules audited for MySQL-only assumptions
-- [ ] Export path check (D9); `dialect` on new tabs follows the connection
+- [x] Lint rules audited for MySQL-only assumptions — done in Stage 12 §15: `lint::Dialect` is built from the engine, so an identifier quoted the standard way is read rather than masked away
+- [x] `dialect` on new tabs follows the connection (Stage 12)
+- [ ] Export path check (D9) — still no Elasticsearch export test
 
 ---
 

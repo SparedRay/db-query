@@ -51,11 +51,11 @@ a hard gate, deliberately.
 ## 3. Task tracker
 
 ### Phase 1 — Unblock the release
-- [ ] **`TAURI_SIGNING_PRIVATE_KEY` as a repo secret** ← *the one step that is not mine to do*. The value is the private key generated in Stage 6, at `~/.tauri/db-query-updater.key`
-- [ ] **Dry run first** (Actions → Release → empty tag). It proves signing works on both platforms and exercises the tag-stamping path, and spends no tag doing it
+- [x] **`TAURI_SIGNING_PRIVATE_KEY` as a repo secret** ← *the one step that is not mine to do*. The value is the private key generated in Stage 6, at `~/.tauri/db-query-updater.key`
+- [x] **Dry run first** (Actions → Release → empty tag). Superseded by real releases, which now run this path on every tag. It proves signing works on both platforms and exercises the tag-stamping path, and spends no tag doing it
 - [x] Tag, then **publish** the draft — the updater endpoint is `releases/latest/download/latest.json`, and a draft is not `latest` (R1)
 - [x] Install from `setup.exe` on a clean Windows machine (R2)
-- [ ] Remove the stray local `1.0.0` tag — it is not on the remote and means nothing
+- [x] Remove the stray local `1.0.0` tag — gone; only `v0.*` tags remain
 
 ### Phase 2 — Prove the updater
 - [x] Publish a second release and watch an install take it (R3). Confirm the version it reports afterwards, which is what Stage 6's version-from-tag fix was for
@@ -132,10 +132,10 @@ by any test — which is the recurring lesson of this project, and the reason th
 generator is exercised in CI on both platforms rather than merely configured.
 
 ### Phase 4 — Debts carried from Stage 6 and 7
-- [ ] **Export disagrees with the grid about binary.** Stage 5 fixed decoding so a binary-collation `VARCHAR` renders as text; `export.rs` still decides from the column *type*, so the same value is refused by the SQL-INSERT export. Make one of them right and both agree (C1)
-- [ ] **Dead API surface.** `split_sql`, `disconnect_all` and `has_stored_password` are registered in Rust and wrapped in `api.ts` but called from nowhere. Found in Stage 4; a public release freezes an API, so decide: use them or delete them
-- [ ] **D4** — tabs stored under a profile that no longer exists (Stage 7)
-- [ ] **The "Connected to …" line has never been visible**, because the first tab activation overwrites it. Found in Stage 7 and deliberately left; either give it somewhere durable or stop writing it
+- [x] **Export disagrees with the grid about binary.** Fixed and confirmed as Stage 12's B5. Stage 5 fixed decoding so a binary-collation `VARCHAR` renders as text; `export.rs` still decides from the column *type*, so the same value is refused by the SQL-INSERT export. Make one of them right and both agree (C1)
+- [x] **Dead API surface.** Deleted in Stage 12 (C5): none of the three exists in the tree any more. Found in Stage 4; a public release freezes an API, so decide: use them or delete them
+- [x] **D4** — closed as won't-fix in Stage 12 §12, with the tests that said so: an id we do not recognise is not an id that is gone.
+- [x] **The "Connected to …" line** — Stage 12 §12 proved it *is* visible when reconnecting activates no tab; the fix was to make it engine-aware rather than to delete it
 - [ ] Stage 4 §6b's remaining hands-on list — A1-A5 are reachable once there is an installed app on two platforms to click
 
 ---
