@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { calls, commandNames, connect, editorText, openDatabase, openGroup } from "./harness";
+import {
+  CONN_INFO,
+  READ_ONLY_CAPS,
+  calls,
+  commandNames,
+  connect,
+  editorText,
+  openDatabase,
+  openGroup,
+} from "./harness";
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
@@ -277,4 +286,52 @@ test("a routine's menu drops it with the right keyword", async ({ page }) => {
     kind: "function",
   });
   await assertNothingRan(page);
+});
+
+// -------------------------------------------------- capabilities (Stage 11)
+
+/**
+ * The menus were unconditional when there was only one engine.
+ *
+ * An engine that accepts no writes must not be offered `DROP` — a menu item
+ * whose only possible outcome is an error is worse than no menu item. Every
+ * check reads a **capability**, never the engine's name, so a future engine
+ * that does accept writes needs no change here.
+ */
+test("a read-only engine is not offered DROP anywhere in the tree", async ({ page }) => {
+  await connect(page, { connect: () => ({ ...CONN_INFO, capabilities: READ_ONLY_CAPS }) });
+  await openDatabase(page);
+
+  await page.locator('.node.table:has-text("orders")').click({ button: "right" });
+  await expect(page.locator(".ctx-menu")).toBeVisible();
+  await expect(page.locator('.ctx-menu button:has-text("Drop")')).toHaveCount(0);
+  // The reads it does support are still there.
+  await expect(page.locator('.ctx-menu button:has-text("Select first")')).toHaveCount(1);
+  await page.keyboard.press("Escape");
+
+  await page.locator('.node.table:has-text("users")').click();
+  await page.locator('.node.column:has-text("email")').click({ button: "right" });
+  await expect(page.locator('.ctx-menu button:has-text("Drop")')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await openGroup(page, "Procedures");
+  await page.locator('.node.routine:has-text("top_spenders")').click({ button: "right" });
+  await expect(page.locator('.ctx-menu button:has-text("Drop")')).toHaveCount(0);
+  // Examining a definition reads; it stays.
+  await expect(page.locator('.ctx-menu button:has-text("Examine")')).toHaveCount(1);
+});
+
+/** MySQL declares writes, so nothing is taken away from the engine we have. */
+test("an engine that accepts writes still offers DROP", async ({ page }) => {
+  await connect(page);
+  await openDatabase(page);
+
+  await page.locator('.node.table:has-text("orders")').click({ button: "right" });
+  await expect(page.locator('.ctx-menu button:has-text("Drop table")')).toHaveCount(1);
+});
+
+/** The rail names the engine the server reported, not a hardcoded "MySQL". */
+test("the rail names the engine it is actually connected to", async ({ page }) => {
+  await connect(page, { connect: () => ({ ...CONN_INFO, capabilities: READ_ONLY_CAPS }) });
+  await expect(page.locator(".rail-item")).toHaveAttribute("title", /elasticsearch 8\.4\.0/);
 });

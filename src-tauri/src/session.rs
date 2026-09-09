@@ -118,6 +118,9 @@ pub struct ConnInfo {
     pub server_version: String,
     pub databases: Vec<String>,
     pub current_database: Option<String>,
+    /// What this engine supports. Sent to the frontend because a menu offering
+    /// `DROP` against a read-only engine is a bug the backend cannot prevent.
+    pub capabilities: crate::engine::Capabilities,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +158,9 @@ pub struct ServerConn {
     pub meta: Mutex<MySqlConnection>,
     pub schema_cache: Mutex<HashMap<String, DbSchema>>,
     pub server_version: String,
+    /// What this connection's engine supports. Held here so `exec` can ask
+    /// without knowing which engine it is talking to.
+    pub capabilities: crate::engine::Capabilities,
     /// Counts information_schema round trips; the cache's job is to keep this
     /// flat on repeat reads, which is what tests assert on.
     pub introspection_count: AtomicU64,
@@ -327,6 +333,7 @@ pub async fn connect(
         meta: Mutex::new(meta),
         schema_cache: Mutex::new(HashMap::new()),
         server_version: server_version.clone(),
+        capabilities: crate::engine::Capabilities::mysql(),
         introspection_count: AtomicU64::new(0),
     });
     state.connections.lock().await.insert(id.clone(), conn);
@@ -336,6 +343,7 @@ pub async fn connect(
         server_version,
         databases,
         current_database,
+        capabilities: crate::engine::Capabilities::mysql(),
     })
 }
 

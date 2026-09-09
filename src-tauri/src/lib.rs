@@ -2,6 +2,7 @@
 
 pub mod assistant;
 pub mod decode;
+pub mod engine;
 pub mod exec;
 pub mod export;
 pub mod files;

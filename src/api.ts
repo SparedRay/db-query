@@ -173,11 +173,34 @@ export interface ExportOutcome {
   warnings: string[];
 }
 
+/**
+ * What one engine supports.
+ *
+ * Read by the UI so a menu cannot offer what the engine will refuse. Branch on
+ * these, **never** on `engine` — that field is for display and for telling the
+ * assistant which dialect to write; anything behavioural belongs in a flag, or
+ * a fourth engine has to be remembered in every place that guessed from a name.
+ */
+export interface Capabilities {
+  engine: string;
+  writes: boolean;
+  transactions: boolean;
+  multiStatement: boolean;
+  delimiterBlocks: boolean;
+  routines: boolean;
+  cancellation: boolean;
+  streamingExport: boolean;
+  rowCap: "clientLimit" | "serverPageSize";
+  /** What this engine calls the thing `USE` switches between. */
+  namespaceLabel: string;
+}
+
 export interface ConnInfo {
   id: string;
   serverVersion: string;
   databases: string[];
   currentDatabase: string | null;
+  capabilities: Capabilities;
 }
 
 export interface ProfileList {

@@ -8,7 +8,7 @@
 // of view, not of session — the connection you leave keeps its tabs, its schema
 // cache and any query still running on it.
 
-import { api, type ProfileView, type ConnInfo } from "./api";
+import { api, type Capabilities, type ProfileView, type ConnInfo } from "./api";
 import { contextMenu } from "./menu";
 import { choose } from "./dialog";
 
@@ -20,6 +20,12 @@ export interface ConnectionEntry {
   /** An attempt is in flight. Drives the rail spinner; never persisted. */
   connecting?: boolean;
   serverVersion: string | null;
+  /**
+   * What this connection's engine supports. Null until it has connected once —
+   * capabilities come from the server, not from the saved profile, so a profile
+   * copied from another machine cannot claim the wrong ones.
+   */
+  capabilities: Capabilities | null;
   /** Populated on connect; drives the schema tree. */
   databases: string[];
 }
@@ -60,6 +66,19 @@ export function initials(name: string): string {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
+/**
+ * How to name this connection's engine in the UI.
+ *
+ * "MySQL" was hardcoded when there was only one engine. It comes from the
+ * server now, so a cluster does not describe itself as MySQL — and an entry
+ * that has never connected has no engine to name yet.
+ */
+function engineLabel(entry: ConnectionEntry): string {
+  const engine = entry.capabilities?.engine;
+  if (!engine) return "Server";
+  return engine === "mysql" ? "MySQL" : engine;
+}
+
 export class ConnectionManager {
   private entries: ConnectionEntry[] = [];
   private activeId: string | null = null;
@@ -94,6 +113,7 @@ export class ConnectionManager {
           saved: true,
           connected: false,
           serverVersion: null,
+          capabilities: null,
           databases: [],
         });
       }
@@ -139,6 +159,7 @@ export class ConnectionManager {
       const info = await open();
       entry.connected = true;
       entry.serverVersion = info.serverVersion;
+      entry.capabilities = info.capabilities;
       entry.databases = info.databases;
       // Only now does it join the rail. A failed attempt must leave no trace —
       // otherwise every typo becomes a dead icon the user has to clean up.
@@ -187,6 +208,7 @@ export class ConnectionManager {
     }
     entry.connected = false;
     entry.serverVersion = null;
+    entry.capabilities = null;
     entry.databases = [];
     this.hooks.onDisconnected(entry);
 
@@ -239,7 +261,7 @@ export class ConnectionManager {
       el.title =
         `${entry.profile.name}\n${entry.profile.user}@${entry.profile.host}:${entry.profile.port}\n` +
         (entry.connected
-          ? `Connected — MySQL ${entry.serverVersion ?? "?"}`
+          ? `Connected — ${engineLabel(entry)} ${entry.serverVersion ?? "?"}`
           : entry.saved
             ? "Saved, not connected"
             : "Not connected") +
@@ -296,6 +318,7 @@ export class ConnectionManager {
       },
       connected: false,
       serverVersion: null,
+      capabilities: null,
       databases: [],
     });
   }

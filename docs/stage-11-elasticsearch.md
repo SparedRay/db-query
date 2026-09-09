@@ -3,7 +3,7 @@
 **Goal:** run SQL against an Elasticsearch cluster from the same editor, with the
 same tabs, grid, export and history.
 **Builds on:** [Stage 10 — An assistant that writes SQL](stage-10-assistant.md).
-**Status:** 📋 Planned — analysis only, nothing built.
+**Status:** 🚧 In progress — capabilities landed 2026-09-08; the `Engine` trait is next.
 
 ---
 
@@ -246,11 +246,25 @@ shaped by the second engine and would be shaped again by the third.
 ## 6. Task tracker
 
 ### Phase 1 — The seam, proved on MySQL alone
-- [ ] `Capabilities`, returned with `ConnInfo`; MySQL declares everything it already does
+- [x] **`Capabilities`, returned with `ConnInfo`** — `src-tauri/src/engine.rs`. MySQL declares everything it already does, written out in full rather than derived from a `Default`, so adding a capability forces a decision
+- [x] **`engine::refusal`** — statements are refused from `caps.writes` / `caps.transactions`, before being sent, never from an engine name
+- [x] **The tree menus read capabilities.** `DROP` on a table, a column and a routine is offered only where the engine accepts writes; the reads beside them stay
+- [x] **The rail names the engine the server reported**, rather than the hardcoded "MySQL" it had said since Stage 2
+- [x] **Gate passed:** the whole existing suite ran unchanged before the new tests were added — 203 UI, 217 unit, 63 live
 - [ ] `trait Engine`; `MysqlEngine` implements it; `ServerConn` holds `Box<dyn Engine>`
-- [ ] Replace the unconditional menus and refusals with capability checks — **with no second engine present**, so the seam cannot be shaped by one
 - [ ] `ConnProfile.kind` + `url`, defaulted; connection dialog grows a second shape
-- [ ] **Gate:** the whole existing suite passes unchanged. If it needed edits, the seam is wrong
+
+#### Decisions taken while building
+
+- **Unknown capabilities mean "allowed".** A connection that has never connected
+  has no capabilities, and that is the one state where no menu is reachable
+  anyway — hiding items there would make a reconnect look like a lost feature.
+- **Capabilities come from the server, not the profile.** They are set on
+  connect and cleared on disconnect, so a `connections.json` copied between
+  machines cannot claim capabilities the server does not have.
+- **`engine` is a display field.** It names the engine for the rail and, later,
+  for the assistant's dialect. Every behavioural branch reads a flag instead —
+  a name check has to be revisited for each new engine, and one will be missed.
 
 ### Phase 2 — The engine
 - [ ] A shared **HTTP SQL API** helper — request, page, map columns, map errors — the part Snowflake would reuse

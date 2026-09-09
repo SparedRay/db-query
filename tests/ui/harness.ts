@@ -298,11 +298,39 @@ export const SCHEMA = {
   ],
 };
 
+/** MySQL's capabilities: everything this app has ever been able to do. */
+export const MYSQL_CAPS = {
+  engine: "mysql",
+  writes: true,
+  transactions: true,
+  multiStatement: true,
+  delimiterBlocks: true,
+  routines: true,
+  cancellation: true,
+  streamingExport: true,
+  rowCap: "clientLimit",
+  namespaceLabel: "database",
+};
+
+/** A read-only engine, for testing what the UI must not offer. */
+export const READ_ONLY_CAPS = {
+  ...MYSQL_CAPS,
+  engine: "elasticsearch",
+  writes: false,
+  transactions: false,
+  delimiterBlocks: false,
+  routines: false,
+  streamingExport: false,
+  rowCap: "serverPageSize",
+  namespaceLabel: "catalog",
+};
+
 export const CONN_INFO = {
   id: "c1",
   serverVersion: "8.4.0",
   databases: ["poc"],
   currentDatabase: "poc",
+  capabilities: MYSQL_CAPS,
 };
 
 /** The schema-side commands, so a tree test declares only what it changes. */

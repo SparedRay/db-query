@@ -14,6 +14,7 @@ import {
   type ExportOutcome,
   type SourceTable,
   type UpdateStatus,
+  type Capabilities,
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
@@ -494,6 +495,8 @@ els.form.addEventListener("submit", async (e) => {
       saved: wantSave,
       connected: false,
       serverVersion: null,
+      // Comes from the server on connect; a profile cannot claim capabilities.
+      capabilities: null,
       databases: [],
     };
 
@@ -793,6 +796,25 @@ function buildGroup(
   return wrap;
 }
 
+/**
+ * What the engine behind a connection can do.
+ *
+ * Falls back to "everything" only when the connection is not live, which is the
+ * one case where no menu is reachable anyway. Every caller branches on a
+ * capability rather than on `engine` — a name check has to be revisited for
+ * each new engine, and one will be missed.
+ */
+function capsFor(connId: string): Capabilities | null {
+  return conns?.get(connId)?.capabilities ?? null;
+}
+
+/** Does this connection accept statements that change data or schema? */
+function allowsWrites(connId: string): boolean {
+  // Unknown means "not yet connected"; offering the item is harmless there and
+  // hiding it would make a reconnect look like a lost feature.
+  return capsFor(connId)?.writes ?? true;
+}
+
 function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const wrap = document.createElement("div");
   const isView = t.kind.toUpperCase().includes("VIEW");
@@ -808,7 +830,7 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
       n.classList.add("loading");
       try {
         const cols = await api.listColumns(connId, db, t.name);
-        children.replaceChildren(...cols.map((c) => buildColumnNode(db, t.name, c)));
+        children.replaceChildren(...cols.map((c) => buildColumnNode(connId, db, t.name, c)));
         children.dataset.loaded = "1";
         (schemaMap as Record<string, string[]>)[t.name] = cols.map((c) => c.name);
         setSchema(view, schemaMap);
@@ -852,13 +874,20 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
         label: "Examine definition\u2026",
         run: () => void showGenerated(t.name, () => api.tableDdl(connId, db, t.name)),
       },
-      {
-        label: isView ? "Drop view…" : "Drop table…",
-        danger: true,
-        run: () =>
-          void showGenerated(`drop ${t.name}`, () =>
-            api.generateDrop({ type: isView ? "view" : "table", db, name: t.name })),
-      },
+      // Offered only where the engine accepts writes. A read-only engine would
+      // refuse it, and a menu item whose only outcome is an error is worse than
+      // no menu item.
+      ...(allowsWrites(connId)
+        ? [
+            {
+              label: isView ? "Drop view…" : "Drop table…",
+              danger: true,
+              run: () =>
+                void showGenerated(`drop ${t.name}`, () =>
+                  api.generateDrop({ type: isView ? "view" : "table", db, name: t.name })),
+            },
+          ]
+        : []),
     ]);
 
   wrap.append(n, children);
@@ -866,6 +895,7 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
 }
 
 function buildColumnNode(
+  connId: string,
   db: string,
   table: string,
   c: ColumnInfo,
@@ -885,13 +915,17 @@ function buildColumnNode(
     contextMenu(e, [
       { label: `Column ${table}.${c.name}`, run: () => {}, heading: true },
       { label: "Insert name at cursor", run: () => insertAtCursor(view, c.name) },
-      {
-        label: "Drop column…",
-        danger: true,
-        run: () =>
-          void showGenerated(`drop ${c.name}`, () =>
-            api.generateDrop({ type: "column", db, table, name: c.name })),
-      },
+      ...(allowsWrites(connId)
+        ? [
+            {
+              label: "Drop column…",
+              danger: true,
+              run: () =>
+                void showGenerated(`drop ${c.name}`, () =>
+                  api.generateDrop({ type: "column", db, table, name: c.name })),
+            },
+          ]
+        : []),
     ]);
   return cn;
 }
@@ -928,13 +962,17 @@ function buildRoutineNode(connId: string, db: string, r: RoutineRef): HTMLElemen
         run: () =>
           void showGenerated(r.name, () => api.routineDdl(connId, db, r.name, r.kind)),
       },
-      {
-        label: `Drop ${isFn ? "function" : "procedure"}\u2026`,
-        danger: true,
-        run: () =>
-          void showGenerated(`drop ${r.name}`, () =>
-            api.generateDrop({ type: "routine", db, name: r.name, kind: r.kind })),
-      },
+      ...(allowsWrites(connId)
+        ? [
+            {
+              label: `Drop ${isFn ? "function" : "procedure"}\u2026`,
+              danger: true,
+              run: () =>
+                void showGenerated(`drop ${r.name}`, () =>
+                  api.generateDrop({ type: "routine", db, name: r.name, kind: r.kind })),
+            },
+          ]
+        : []),
     ]);
 
   return n;

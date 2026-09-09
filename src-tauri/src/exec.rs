@@ -389,6 +389,22 @@ pub async fn run_script(
         } else {
             classify(text)
         };
+        // Refused before it is sent, from the engine's declared capabilities
+        // rather than from its name — so an engine that gains writes needs no
+        // change here, and one that never had them does not have to relay a
+        // remote parser's complaint.
+        if let Some(why) = crate::engine::refusal(&tab.server.capabilities, kind) {
+            statements.push(StatementResult {
+                sql: text.to_string(),
+                effective_sql: None,
+                kind,
+                outcome: Outcome::Error { message: why },
+                elapsed_ms: 0,
+            });
+            aborted_at = Some(idx);
+            break;
+        }
+
         let rewritten = auto_limit(text, kind, auto_limit_enabled);
         // sqlx 0.9 requires SQL to be `&'static str` or explicitly asserted
         // safe. An owned String is the zero-copy path through AssertSqlSafe.
