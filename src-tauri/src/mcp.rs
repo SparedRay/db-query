@@ -556,6 +556,13 @@ struct Running {
     /// Cancels the accept loop **and** every connection it spawned. Without the
     /// second half, "off" would mean "off for the next client".
     stop: CancellationToken,
+    /// The accept loop, so [`stop`] can **wait** for it rather than merely ask.
+    ///
+    /// The listener is owned by that task, so the port is held until the task
+    /// ends. Cancelling the token only schedules that; returning before it has
+    /// happened is what made restarting on the same port fail with "address
+    /// already in use" — see `stop_releases_the_port_before_it_returns`.
+    accept: tokio::task::JoinHandle<()>,
 }
 
 /// What Settings shows.
@@ -650,7 +657,7 @@ pub async fn start_with_token<R: Runtime>(
     );
 
     let accept_stop = stop_token.clone();
-    tokio::spawn(async move {
+    let accept = tokio::spawn(async move {
         loop {
             let stream = tokio::select! {
                 _ = accept_stop.cancelled() => break,
@@ -685,6 +692,7 @@ pub async fn start_with_token<R: Runtime>(
     *state.running.lock().await = Some(Running {
         port: bound,
         stop: stop_token,
+        accept,
     });
 
     Ok(McpStatus {
@@ -694,11 +702,24 @@ pub async fn start_with_token<R: Runtime>(
     })
 }
 
-/// Stop listening. Nothing is left on the port — the same token cancels the
-/// accept loop and every connection already open.
+/// Stop listening, and **do not return until the port is free**.
+///
+/// The token cancels the accept loop and every connection it spawned; awaiting
+/// the accept task is what turns that from a request into a fact. The listener
+/// lives inside that task, so until it ends the socket is still bound — and
+/// `start_with_token` stops before it binds, which means anything less than
+/// waiting here makes restarting on the same port a race with itself.
+///
+/// That race was real and was reported from use: regenerating the token, which
+/// restarts on the port already in use, reported "another app is using the
+/// port". The other app was this one.
 pub async fn stop(state: &McpState) {
-    if let Some(running) = state.running.lock().await.take() {
+    let running = state.running.lock().await.take();
+    if let Some(running) = running {
         running.stop.cancel();
+        // A panicked accept loop is still a stopped one, and there is nothing
+        // useful to do about it here: the port is free either way.
+        let _ = running.accept.await;
     }
 }
 

@@ -255,9 +255,10 @@ async fn off_means_nothing_is_listening() {
         .await
         .is_ok());
 
+    // No sleep, deliberately. `stop` does not return until the accept task has
+    // ended and the listener with it — and a test that waits "long enough"
+    // would have passed throughout the window in which that was not true.
     mcp::stop(&state).await;
-    // The listener is dropped on the accept loop's next wake-up.
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let after = client().post(&url).json(&initialize()).send().await;
     assert!(
@@ -276,7 +277,6 @@ async fn restarting_releases_the_previous_port() {
     mcp::start_with_token(&app.handle().clone(), &state, 0, token.clone())
         .await
         .expect("a second start");
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let old = client().post(&first_url).json(&initialize()).send().await;
     assert!(old.is_err(), "the first port is still open: {old:?}");
@@ -325,5 +325,55 @@ async fn a_restart_with_a_new_token_stops_accepting_the_old_one() {
         .unwrap();
     assert_eq!(accepted.status(), 200, "the new token was not accepted");
 
+    mcp::stop(&state).await;
+}
+
+/// Regenerating a token restarts the listener **on the port it is already
+/// using**, which is the one case none of the tests above cover: they all bind
+/// port 0 and so are handed a different port every time.
+///
+/// Reported from use — "tried regenerating and now it says another app is using
+/// the port" — with the right guess attached: the old server is not really
+/// stopped before the new one starts.
+#[tokio::test]
+async fn restarting_on_the_same_port_does_not_collide_with_itself() {
+    let (app, state, _url, _tok) = serve().await;
+    let port = state.status().await.port.expect("running");
+
+    // Exactly what `mcp_regenerate_token` does: same port, new token.
+    let again = mcp::start_with_token(&app.handle().clone(), &state, port, "rotated".into()).await;
+    assert!(
+        again.is_ok(),
+        "restarting on its own port failed: {:?}",
+        again.err()
+    );
+    assert_eq!(state.status().await.port, Some(port), "the port moved");
+
+    let ok = client()
+        .post(mcp::url(port))
+        .header("authorization", "Bearer rotated")
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize())
+        .send()
+        .await
+        .expect("the restarted server is listening");
+    assert_eq!(ok.status(), 200);
+
+    mcp::stop(&state).await;
+}
+
+/// `stop` has to mean the port is free, not merely that something has been
+/// asked to let go of it. Ten restarts in a row on one port: a stop that only
+/// signals will lose this race almost immediately.
+#[tokio::test]
+async fn stop_releases_the_port_before_it_returns() {
+    let (app, state, _url, tok) = serve().await;
+    let port = state.status().await.port.expect("running");
+
+    for i in 0..10 {
+        mcp::stop(&state).await;
+        let bound = mcp::start_with_token(&app.handle().clone(), &state, port, tok.clone()).await;
+        assert!(bound.is_ok(), "rebind {i} failed: {:?}", bound.err());
+    }
     mcp::stop(&state).await;
 }
