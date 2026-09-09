@@ -1813,13 +1813,11 @@ void session.boot().then((warning) => {
 // One source of truth for the numbers the backend owns, so the UI asks rather
 // than repeating them.
 let appDefaults: AppDefaults = { browseLimit: 1000, maxRows: 0, mcpPort: 0 };
-void api.appDefaults().then(async (d) => {
+/** Resolves once `appDefaults` holds real values. Anything that needs one of
+ *  those numbers waits for this rather than racing it. */
+const defaultsReady = api.appDefaults().then((d) => {
   appDefaults = d;
   browseLimit = d.browseLimit;
-  // Start the MCP server if it was left on. **After** the defaults arrive,
-  // because that is where the port comes from when the user never chose one —
-  // and only then, so a fresh install listens on nothing.
-  if (settings.mcpEnabled) await applyMcp(true, "boot");
 });
 
 // Theme before anything else is drawn, so there is no flash of the wrong one.
@@ -1830,6 +1828,20 @@ const theme = createTheme((dark) => setEditorTheme(view, dark));
 // --- settings ---------------------------------------------------------------
 
 const settings = loadSettings();
+
+/**
+ * Start the MCP server if it was left on.
+ *
+ * Two orderings matter, and this used to satisfy only one of them. It waits for
+ * `appDefaults`, because that is where the port comes from when the user never
+ * chose one. And it lives **after** `settings` is declared, which it previously
+ * did not: it read a `const` from ten lines further down and worked only
+ * because an IPC promise cannot resolve before module evaluation finishes. That
+ * is not a guarantee, it is a coincidence — and the failure it would produce is
+ * a `ReferenceError` inside a `void`ed promise, which is to say a server that
+ * silently never starts.
+ */
+void defaultsReady.then(() => (settings.mcpEnabled ? applyMcp(true, "boot") : undefined));
 
 /**
  * Apply everything at boot: appearance through CSS, and the session defaults
@@ -1949,21 +1961,34 @@ function mcpConfigSnippets(url: string, token: string) {
   );
 }
 
+/**
+ * Why the server is not running, when it was meant to be.
+ *
+ * Held because `openSettings` repaints from a fresh `mcp_status`, which reports
+ * a plain "not running" and knows nothing about *why* — so without this the
+ * reason survived exactly until you looked for it.
+ */
+let mcpFailure: string | null = null;
+
 /** Paint the pane from a status the backend just gave us. */
 async function showMcp(status: McpStatus, error?: string) {
   els.setMcpOn.checked = status.running;
   els.setMcpLive.hidden = !status.running;
 
   if (error) {
+    mcpFailure = error;
     els.setMcpStatus.textContent = error;
     mcpToken = null;
     return;
   }
   if (!status.running || !status.url) {
-    els.setMcpStatus.textContent = "Off. Nothing is listening.";
+    // A remembered failure outranks "off": the switch says off either way, and
+    // only one of the two tells you there is something to fix.
+    els.setMcpStatus.textContent = mcpFailure ?? "Off. Nothing is listening.";
     mcpToken = null;
     return;
   }
+  mcpFailure = null;
 
   els.setMcpStatus.textContent = `Listening on ${status.url}`;
   els.setMcpPort.value = String(status.port ?? mcpPort());
@@ -1992,7 +2017,7 @@ async function showMcp(status: McpStatus, error?: string) {
  */
 async function applyMcp(on: boolean, intent: "toggle" | "boot" = "toggle") {
   try {
-    const status = on ? await api.mcpStart(mcpPort()) : await api.mcpStop();
+    const status = on ? await startMcp(intent) : await api.mcpStop();
     settings.mcpEnabled = status.running;
     saveSettings(settings);
     await showMcp(status);
@@ -2008,6 +2033,34 @@ async function applyMcp(on: boolean, intent: "toggle" | "boot" = "toggle") {
     }
     await showMcp({ running: false, port: null, url: null }, String(err));
   }
+}
+
+/**
+ * Bind, retrying briefly at boot.
+ *
+ * Restarting the app races its own previous process for the port: the old one
+ * has been told to quit but has not yet released the socket, so the new one
+ * gets "address in use" and — because a boot failure deliberately does not
+ * clear the preference — stayed down until somebody noticed and toggled it by
+ * hand. That is a switch that says "on" while nothing listens, which is the one
+ * outcome this whole pane is arranged to avoid.
+ *
+ * Three attempts over about a second, and only at boot. A **toggle** must not
+ * retry: the user is watching, and a port genuinely held by another program
+ * should say so at once rather than pausing first.
+ */
+async function startMcp(intent: "toggle" | "boot"): Promise<McpStatus> {
+  const attempts = intent === "boot" ? 3 : 1;
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await api.mcpStart(mcpPort());
+    } catch (err) {
+      last = err;
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  throw last;
 }
 
 els.setMcpOn.onchange = () => void applyMcp(els.setMcpOn.checked);

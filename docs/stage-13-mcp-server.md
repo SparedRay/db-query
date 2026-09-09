@@ -451,3 +451,52 @@ break quietly.
 **M4 and M7 by hand**, and the token in the transcript: the one used here was
 pasted into a chat log, so it should be regenerated in Settings → Integrations
 before this is left running.
+
+---
+
+## 13. The server stayed down after a restart — 2026-09-09
+
+Reported from use: "MCP turns off when we switch connections." Nothing was
+listening on the port, and the config that had worked minutes earlier did not.
+
+**Switching connections was not the cause.** A test drives exactly that — two
+saved profiles, server on, click the other one — and asserts `mcp_stop` is never
+called, the switch stays on, and focus moves `c1` → `c2`. It passes. The
+frontend never stops the server, and neither does anything on the Rust
+connection path; `McpState` is reachable only from the six `mcp_*` commands.
+
+What did it is **restarting**, which under `tauri dev` happens on every Rust
+edit and had been happening all afternoon. A restarting app races its own
+previous process for the port: the old one has been told to quit and has not yet
+released the socket, so the new one gets "address in use" — and §11's decision
+that a *boot* failure keeps the preference rather than clearing it meant nothing
+ever tried again. The switch said on, the preference said on, and nothing was
+listening. Which is precisely the state that pane is arranged to make
+impossible.
+
+Two fixes, both small, both from this one report:
+
+**A boot retries; a toggle does not.** Three attempts about 400ms apart, and
+only at boot. A toggle must fail at once: the user is watching it, and a port
+genuinely held by another program should say so rather than pausing first.
+
+**The reason outlives the moment.** `openSettings` repaints from a fresh
+`mcp_status`, which reports a plain "not running" and knows nothing about *why* —
+so the explanation survived exactly until you went looking for it. The last
+failure is now remembered and outranks "Off. Nothing is listening." until a
+start succeeds.
+
+### What this cost, and what it says
+
+The retry is guarded by a test whose stub fails the second bind and succeeds the
+third; removing the retry reddens it. Writing that test was itself instructive —
+the first two versions were wrong rather than the code: the first let the
+*enable* fail, which clears the preference, so there was no boot left to test;
+the second stubbed `mcp_status` as a constant, so the pane repainted from a lie.
+
+And a fragility found while looking for the fault, unrelated to it: the boot
+start read `settings`, a `const` declared **ten lines below it**, and worked only
+because an IPC promise cannot resolve before module evaluation ends. That is a
+coincidence, not a guarantee, and the failure it would eventually produce is a
+`ReferenceError` inside a `void`ed promise — a server that silently never
+starts, which is the same symptom by a different road.
