@@ -5,7 +5,11 @@ description = "Lightweight MySQL client"
 authors = ["SparedRay"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
+# Raised from 1.82 for `rmcp` (Stage 13), which declares 1.88. Both mise and CI
+# build with `stable`, so this is a declaration catching up with reality rather
+# than a toolchain change — but it is a real floor, so it moves with the crate
+# that raised it.
+rust-version = "1.88"
 # Not published, and the reason it is written down: cargo-about's `private.ignore`
 # keys off this. Without it, db-query appeared in its own third-party licence
 # file, under a placeholder copyright, beside a preamble already saying it is MIT.
@@ -46,7 +50,7 @@ zeroize = "1"
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 # sqlx 0.9 split the old `runtime-tokio-rustls` feature into separate runtime
 # and TLS flags. `mysql-rsa` is required for MySQL 8.0's default
@@ -90,6 +94,50 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
     "rustls-no-provider",
 ] }
+# ------------------------------------------------------------ MCP (Stage 13)
+#
+# The official Rust MCP SDK. Apache-2.0, read from the vendored Cargo.toml
+# rather than remembered. Pinned to 3.x on purpose: 2.x negotiates older
+# protocol revisions, and a client speaking a newer one should fail loudly
+# rather than half-work. It is also what raised `rust-version` to 1.88 above —
+# 2.2.0 is what cargo silently resolves to otherwise.
+#
+# No `client` feature: this app hosts a server and consumes nobody's tools.
+rmcp = { version = "3", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+
+# The HTTP layer under `rmcp`'s tower service. **Not new crates** — hyper,
+# hyper-util, http-body-util and bytes are all already linked via reqwest; what
+# these lines add is hyper's *server* half of a crate we already compile. The
+# whole MCP stage costs 12 packages, and exactly one of them
+# (`httpdate`, MIT OR Apache-2.0) comes from this block.
+hyper = { version = "1", default-features = false, features = [
+    "server",
+    "http1",
+] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+# Only for `CancellationToken`: stopping the listener has to also stop the
+# connections it spawned, or "off" would mean "off for the next client".
+tokio-util = "0.7"
+# Tool argument schemas. `rmcp`'s `server` feature turns this on regardless;
+# naming it here is what lets `#[derive(JsonSchema)]` resolve.
+schemars = "1"
+# The bearer token: 32 bytes from the OS entropy source, base64 for a header.
+# Both already in the tree via rmcp, so neither is a download.
+rand = "0.10"
+base64 = "0.23"
+
+[dev-dependencies]
+# `tests/mcp_http.rs` drives the real socket the way a client would, which needs
+# an app to hang the handler off. `test` is an empty feature gating tauri's mock
+# runtime; it is a dev-dependency, so it reaches no shipped binary, and it adds
+# no crate — this is the same `tauri` already compiled above.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 default = ["custom-protocol"]
