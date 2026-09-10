@@ -521,6 +521,12 @@ export const api = {
     invoke<SaveProfileOutcome>("save_profile", { profile, password }),
   /** Returns a warning if the keychain entry could not be removed. */
   deleteProfile: (id: string) => invoke<string | null>("delete_profile", { id }),
+  /**
+   * Persist the rail's order. Ids only — the order is the only thing this may
+   * change — and a profile the list does not mention keeps its place rather
+   * than being dropped.
+   */
+  reorderProfiles: (ids: string[]) => invoke<void>("reorder_profiles", { ids }),
 
   // --- connections. Several can be live at once; every call names one.
   listRoutines: (connectionId: string, db: string) =>

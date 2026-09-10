@@ -152,6 +152,18 @@ fn save_profile(
     })
 }
 
+/// Put the saved profiles in the order the rail shows them.
+///
+/// It reloads the file rather than ordering whatever the caller sent, so a
+/// connection saved since the rail was drawn is still there afterwards — see
+/// `profiles::reorder`.
+#[tauri::command]
+fn reorder_profiles(app: tauri::AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let ordered = profiles::reorder(profiles::load(&dir).profiles, &ids);
+    profiles::save_all(&dir, &ordered)
+}
+
 /// Delete a profile **and its stored password**. An orphaned secret outlives
 /// the thing that explained what it was for, so a failure to remove it is
 /// reported rather than swallowed.
@@ -1312,6 +1324,7 @@ pub fn run() {
             list_profiles,
             save_profile,
             delete_profile,
+            reorder_profiles,
             open_tab,
             close_tab,
             use_database,

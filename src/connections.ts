@@ -73,6 +73,29 @@ export function initials(name: string): string {
  * server now, so a cluster does not describe itself as MySQL — and an entry
  * that has never connected has no engine to name yet.
  */
+/**
+ * Where this connection points, in the terms its engine actually uses.
+ *
+ * MySQL is addressed by host and port, Elasticsearch by a URL. The editor
+ * hides the fields the chosen engine does not use, but it does not blank
+ * them — so a saved cluster still carries whatever the MySQL half defaulted
+ * to, and reading `host:port` off one reported `@localhost:3306` for a server
+ * that was never at either.
+ *
+ * Branches on `kind` rather than on capabilities, deliberately: capabilities
+ * arrive with the first successful connection, and this has to be right on a
+ * saved profile that has never connected — which is exactly when someone
+ * hovers a rail button to find out what it is.
+ */
+export function address(p: ProfileView): string {
+  if (p.kind === "elasticsearch") {
+    const user = p.auth?.type === "basic" ? p.auth.user : "";
+    const url = p.url || "(no URL)";
+    return user ? `${user}@${url}` : url;
+  }
+  return `${p.user}@${p.host}:${p.port}`;
+}
+
 function engineLabel(entry: ConnectionEntry): string {
   const engine = entry.capabilities?.engine;
   if (!engine) return "Server";
@@ -273,7 +296,7 @@ export class ConnectionManager {
       el.style.setProperty("--conn-colour", entry.profile.colour);
       el.textContent = initials(entry.profile.name);
       el.title =
-        `${entry.profile.name}\n${entry.profile.user}@${entry.profile.host}:${entry.profile.port}\n` +
+        `${entry.profile.name}\n${address(entry.profile)}\n` +
         (entry.connected
           ? `Connected — ${engineLabel(entry)} ${entry.serverVersion ?? "?"}`
           : entry.saved
@@ -310,14 +333,59 @@ export class ConnectionManager {
   }
 
   private contextMenu(e: MouseEvent, entry: ConnectionEntry) {
+    const at = this.entries.findIndex((x) => x.profile.id === entry.profile.id);
     contextMenu(e, [
       entry.connected
         ? { label: "Disconnect", run: () => void this.disconnect(entry) }
         : { label: "Connect", run: () => void this.connect(entry) },
       { label: "Edit…", run: () => this.openEditor(entry) },
       { label: "Duplicate", run: () => this.duplicate(entry) },
+      // Disabled rather than absent at the ends: a menu whose items move around
+      // is one you have to read every time.
+      { label: "Move up", run: () => void this.move(entry, -1), disabled: at <= 0 },
+      {
+        label: "Move down",
+        run: () => void this.move(entry, 1),
+        disabled: at < 0 || at >= this.entries.length - 1,
+      },
       { label: "Delete", run: () => void this.confirmRemove(entry), danger: true },
     ]);
+  }
+
+  /**
+   * Move a connection one place along the rail, and remember where it landed.
+   *
+   * Two menu items rather than a drag, on purpose: a drag needs drop-position
+   * feedback and behaves differently under each of the two webviews this app
+   * ships on, and the job here is "put the one I use most at the top".
+   *
+   * The order is written to disk immediately. A reorder that has to be redone
+   * after every restart is not a feature, it is a chore.
+   */
+  private async move(entry: ConnectionEntry, delta: -1 | 1) {
+    const at = this.entries.findIndex((x) => x.profile.id === entry.profile.id);
+    const to = at + delta;
+    if (at < 0 || to < 0 || to >= this.entries.length) return;
+    [this.entries[at], this.entries[to]] = [this.entries[to], this.entries[at]];
+    this.render();
+    await this.persistOrder();
+  }
+
+  /**
+   * The rail's order, saved.
+   *
+   * Only the saved ones are named: an ad-hoc connection has no file entry to
+   * order, and it still moves in the rail for as long as it exists. Rust keeps
+   * anything the list does not mention, so naming a subset cannot delete
+   * anything.
+   */
+  private async persistOrder() {
+    const ids = this.entries.filter((x) => x.saved).map((x) => x.profile.id);
+    try {
+      await api.reorderProfiles(ids);
+    } catch (err) {
+      this.hooks.notify(String(err));
+    }
   }
 
   private duplicate(entry: ConnectionEntry) {
