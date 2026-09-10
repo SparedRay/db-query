@@ -697,3 +697,62 @@ Two lists would eventually disagree, and the one still passing would be the
 weaker one. A field added to `ConnProfile` now fails both until somebody adds
 it to `PROFILE_KEYS`, which is where the question "is this safe to write to
 disk?" gets asked out loud.
+
+## 18. Two things from live use — 2026-09-10
+
+Both reported from the running app, both about what a click does.
+
+### The selection that could only be seen if it spanned lines
+
+> "Now we can see the highlight when we select more than one line, but a single
+> word is basically transparent."
+
+Third round on this selection, and the first two were fixing the colour. The
+colour was fine. **CodeMirror paints the selection in a layer behind the
+lines**, and `highlightActiveLine` marks the line under the cursor head whether
+or not the selection is empty — so an opaque line background covers the band on
+the one line a short selection is always on. Several lines worked because only
+the head line was covered, which is exactly the shape of the report.
+
+The active line was `--bg-row-hover`, opaque. CodeMirror's own defaults here are
+`#cceeff44` and `#99eeff33`; the alpha is not decoration. `--editor-active-line`
+is now translucent and composites to `#f3f5f8` / `#1b1e25` over each ground —
+the same `--bg-row-hover` values, to the byte — so the active line looks
+identical and the selection shows through it.
+
+**Why three tests missed it.** They read
+`getComputedStyle(band).backgroundColor`: what the band was *told* to be. A
+precise measurement of the wrong thing — anything painted on top is invisible
+to it, and something was. The new test screenshots the band, reads the pixels
+back through a canvas, and compares them with the pixels immediately to the
+right on the same line. That is the comparison an eye makes, and no stacking
+mistake can fool it. With the fix reverted the two new tests fail and **all
+three old ones still pass**, which is the proof they never could have caught
+this.
+
+### The click that widened the copy to everything
+
+> "If we click on a column and do Ctrl+C it is copying the whole row. We just
+> need the selected value."
+
+The cell gesture was already right — clicking a cell and pressing Ctrl+C copies
+that one value, headerless. The gesture next to it was not.
+
+`applyGesture` has a rule that clicking the only selected entry clears it, so
+there is a way back to "nothing selected" without hunting for one. It asked that
+question of **one axis while the other still held a selection**: click cell b2
+and the columns are `{b}`; click b's header next and the rule read it as "you
+clicked the only selected column, deselect it", and cleared both sets. Empty
+means *all*, so the copy silently widened from one cell to the whole result. The
+row gutter had the same bug by symmetry.
+
+The question is now asked of the whole selection rather than one axis, which
+narrows the rule without removing it — a test covers clicking a selected header
+twice, because the way back has to stay.
+
+Reproduced before it was fixed, by printing what each gesture actually put on
+the clipboard rather than reasoning about the sets. The model on paper was
+right; the interaction between two gestures was not, and only one of the four
+combinations was wrong.
+
+580 UI tests on both engines.

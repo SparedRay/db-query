@@ -272,3 +272,87 @@ test("the cell menu offers both copies", async ({ page, browserName }) => {
     expect(withHeaders.trim().split("\n")).toEqual(["id\tlabel", "1\tone"]);
   }
 });
+
+/**
+ * What a click actually selects, and what Ctrl+C then copies.
+ *
+ * Reported from live use: "click on a column and Ctrl+C copies the whole row —
+ * we just need the selected value". The cell gesture was already right; the
+ * one next to it was not.
+ *
+ * `applyGesture` had a rule that clicking the only selected entry clears it, so
+ * there is a way back to "nothing selected". It asked that question of one axis
+ * while the other still held a selection. Click cell b2 — columns are now `{b}`
+ * — then click b's header, and the rule read it as "you clicked the only
+ * selected column, deselect it" and cleared everything. **Empty means all**, so
+ * the copy silently widened from one cell to the entire result.
+ *
+ * The button label is asserted alongside the clipboard because it is the only
+ * warning a user gets that the scope changed, and it runs on both engines.
+ */
+
+const THREE_BY_TWO = () =>
+  rowsResult(
+    [{ name: "a" }, { name: "b" }, { name: "c" }],
+    [
+      ["a1", "b1", "c1"],
+      ["a2", "b2", "c2"],
+    ],
+  );
+
+test("a cell copies that one value and nothing else", async ({ page, browserName }) => {
+  await connectAndRun(page, THREE_BY_TWO());
+
+  await page.click('tr[data-row="1"] td[data-col="1"]');
+  await expect(page.locator("#btn-copy")).toHaveText(/1 row × 1 column/);
+
+  await page.keyboard.press("Control+c");
+  const text = await copied(page, browserName);
+  if (text === null) return;
+  expect(text.trim()).toBe("b2");
+});
+
+test("a column header after a cell in it selects the column, not everything", async ({
+  page,
+  browserName,
+}) => {
+  await connectAndRun(page, THREE_BY_TWO());
+
+  await page.click('tr[data-row="1"] td[data-col="1"]');
+  await page.click('th[data-col="1"]');
+  await expect(page.locator("#btn-copy")).toHaveText(/1 column/);
+
+  await page.keyboard.press("Control+c");
+  const text = await copied(page, browserName);
+  if (text === null) return;
+  expect(text.trim().split("\n")).toEqual(["b1", "b2"]);
+});
+
+test("a row number after a cell in it selects the row, not everything", async ({
+  page,
+  browserName,
+}) => {
+  await connectAndRun(page, THREE_BY_TWO());
+
+  await page.click('tr[data-row="1"] td[data-col="1"]');
+  await page.click('tr[data-row="1"] th.rownum');
+  await expect(page.locator("#btn-copy")).toHaveText(/1 row$/);
+
+  await page.keyboard.press("Control+c");
+  const text = await copied(page, browserName);
+  if (text === null) return;
+  expect(text.trim()).toBe("a2\tb2\tc2");
+});
+
+/**
+ * And the way back is still there. The fix narrows when the deselect applies;
+ * it must not remove it, or there is no gesture for "stop selecting".
+ */
+test("clicking a selected column header again clears the selection", async ({ page }) => {
+  await connectAndRun(page, THREE_BY_TWO());
+
+  await page.click('th[data-col="1"]');
+  await expect(page.locator("#btn-copy")).toHaveText(/1 column/);
+  await page.click('th[data-col="1"]');
+  await expect(page.locator("#btn-copy")).toHaveText(/^Copy$/);
+});
