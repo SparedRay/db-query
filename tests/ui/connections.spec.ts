@@ -240,3 +240,37 @@ test("saving an edit reconnects, so a change to the flag applies at once", async
   const saved = (await calls(page)).filter((c) => c.cmd === "save_profile");
   expect((saved[0].args.profile as { readOnly?: boolean })?.readOnly).toBe(false);
 });
+
+/**
+ * **The selection bar is for a live connection.**
+ *
+ * Disconnecting leaves a saved connection selected — `activeId` is still what
+ * the Connect button prefills and what keeps its tabs on screen — but the rail
+ * went on drawing the same 3px bar it draws for a connected one, only greyer.
+ * Reported from live use: a server you had just disconnected from still looked
+ * like the one you were on.
+ *
+ * Asserted on what is painted, because the class stays and only the paint
+ * changes: a class check would pass either way.
+ */
+async function activeBar(page: Page) {
+  return page.evaluate(() => {
+    const el = document.querySelector(".rail-item");
+    if (!el) return null;
+    const bar = getComputedStyle(el, "::before");
+    return { drawn: bar.content !== "none", classes: el.className };
+  });
+}
+
+test("disconnecting stops the rail drawing the selection bar", async ({ page }) => {
+  await connect(page, { ...schemaBackend, disconnect: () => null });
+  expect(await activeBar(page), "a live connection is marked").toMatchObject({ drawn: true });
+
+  await page.click("#btn-connect");
+  await expect(page.locator(".rail-item.offline")).toHaveCount(1);
+
+  const after = await activeBar(page);
+  expect(after?.drawn, "a disconnected connection must not look selected").toBe(false);
+  // The selection itself is untouched — it is what Connect acts on next.
+  expect(after?.classes).toContain("active");
+});

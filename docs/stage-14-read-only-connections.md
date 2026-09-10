@@ -251,3 +251,30 @@ it, and both fail when the default keymap is restored while "Tab indents" and
 
 The starter document lists the two keys, since a binding nobody knows about is
 not a feature.
+
+---
+
+## 12. A disconnected server that still looked selected — 2026-09-10
+
+Reported from live use: disconnect, and the rail still draws the bar down the
+left of that connection, so it reads as the one you are on.
+
+It **is** still the selected one, and that is not a mistake — `activeId`
+survives a disconnect on purpose. It is what the Connect button prefills, it is
+what keeps that connection's tabs on screen, and the tab strip stays tinted its
+colour. Clearing it would open a blank New Connection dialog after a disconnect
+and take the tabs' anchor away.
+
+So the state is right and the **paint** was wrong. The bar drawn for an offline
+connection was the same 3px shape as the live one, in grey — and the shape is
+what carries the meaning, so greying it never did the job. It is now not drawn
+at all.
+
+Nothing is lost: which connection you are looking at while it is down is
+already said by the tab strip's colour, and by the item's own dashed, drained
+styling. The rail was saying it a second time, and the second time was the one
+being misread.
+
+The test asserts what is **painted** (`::before` resolving to `content: none`),
+not the class — `active` stays on the element either way, so a class check
+would have passed before the fix.
