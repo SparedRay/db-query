@@ -20,7 +20,8 @@ decisions that were corrected along the way.
 | 11 | [A second engine: Elasticsearch SQL](stage-11-elasticsearch.md) | 🚧 **Built** — engine trait + capabilities; Elasticsearch runs end to end against a live cluster; reviewed hands-on 2026-09-09 (§11) |
 | 12 | [Stabilisation: result sets, idle connections, carried bugs](stage-12-stabilisation-and-result-sets.md) | ✅ **Built and confirmed** — B1-B7 verified by hand 2026-09-09 (§16); also tree/type icons, a schema filter, tabbed settings, formatted definitions and a dialect-aware linter (§13-15) |
 | 13 | [Letting other tools in: an MCP server](stage-13-mcp-server.md) | 🚧 **Built** — schema and "put this query in my editor" over MCP, on loopback, off by default, nothing that executes; M1/M2 confirmed by hand 2026-09-09, M4 and M7 outstanding |
-| 14 | [Read-only connections](stage-14-read-only-connections.md) | 🚧 **In progress** — a connection can refuse writes before they are sent; deferred from Stage 2 |
+| 14 | [Read-only connections](stage-14-read-only-connections.md) | 🚧 **Built** — a connection can refuse writes before they are sent, deferred from Stage 2; hands-on pass outstanding |
+| 15 | [Flyway migrations](stage-15-flyway-migrations.md) | 📋 **Planned** — list, read, apply and repair migrations on a connection that has a Flyway project |
 
 ## Rules
 
