@@ -278,3 +278,42 @@ being misread.
 The test asserts what is **painted** (`::before` resolving to `content: none`),
 not the class — `active` stays on the element either way, so a class check
 would have passed before the fix.
+
+---
+
+## 13. E6 stays parked — 2026-09-10
+
+Elasticsearch's cancel was evaluated and **deliberately not built**: the cases
+it would help are not ones this app hits soon. Written down so the next look
+starts from here rather than from the code.
+
+**What is actually wrong.** `elastic.rs` declares `cancellation: true`, and its
+cancel only lands *between* statements — the file says so itself: "a long
+single query cannot be interrupted here." And `els.btnCancel.hidden = !busy`,
+so `capabilities.cancellation` is declared by both engines and **read by
+nobody**. Two halves of one overstatement.
+
+**What closing it takes**, all small:
+
+  * An **awaitable** cancel signal. `cancel_requested` is an `AtomicBool` —
+    pollable, not awaitable, which is exactly why cancel waits for the current
+    statement. A `CancellationToken` per tab (tokio-util is already in the tree
+    from Stage 13), fresh per run, cancelled beside the flag; the bool stays,
+    six call sites read it.
+  * `tokio::select!` the `query()` future against `token.cancelled()` in the
+    run loop. **Dropping the reqwest future is the mechanism** — that is what
+    aborts the HTTP request.
+  * The Cancel button reads the capability.
+  * A test that needs no slow query: a fake cluster on loopback answering
+    `GET /` with a version and never answering `POST /_sql` (hyper is already a
+    dependency; `tests/mcp_http.rs` is the precedent). Connect, run, cancel,
+    assert it returns promptly and reports `cancelled`. Deterministic, and not
+    `#[ignore]`d.
+
+**What it would still not do.** Give Elasticsearch a `KILL QUERY`. There is no
+equivalent for `_sql` short of `_tasks/_cancel`, which needs an opaque-id round
+trip and a task lookup. Elasticsearch does cancel a REST task when its channel
+closes (7.4+, elastic/elasticsearch#43332), so dropping the connection is the
+nearest honest thing — but that the `_sql` handler participates is **not
+verified**, and the UI should promise the user's control back, not the
+cluster's stop. MySQL's `KILL QUERY` certainty must not be borrowed here.
