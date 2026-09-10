@@ -60,6 +60,11 @@ pub struct Capabilities {
     pub routines: bool,
     /// A running statement can be stopped.
     pub cancellation: bool,
+    /// Flyway can drive this engine, so a project can be attached to a
+    /// connection on it. A capability rather than a check on the engine's
+    /// name, so the second engine Flyway supports is an addition here and
+    /// nothing else.
+    pub migrations: bool,
     /// Export can stream row-at-a-time rather than holding the whole result.
     pub streaming_export: bool,
     pub row_cap: RowCap,
@@ -83,6 +88,7 @@ impl Capabilities {
             delimiter_blocks: true,
             routines: true,
             cancellation: true,
+            migrations: true,
             streaming_export: true,
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
@@ -303,6 +309,7 @@ mod tests {
             "delimiterBlocks",
             "routines",
             "cancellation",
+            "migrations",
             "streamingExport",
             "rowCap",
             "namespaceLabel",
@@ -324,6 +331,7 @@ mod tests {
             delimiter_blocks: false,
             routines: false,
             cancellation: true,
+            migrations: false,
             streaming_export: false,
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),

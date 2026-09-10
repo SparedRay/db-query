@@ -14,6 +14,8 @@
              place rather than being duplicated as markup here. -->
         <button id="btn-assistant" class="rail-cog" type="button" title="Ask the assistant (Ctrl+K)"></button>
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
+        <button id="btn-migrations" class="rail-cog" type="button"
+                title="Migrations" aria-pressed="false" hidden></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
       </div>
 
@@ -76,6 +78,19 @@
           </div>
         </section>
       </main>
+
+      <!-- The migrations pane. A pane rather than a section of the schema tree
+           so the database structure stays visible while a migration is being
+           read — which is the whole reason to look at both at once. -->
+      <div id="msplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+      <aside id="migrations-pane" hidden>
+        <div class="pane-head">
+          <span id="mig-title">Migrations</span>
+          <button id="btn-mig-refresh" class="mini" title="Ask Flyway again">Refresh</button>
+        </div>
+        <div id="mig-env" class="mig-env" hidden></div>
+        <div id="mig-list" class="mig-list"></div>
+      </aside>
     </div>
 
     <!--
@@ -215,6 +230,16 @@
               requests from a web page, and is off until you turn it on. It
               reports whichever connection is on screen, so switching connection
               changes what a client sees.</p>
+            <h3>Flyway</h3>
+            <p class="hint">Migrations are read and applied by <strong>your own
+              Flyway command line</strong> — this app never reimplements it, and
+              never bundles it. Leave the path empty to use whatever is on your
+              PATH.</p>
+            <label>Flyway command
+              <input type="text" id="set-flyway-path" placeholder="flyway"
+                     autocomplete="off" spellcheck="false" />
+            </label>
+            <p class="hint" id="set-flyway-note"></p>
           </section>
 
           <section class="pane" id="set-pane-updates" role="tabpanel"

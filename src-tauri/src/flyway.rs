@@ -25,10 +25,14 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One environment: a database, in Flyway's vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialised to the frontend so the import dialog can offer them. It carries
+/// no password because **no type in this module has a field for one**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Environment {
     /// The table name — `[environments.uat]` is `uat`. What `-environment=`
     /// takes.
@@ -47,7 +51,8 @@ impl Environment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub name: Option<String>,
     /// `databaseType = "MySql"`. Used to refuse an import into a connection
@@ -200,7 +205,8 @@ pub fn parse_jdbc(url: &str) -> Option<Target> {
 // ------------------------------------------------------------- the guard
 
 /// Which field of a connection an environment disagrees with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Disagreement {
     Host,
     Port,

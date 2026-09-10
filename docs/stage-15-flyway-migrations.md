@@ -1,6 +1,6 @@
 # Stage 15 — Flyway migrations, on a connection that has them
 
-**Status:** 📋 Planned — opened 2026-09-10.
+**Status:** 🚧 Phase 1 built — 2026-09-10. F1-F4 met; apply and repair not started.
 
 ---
 
@@ -145,12 +145,12 @@ works. We read the environment table, `[flyway] environment`, and
 
 ## 5. Milestones
 
-- [ ] **F1 — A project imports.** Point at a real `flyway.toml`, pick an
+- [x] **F1 — A project imports.** Point at a real `flyway.toml`, pick an
       environment, and the connection remembers it across a restart.
-- [ ] **F2 — The list is real.** Applied and pending migrations, with state and
+- [x] **F2 — The list is real.** Applied and pending migrations, with state and
       installed-on, from `flyway info` against the fixture.
-- [ ] **F3 — A migration opens.** Click one, read its SQL in a tab. Nothing runs.
-- [ ] **F4 — The guard bites.** Attaching an environment whose URL does not
+- [x] **F3 — A migration opens.** Click one, read its SQL in a tab. Nothing runs.
+- [x] **F4 — The guard bites.** Attaching an environment whose URL does not
       match the connection is refused, and says which field disagreed.
 - [ ] **F5 — Apply works, and is deliberate.** Pending migrations apply through
       `flyway migrate`; the confirmation names the versions; out-of-order is a
@@ -163,19 +163,19 @@ works. We read the environment table, `[flyway] environment`, and
 ## 6. Task tracker
 
 ### Phase 1 — Import, list, read (nothing writes)
-- [ ] `toml` crate, licence read from the vendored source before it is added
-- [ ] Parse: environments (`url`, `user`, `displayName`), `[flyway] environment`,
+- [x] `toml` crate, licence read from the vendored source before it is added
+- [x] Parse: environments (`url`, `user`, `displayName`), `[flyway] environment`,
       `outOfOrder`
-- [ ] JDBC URL parsing (`jdbc:mysql://host:port/db?params`), params discarded
-- [ ] `flywayProject` + `flywayEnvironment` on `ConnProfile`, and the
+- [x] JDBC URL parsing (`jdbc:mysql://host:port/db?params`), params discarded
+- [x] `flywayProject` + `flywayEnvironment` on `ConnProfile`, and the
       `PROFILE_KEYS` decision that comes with them
-- [ ] A `migrations` capability — true where Flyway can drive the engine
-- [ ] Invoke the CLI: arguments as a vector, never a shell string; working
+- [x] A `migrations` capability — true where Flyway can drive the engine
+- [x] Invoke the CLI: arguments as a vector, never a shell string; working
       directory the TOML's folder; a settable path; an honest error when it is
       not installed
-- [ ] `info -outputType=json`, parsed defensively
-- [ ] The migrations pane, and opening a migration's file in a tab
-- [ ] The import guard (§3.5)
+- [x] `info -outputType=json`, parsed defensively
+- [x] The migrations pane, and opening a migration's file in a tab
+- [x] The import guard (§3.5)
 
 ### Phase 2 — Apply
 - [ ] `migrate`, behind a confirmation naming the versions
@@ -334,3 +334,46 @@ changed. The two tests that read migrations failed; the two that do not depend
 on `locations` kept passing. That is the shape a real regression would have.
 
 **324 Rust unit tests, 4 live Flyway.**
+
+---
+
+## 12. The pane — 2026-09-10
+
+A fourth column on the shell grid, with its own splitter and a rail toggle.
+Two extra tracks that are **zero wide when it is closed**, so the layout is the
+same grid whether or not Flyway is in use rather than two layouts to keep in
+step.
+
+A pane rather than a section of the schema tree because of what it is for:
+reading a migration while the database structure it changes is still on screen.
+
+The toggle follows `capabilities.migrations`, so it is absent on Elasticsearch
+— and would appear on the next engine Flyway supports without a line changing
+here. It requires a live connection, since capabilities arrive with one; that
+is the cost of not asking the engine's name.
+
+**The environment is never out of sight.** §3.5's guard can only compare what
+differs, so the cases it cannot catch are answered by saying which environment
+this is, permanently, above the list.
+
+Clicking a migration opens its SQL in an **untitled** tab, not one bound to the
+file. This stage reads migrations; a tab carrying the path would make Ctrl+S
+overwrite one, and editing an applied migration changes its checksum and breaks
+the next validation.
+
+### Two things the tests found
+
+**A temporal dead zone.** `migrationsOpen` was declared beside the rest of the
+migrations code at the foot of `main.ts`, and `syncConnLabel` runs while the
+module is still initialising — so every boot threw *"Cannot access
+'migrationsOpen' before initialization"* before a single test ran. The
+declaration moved up beside `connected`.
+
+**A fixture that had stopped mirroring Rust.** `MYSQL_CAPS` in the test harness
+is a hand-written copy of what MySQL declares, and adding a capability in Rust
+does not touch it — so the button was hidden in every test while being visible
+in the app. Rust has a test listing the keys the frontend is promised; the
+harness has nothing equivalent, and this is the second time that gap has cost a
+confusing failure.
+
+**626 UI tests on both engines, 324 Rust unit, 4 live Flyway.**

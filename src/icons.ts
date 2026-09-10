@@ -29,6 +29,9 @@ export type IconName =
   | "function"
   | "key"
   | "column"
+  // The migrations pane's rail button: a stack of layers, which is what an
+  // ordered set of migrations looks like.
+  | "migrations"
   // Not a tree icon: the rail's mark for a connection that refuses writes.
   // Drawn here anyway, because the reasons in this file's header — one grid,
   // one stroke width, `currentColor` — are exactly why it should not be an
@@ -77,6 +80,10 @@ const PATHS: Record<IconName, string> = {
   function: '<path d="M5.9 13V5.9c0-1.7 1-2.7 2.5-2.7.5 0 .9.1 1.3.3"/><path d="M4.2 7.6h4.9"/>',
   key: '<circle cx="6" cy="6.1" r="2.7"/><path d="M7.9 8l4.6 4.6"/><path d="M10.6 12.2l1.3-1.3"/>',
   column: '<circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>',
+  // Three stacked plates, the way a versioned pile of changes reads.
+  migrations:
+    '<path d="M8 2.2l5.6 2.9L8 8 2.4 5.1z"/>' +
+    '<path d="M2.4 8L8 10.9 13.6 8"/><path d="M2.4 10.9L8 13.8l5.6-2.9"/>',
   // A padlock, shackle closed.
   lock:
     '<rect x="3.6" y="7" width="8.8" height="6.4" rx="1.4"/>' +

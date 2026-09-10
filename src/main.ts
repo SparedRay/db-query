@@ -64,6 +64,13 @@ const els = {
   btnRun: $<HTMLButtonElement>("btn-run"),
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
+  btnMigrations: $<HTMLButtonElement>("btn-migrations"),
+  msplit: $("msplit"),
+  migrationsPane: $("migrations-pane"),
+  migTitle: $("mig-title"),
+  migEnv: $("mig-env"),
+  migList: $("mig-list"),
+  btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
@@ -116,6 +123,8 @@ const els = {
   setBrowse: $<HTMLInputElement>("set-browse"),
   setMcpOn: $<HTMLInputElement>("set-mcp-on"),
   setMcpPort: $<HTMLInputElement>("set-mcp-port"),
+  setFlywayPath: $<HTMLInputElement>("set-flyway-path"),
+  setFlywayNote: $("set-flyway-note"),
   setMcpStatus: $<HTMLElement>("set-mcp-status"),
   setMcpLive: $<HTMLElement>("set-mcp-live"),
   setMcpToken: $<HTMLInputElement>("set-mcp-token"),
@@ -206,6 +215,11 @@ const activeTab = (): ScriptTab => {
 };
 
 let connected = false;
+// Declared here rather than beside the rest of the migrations code at the foot
+// of this file: `syncConnLabel` runs while the module is still initialising,
+// and a `let` further down is in its temporal dead zone until then — which
+// threw on every boot before this moved.
+let migrationsOpen = false;
 let activeDb: string | null = null;
 
 /**
@@ -374,6 +388,9 @@ function syncConnLabel() {
     ? `Disconnect from ${active.profile.name}`
     : "Open a connection";
   els.btnConnect.classList.toggle("danger", isLive);
+  // Whether this connection can host a Flyway project is a property of the
+  // connection, so the toggle follows it rather than being switched on once.
+  refreshMigrationsButton();
 
   if (!active) {
     els.connLabel.textContent = "No connection";
@@ -810,6 +827,7 @@ function refilterTree() {
 for (const [el, name] of [
   [els.btnAssistant, "assistant"],
   [els.btnHistory, "history"],
+  [els.btnMigrations, "migrations"],
   [els.btnSettings, "settings"],
 ] as const) {
   el.append(icon(name));
@@ -1628,6 +1646,24 @@ function draggable(handle: HTMLElement, axis: "x" | "y") {
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
 
+// The migrations pane grows from the right, so its splitter measures the other
+// way — the pointer's distance from the window edge, not from the origin.
+els.msplit.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  els.msplit.classList.add("dragging");
+  const move = (ev: MouseEvent) => {
+    const w = Math.min(Math.max(220, window.innerWidth - ev.clientX), window.innerWidth - 420);
+    document.documentElement.style.setProperty("--mig-pane-w", `${w}px`);
+  };
+  const up = () => {
+    els.msplit.classList.remove("dragging");
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", up);
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", up);
+});
+
 /**
  * Lay the buffer out — the selection if there is one, otherwise the whole tab.
  *
@@ -2170,6 +2206,8 @@ function openSettings() {
   els.setTimeout.value = String(settings.timeoutSecs);
   els.setBrowse.value = String(settings.browseLimit);
   els.setMcpPort.value = String(mcpPort());
+  els.setFlywayPath.value = settings.flywayPath;
+  els.setFlywayNote.textContent = "";
   els.setUpdateNote.hidden = true;
   // Ask the backend rather than trusting the stored preference: the server can
   // have failed to start, or been stopped, since this was last opened.
@@ -2182,6 +2220,7 @@ function openSettings() {
 /** Every change takes effect immediately — a settings dialog with an OK button
  *  makes you guess what a font looks like before you can see it. */
 function commit() {
+  settings.flywayPath = els.setFlywayPath.value.trim();
   settings.fontFamily = els.setFont.value;
   settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
   settings.editorTheme = els.setEditorColours.value as EditorTheme;
@@ -2197,6 +2236,7 @@ function commit() {
 for (const el of [
   els.setFont, els.setFontSize, els.setEditorColours,
   els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
+  els.setFlywayPath,
 ]) {
   el.onchange = commit;
 }
@@ -2632,3 +2672,195 @@ void listen<McpPutQuery>(MCP_PUT_QUERY_EVENT, (event) => {
   }
   session.schedule();
 });
+
+// --------------------------------------------------------------- migrations
+//
+// Stage 15. A pane rather than a section of the schema tree, so the database
+// structure stays visible while a migration is being read — which is the only
+// reason to want both at once.
+//
+// Everything here **reads**. Applying and repairing are Phase 2 and 3, and the
+// pane deliberately offers neither yet rather than offering a button that
+// explains it is not finished.
+
+/** A styled element — the same three-argument shape the grid uses privately. */
+function elem(tag: string, cls: string, text?: string): HTMLElement {
+  const e = document.createElement(tag);
+  e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+/** Can this connection host a Flyway project? A capability, never a name. */
+function canHaveMigrations(): boolean {
+  const a = conns?.active();
+  return !!a && !!capsFor(a.profile.id)?.migrations;
+}
+
+function refreshMigrationsButton() {
+  const show = canHaveMigrations();
+  els.btnMigrations.hidden = !show;
+  if (!show && migrationsOpen) toggleMigrations(false);
+  els.btnMigrations.setAttribute("aria-pressed", String(migrationsOpen));
+  els.btnMigrations.classList.toggle("on", migrationsOpen);
+}
+
+function toggleMigrations(open: boolean) {
+  migrationsOpen = open;
+  document.getElementById("app")!.classList.toggle("migrations-open", open);
+  els.migrationsPane.hidden = !open;
+  els.msplit.hidden = !open;
+  els.btnMigrations.setAttribute("aria-pressed", String(open));
+  els.btnMigrations.classList.toggle("on", open);
+  if (open) void renderMigrations();
+}
+
+els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
+els.btnMigRefresh.onclick = () => void renderMigrations();
+
+/** An empty pane that says what to do next, rather than an empty pane. */
+function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
+  const box = elem("div", "mig-empty", text);
+  if (action) {
+    const b = elem("button", "mini", action.label) as HTMLButtonElement;
+    b.onclick = action.run;
+    box.append(document.createElement("br"), b);
+  }
+  els.migList.replaceChildren(box);
+}
+
+async function renderMigrations() {
+  const active = conns?.active();
+  if (!active) return migrationsMessage("Connect to a database to see its migrations.");
+
+  const { flywayProject, flywayEnvironment } = active.profile;
+  els.migEnv.hidden = !flywayProject;
+  if (!flywayProject || !flywayEnvironment) {
+    els.migTitle.textContent = "Migrations";
+    return migrationsMessage(
+      "No Flyway project is attached to this connection. Import the flyway.toml " +
+        "you open with Flyway Desktop, and this connection will show what it has " +
+        "applied and what is pending.",
+      { label: "Import a project…", run: () => void importFlywayProject() },
+    );
+  }
+
+  els.migTitle.textContent = "Migrations";
+  els.migEnv.innerHTML = "";
+  els.migEnv.append(
+    document.createTextNode("Environment "),
+    Object.assign(document.createElement("b"), { textContent: flywayEnvironment }),
+  );
+
+  migrationsMessage("Asking Flyway…");
+  try {
+    const list = await api.flywayInfo(active.profile.id, settings.flywayPath);
+    if (!list.length) {
+      return migrationsMessage("This project has no migrations.");
+    }
+    els.migList.replaceChildren(...list.map(migrationRow));
+  } catch (err) {
+    // Flyway's own words. It explains itself well, and paraphrasing would
+    // replace an instruction with a summary.
+    migrationsMessage(String(err));
+  }
+}
+
+function migrationRow(m: import("./api").FlywayMigration): HTMLElement {
+  const row = elem("button", "mig") as HTMLButtonElement;
+  row.dataset.state = m.state.toLowerCase();
+  row.append(
+    elem("span", "v", m.version ?? "—"),
+    elem("span", "d", m.description),
+    elem("span", "s", m.state),
+  );
+  const when = m.installedOnUtc ? ` · applied ${m.installedOnUtc}` : "";
+  row.title = `${m.version ?? "repeatable"} — ${m.description}\n${m.state}${when}\n${
+    m.filepath ?? "(no file)"
+  }`;
+  row.onclick = () => void openMigration(m);
+  return row;
+}
+
+/**
+ * Open a migration's SQL in a tab.
+ *
+ * **Not bound to the file.** This stage reads migrations and does not write
+ * them: a tab carrying the path would make Ctrl+S overwrite a migration, and
+ * editing one that has already been applied changes its checksum and breaks
+ * the next validation. So the contents arrive in an ordinary untitled tab.
+ */
+async function openMigration(m: import("./api").FlywayMigration) {
+  if (!m.filepath) {
+    results.setMessage(`Flyway gave no file for ${m.description}.`);
+    return;
+  }
+  try {
+    const f = await api.readFile(m.filepath);
+    const tab = tabs.create({
+      contents: f.contents,
+      title: `${m.version ? `V${m.version}` : ""} ${m.description}`.trim(),
+      external: true,
+    });
+    tabs.activate(tab.id);
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
+
+/**
+ * Attach a Flyway project to this connection.
+ *
+ * The guard is the point: `flyway migrate -environment=x` connects to the URL
+ * *in the TOML*, not to this connection, so attaching the wrong environment
+ * would mean watching one database while changing another. A disagreement is
+ * reported field by field and can be overridden — deliberately, once, in front
+ * of the evidence — because a connection may legitimately be stored with a
+ * different account from the migration user.
+ */
+async function importFlywayProject() {
+  const active = conns?.active();
+  if (!active) return;
+  try {
+    const path = await api.flywayPickProject();
+    if (!path) return;
+
+    const project = await api.flywayReadProject(path);
+    const chosen = await choose(
+      project.name ? `Environment in "${project.name}"` : "Which environment?",
+      "A Flyway environment is a database. This connection is one of them, and " +
+        "that is what migrations will be applied to.",
+      project.environments.map((e) => ({
+        value: e.id,
+        label: e.displayName ? `${e.displayName} (${e.id})` : e.id,
+        primary: e.id === project.defaultEnvironment,
+      })),
+    );
+    if (!chosen) return;
+
+    const disagree = await api.flywayCheck(active.profile.id, path, chosen);
+    if (disagree.length) {
+      const fields = disagree.join(", ");
+      const go = await choose(
+        "This environment points somewhere else",
+        `"${chosen}" and this connection disagree about the ${fields}. Flyway ` +
+          `connects using the project's own settings, so migrations would be ` +
+          `applied to the environment's ${fields}, not to this connection's. ` +
+          `Attach it anyway only if you know the two are the same database.`,
+        [
+          { value: "cancel", label: "Cancel", primary: true },
+          { value: "go", label: "Attach anyway", danger: true },
+        ],
+      );
+      if (go !== "go") return;
+    }
+
+    const profile = { ...active.profile, flywayProject: path, flywayEnvironment: chosen };
+    const outcome = await api.saveProfile(profile, null);
+    active.profile = { ...profile, ...outcome.profile };
+    conns.upsert(active);
+    await renderMigrations();
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
