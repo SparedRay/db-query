@@ -595,3 +595,65 @@ The test also checks MySQL's word cannot leak back into another engine's
 message, which is the thing that would silently regress.
 
 **M2 is done.** M4 and M7 remain.
+
+## 16. Windows could not load the test at all — 2026-09-09
+
+The push that ended §15 went red on Windows CI, on the one step this stage
+added:
+
+    Running tests\mcp_http.rs
+    error: test failed, to rerun pass `--test mcp_http`
+    process didn't exit successfully: mcp_http-7a9ea2b345d04e30.exe
+      (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
+
+Not a failing assertion — **no test ran**. The compile succeeded, the harness
+never started, and there was no output to capture because the process died in
+the loader, before `main`.
+
+### What it was
+
+`tauri` enables `common-controls-v6` by default. That feature imports entry
+points — `TaskDialogIndirect` among them — which only ComCtl32 **v6** exports.
+A process is given v6 by declaring it in an application manifest; a process
+without one gets the v5 stub, which exports fewer functions, and a load-time
+import that cannot be resolved is a load-time failure.
+
+`tauri-build` embeds that manifest as a Windows **resource**, and
+`embed-resource` links resources with `cargo:rustc-link-arg-bins`. The `-bins`
+is the whole bug: the app binary is covered and **no test executable ever is**.
+Upstream since 2025-05, tauri-apps/tauri#13419, still open.
+
+So this was not something Stage 13 broke. It is a property the repository has
+had since Stage 0 and could not observe, because **no test had ever built a
+Tauri app before**. `tests/mcp_http.rs` calls `tauri::test::mock_app()` — it is
+the first — and `packaging.rs` names `tauri` without ever constructing one,
+which is why it passes on Windows and this did not.
+
+### The fix, and what it is careful about
+
+`build.rs` takes the manifest off `tauri-build`
+(`WindowsAttributes::new_without_app_manifest`) and hands the same XML to the
+linker itself with `cargo:rustc-link-arg` — no `-bins`, so binaries, tests,
+examples and benchmarks all get it.
+
+`src-tauri/windows-app-manifest.xml` was **copied out of the crate, not
+retyped**, and `diff`ed against it: this changes where the manifest comes from,
+not what is in it, so the shipped binary is the same binary.
+
+Two deliberate departures from the workaround in the upstream thread. It guards
+on `CARGO_CFG_TARGET_OS`/`TARGET_ENV` rather than `#[cfg(windows)]`, because in
+a build script that `cfg` is the *host* and the question is about the target.
+And it drops the `/WX`, which turns every linker warning in the dependency tree
+into a failed Windows build — a high price for a manifest.
+
+### What was verified where
+
+The mechanism the fix rests on — that `rustc-link-arg` without `-bins` really
+does reach a test executable — is not a Windows question, so it was answered
+here: with a harmless probe flag added to `build.rs`, `cargo test --no-run -v`
+showed it in the test target's rustc invocation, `cargo build -v` in the
+binary's. The probe was then removed.
+
+Everything past that is a Windows claim and **Windows CI is the only thing that
+can settle it**. Linux stayed green — 289 unit, 10 `mcp_http`, 8 packaging, 3
+sample-file — which proves only that nothing was broken in the fixing.
