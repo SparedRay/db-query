@@ -215,8 +215,8 @@ mod tests {
     /// is replaced by something stricter: **the exact set of keys written**.
     ///
     /// Any new field on `ConnProfile` now fails this until someone adds it to
-    /// the list, which is a decision made on purpose rather than a word nobody
-    /// happened to choose.
+    /// [`crate::session::PROFILE_KEYS`], which is a decision made on purpose
+    /// rather than a word nobody happened to choose.
     #[test]
     fn the_file_contains_no_secret() {
         let d = tmpdir();
@@ -232,21 +232,8 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(
-            keys,
-            [
-                "allowInvalidCerts",
-                "auth",
-                "colour",
-                "database",
-                "host",
-                "id",
-                "kind",
-                "name",
-                "noPassword",
-                "port",
-                "url",
-                "user",
-            ],
+            keys[..],
+            crate::session::PROFILE_KEYS[..],
             "a field appeared in the config file that nobody reviewed: {raw}"
         );
 
