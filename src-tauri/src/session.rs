@@ -99,6 +99,36 @@ pub struct ConnProfile {
     pub no_password: bool,
 }
 
+/// Every key a serialised [`ConnProfile`] has, in sorted order.
+///
+/// **This exists to be asserted against.** The config file must contain no
+/// secret, and the way that is checked is an exact key set: a field added to
+/// the struct fails the assertion until it is added here, which is where
+/// somebody has to answer "is this safe to write to disk?".
+///
+/// It replaced a substring hunt for the word "password" — twice, once in the
+/// unit test over the written file and once in the live suite over the
+/// serialised struct. That filter fired on `noPassword`, a boolean saying an
+/// account *has* no password and which leaks nothing. A word filter cannot
+/// tell that from a field holding one. A key set does not have to.
+///
+/// One list rather than two, because two would eventually disagree and the
+/// weaker one would be the one still passing.
+pub const PROFILE_KEYS: [&str; 12] = [
+    "allowInvalidCerts",
+    "auth",
+    "colour",
+    "database",
+    "host",
+    "id",
+    "kind",
+    "name",
+    "noPassword",
+    "port",
+    "url",
+    "user",
+];
+
 impl ConnProfile {
     /// Whether connecting needs a secret this app does not already hold.
     ///

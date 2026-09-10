@@ -1180,11 +1180,36 @@ async fn a_query_error_never_echoes_the_password() {
 
 /// The profile is the shape that gets written to disk, so its serialised form
 /// is the last line of defence for the config file.
+///
+/// This asked whether the JSON contained the word "password", and so it broke
+/// the day a field was called `noPassword` — a boolean saying an account *has*
+/// no password, which leaks nothing. The same filter, in the same words, had
+/// already been replaced in `profiles::the_file_contains_no_secret`; this copy
+/// survived because the live suite does not run on a developer machine.
+///
+/// Both now assert the same thing against the same list, so neither can be the
+/// weaker one still passing.
 #[tokio::test]
 #[ignore]
 async fn a_serialised_profile_carries_no_secret() {
     let json = serde_json::to_string(&profile("ser")).unwrap();
-    assert!(!json.to_lowercase().contains("password"), "{json}");
+
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let mut keys: Vec<&str> = v
+        .as_object()
+        .expect("a profile object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys[..],
+        session::PROFILE_KEYS[..],
+        "a field appeared on the profile that nobody reviewed: {json}"
+    );
+
+    // And no value that could be one, however a field is spelled. Unlike the
+    // key set, these are the credentials this suite really connects with.
     assert!(!json.contains(PASSWORD), "{json}");
     assert!(!json.contains(CANARY), "{json}");
 }

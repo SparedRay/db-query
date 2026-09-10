@@ -657,3 +657,43 @@ binary's. The probe was then removed.
 Everything past that is a Windows claim and **Windows CI is the only thing that
 can settle it**. Linux stayed green — 289 unit, 10 `mcp_http`, 8 packaging, 3
 sample-file — which proves only that nothing was broken in the fixing.
+
+## 17. The same word filter, in the copy that never runs — 2026-09-09
+
+Linux CI went red on the next push, in the live MySQL suite:
+
+    ---- a_serialised_profile_carries_no_secret ----
+    {"id":"ser", ... ,"auth":{"type":"none"},"noPassword":false}
+
+The assertion was `!json.to_lowercase().contains("password")`. `noPassword` is
+a boolean saying an account *has* no password; it leaks nothing, and a word
+filter cannot tell it from a field that holds one.
+
+That is not a new finding. It is **the same defect, in the same words**, as the
+one already fixed in `profiles::the_file_contains_no_secret` when `no_password`
+was added — and the repair there was deliberately the stricter one, an exact
+key set, rather than a looser filter. This copy was missed.
+
+### Why it was missed, which is the part worth keeping
+
+`#[ignore]`. The live suite does not run on a developer machine unless it is
+asked for, and it was not asked for. The test needs **no server at all** — it
+serialises a struct — so it had been sitting behind a gate it does not need,
+which is precisely what let a broken assertion stay invisible while the fix for
+it was being written a few files away.
+
+The fixtures were running on this machine the whole time. Both live suites now
+ran before pushing: **68 MySQL, 12 Elasticsearch, all passing.**
+
+### One list, so there is no weaker copy
+
+`session::PROFILE_KEYS` is now the single sorted key set a serialised
+`ConnProfile` has, and both tests assert against it — the unit test over the
+file that `save_all` writes, the live test over the struct, with its two
+`PASSWORD`/`CANARY` checks kept because those constants only mean something in
+that suite.
+
+Two lists would eventually disagree, and the one still passing would be the
+weaker one. A field added to `ConnProfile` now fails both until somebody adds
+it to `PROFILE_KEYS`, which is where the question "is this safe to write to
+disk?" gets asked out loud.
