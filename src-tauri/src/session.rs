@@ -97,6 +97,20 @@ pub struct ConnProfile {
     /// "we don't know", which is what it meant when it was written.
     #[serde(default)]
     pub no_password: bool,
+
+    /// Refuse statements that change data or schema on this connection.
+    ///
+    /// **A guard rail, not a boundary.** Whoever can open the connection can
+    /// clear the flag, so this stops an accident, not a person — the control
+    /// that actually enforces it is a database account without write grants.
+    /// The UI says so where the choice is made; see the Stage 14 tracker §3.4.
+    ///
+    /// Applied by narrowing [`crate::engine::Capabilities`] at connect, so
+    /// everything downstream keeps asking the one question it already asks.
+    /// `#[serde(default)]` so every file written before this means "not
+    /// restricted", which is what it meant when it was written.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// Every key a serialised [`ConnProfile`] has, in sorted order.
@@ -114,7 +128,7 @@ pub struct ConnProfile {
 ///
 /// One list rather than two, because two would eventually disagree and the
 /// weaker one would be the one still passing.
-pub const PROFILE_KEYS: [&str; 12] = [
+pub const PROFILE_KEYS: [&str; 13] = [
     "allowInvalidCerts",
     "auth",
     "colour",
@@ -125,6 +139,7 @@ pub const PROFILE_KEYS: [&str; 12] = [
     "name",
     "noPassword",
     "port",
+    "readOnly",
     "url",
     "user",
 ];
@@ -483,6 +498,9 @@ pub async fn connect(
 
     let id = profile.id.clone();
     let current_database = profile.database.clone().filter(|d| !d.is_empty());
+    // Once, before `profile` is moved, so the stored connection and what the
+    // frontend is told cannot disagree about what this connection may do.
+    let capabilities = crate::engine::Capabilities::mysql().for_profile(&profile);
 
     let conn = Arc::new(ServerConn {
         profile,
@@ -492,7 +510,7 @@ pub async fn connect(
         schema_cache: Mutex::new(HashMap::new()),
         engine: Box::new(crate::mysql::MysqlEngine::new()),
         server_version: server_version.clone(),
-        capabilities: crate::engine::Capabilities::mysql(),
+        capabilities: capabilities.clone(),
         introspection_count: AtomicU64::new(0),
     });
     state.connections.lock().await.insert(id.clone(), conn);
@@ -502,7 +520,7 @@ pub async fn connect(
         server_version,
         databases,
         current_database,
-        capabilities: crate::engine::Capabilities::mysql(),
+        capabilities,
     })
 }
 
@@ -791,7 +809,10 @@ async fn connect_elastic(
     // Reachability and version in one call, before anything is stored: a
     // connection that failed must leave no trace, exactly as for MySQL.
     let server_version = engine.version().await?;
-    let capabilities = engine.capabilities().clone();
+    // Narrowed by the profile here, not inside the engine: what a *connection*
+    // can do is the engine's declaration minus what its profile forbids, and
+    // the engine has no opinion about that.
+    let capabilities = engine.capabilities().clone().for_profile(&profile);
 
     let id = profile.id.clone();
     let current_database = profile.database.clone().filter(|d| !d.is_empty());
@@ -840,6 +861,7 @@ mod tests {
             url: String::new(),
             auth: Default::default(),
             no_password: false,
+            read_only: false,
         }
     }
 

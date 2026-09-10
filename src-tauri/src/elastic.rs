@@ -33,6 +33,9 @@ pub fn capabilities() -> Capabilities {
         engine: "elasticsearch".into(),
         // Verified from the API reference: SELECT only.
         writes: false,
+        // The engine's own limit, not a choice anyone made about this
+        // connection — `for_profile` is the only thing that sets this true.
+        read_only: false,
         transactions: false,
         // One query per request, but a script of several is several requests.
         multi_statement: true,
@@ -446,7 +449,12 @@ impl crate::engine::Engine for ElasticEngine {
             let kind = classify(text);
             let started = std::time::Instant::now();
 
-            let outcome = match crate::engine::refusal(&self.capabilities, kind) {
+            // `tab.server.capabilities`, not `self.capabilities`: the engine's
+            // declaration is what this engine can do, the connection's is what
+            // *this connection* may do. A profile marked read-only narrows the
+            // second and never touches the first, so reading the engine's here
+            // would ignore the flag entirely — which it did.
+            let outcome = match crate::engine::refusal(&tab.server.capabilities, kind) {
                 Some(message) => crate::exec::Outcome::Error { message },
                 None => {
                     let fetch = budget.min(crate::exec::MAX_ROWS);

@@ -29,6 +29,11 @@ export type IconName =
   | "function"
   | "key"
   | "column"
+  // Not a tree icon: the rail's mark for a connection that refuses writes.
+  // Drawn here anyway, because the reasons in this file's header — one grid,
+  // one stroke width, `currentColor` — are exactly why it should not be an
+  // emoji padlock on a 32px button.
+  | "lock"
   // One per column-type family (`src/coltype.ts`). A column's type is already
   // written beside it; these are for reading the shape of a table at a glance
   // rather than for reading the type.
@@ -72,6 +77,10 @@ const PATHS: Record<IconName, string> = {
   function: '<path d="M5.9 13V5.9c0-1.7 1-2.7 2.5-2.7.5 0 .9.1 1.3.3"/><path d="M4.2 7.6h4.9"/>',
   key: '<circle cx="6" cy="6.1" r="2.7"/><path d="M7.9 8l4.6 4.6"/><path d="M10.6 12.2l1.3-1.3"/>',
   column: '<circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>',
+  // A padlock, shackle closed.
+  lock:
+    '<rect x="3.6" y="7" width="8.8" height="6.4" rx="1.4"/>' +
+    '<path d="M5.8 7V5.4a2.2 2.2 0 0 1 4.4 0V7"/>',
 
   // A hash, which is what a number column is called in half the tools that
   // have one.

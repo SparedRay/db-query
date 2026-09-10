@@ -19,7 +19,8 @@ decisions that were corrected along the way.
 | 10 | [An assistant that writes SQL](stage-10-assistant.md) | 🚧 **Experimental** — proposes SQL, never runs it; Anthropic or any OpenAI-compatible server, local included; verified against a local model; schema is loaded before the question so the model does not guess |
 | 11 | [A second engine: Elasticsearch SQL](stage-11-elasticsearch.md) | 🚧 **Built** — engine trait + capabilities; Elasticsearch runs end to end against a live cluster; reviewed hands-on 2026-09-09 (§11) |
 | 12 | [Stabilisation: result sets, idle connections, carried bugs](stage-12-stabilisation-and-result-sets.md) | ✅ **Built and confirmed** — B1-B7 verified by hand 2026-09-09 (§16); also tree/type icons, a schema filter, tabbed settings, formatted definitions and a dialect-aware linter (§13-15) |
-| 13 | [Letting other tools in: an MCP server](stage-13-mcp-server.md) | 📋 **Planned** — schema and "put this query in my editor" over MCP, on loopback, off by default, and nothing that executes |
+| 13 | [Letting other tools in: an MCP server](stage-13-mcp-server.md) | 🚧 **Built** — schema and "put this query in my editor" over MCP, on loopback, off by default, nothing that executes; M1/M2 confirmed by hand 2026-09-09, M4 and M7 outstanding |
+| 14 | [Read-only connections](stage-14-read-only-connections.md) | 🚧 **In progress** — a connection can refuse writes before they are sent; deferred from Stage 2 |
 
 ## Rules
 

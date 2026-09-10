@@ -10,6 +10,7 @@
 
 import { api, type Capabilities, type ProfileView, type ConnInfo } from "./api";
 import { contextMenu } from "./menu";
+import { icon } from "./icons";
 import { choose } from "./dialog";
 
 export interface ConnectionEntry {
@@ -302,7 +303,20 @@ export class ConnectionManager {
           : entry.saved
             ? "Saved, not connected"
             : "Not connected") +
+        (entry.profile.readOnly ? "\nRead-only — writes are refused" : "") +
         (entry.saved ? "" : "\n(not saved — this connection is one-off)");
+
+      // R4: readable without opening anything. The flag is a property of the
+      // saved profile, so it shows whether or not the connection is up — the
+      // question "is this the one that cannot be written to" is asked before
+      // connecting, not after.
+      if (entry.profile.readOnly) {
+        el.classList.add("read-only");
+        const mark = document.createElement("span");
+        mark.className = "ro-mark";
+        mark.append(icon("lock"));
+        el.append(mark);
+      }
 
       if (entry.connecting) {
         el.setAttribute("aria-busy", "true");

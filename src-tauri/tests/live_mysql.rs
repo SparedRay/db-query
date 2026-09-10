@@ -38,6 +38,7 @@ fn profile(id: &str) -> ConnProfile {
         url: String::new(),
         auth: Default::default(),
         no_password: false,
+        read_only: false,
     }
 }
 
@@ -2239,4 +2240,158 @@ async fn the_killer_connection_heals_too() {
         .try_get("id")
         .unwrap();
     assert_ne!(now, victim);
+}
+
+// ------------------------------------------ Stage 14: read-only connections
+
+/// **R1 against a real server.** The refusal happens before anything is sent,
+/// which is the only version of this feature worth having: a write that reaches
+/// MySQL and is rejected there has already been a write.
+///
+/// The proof is not the error message — it is the row count afterwards.
+#[tokio::test]
+#[ignore]
+async fn a_read_only_connection_refuses_a_write_and_the_table_is_unchanged() {
+    let state = AppState::default();
+    let mut p = profile("ro");
+    p.read_only = true;
+    session::connect(&state, p, PASSWORD.into())
+        .await
+        .expect("connect failed — is the fixture container up?");
+    session::open_tab(&state, "ro", "ro-tab").await.unwrap();
+
+    let before: i64 = {
+        let r = exec::run_script(
+            &state,
+            "ro-tab",
+            "SELECT COUNT(*) AS n FROM users",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        match &r.statements[0].outcome {
+            Outcome::Rows { rows, .. } => match &rows[0][0] {
+                db_query_lib::decode::CellValue::Int(n) => *n,
+                other => panic!("unexpected count cell: {other:?}"),
+            },
+            other => panic!("expected rows, got {other:?}"),
+        }
+    };
+
+    let r = exec::run_script(
+        &state,
+        "ro-tab",
+        "INSERT INTO users (name, email) VALUES ('mallory', 'm@example.com')",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+
+    match &r.statements[0].outcome {
+        Outcome::Error { message } => {
+            assert!(message.contains("connection"), "{message}");
+            assert!(
+                !message.contains("mysql"),
+                "must not blame the engine: {message}"
+            );
+        }
+        other => panic!("a write on a read-only connection must be refused, got {other:?}"),
+    }
+
+    // The row count is the assertion that matters.
+    let after = exec::run_script(
+        &state,
+        "ro-tab",
+        "SELECT COUNT(*) AS n FROM users",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    match &after.statements[0].outcome {
+        Outcome::Rows { rows, .. } => match &rows[0][0] {
+            db_query_lib::decode::CellValue::Int(n) => {
+                assert_eq!(*n, before, "the INSERT reached the server")
+            }
+            other => panic!("unexpected count cell: {other:?}"),
+        },
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    session::disconnect(&state, "ro").await.ok();
+}
+
+/// DDL is `StatementKind::Other`, a different arm of the same refusal — and the
+/// statement this feature exists for.
+#[tokio::test]
+#[ignore]
+async fn a_read_only_connection_refuses_ddl_too_and_still_reads() {
+    let state = AppState::default();
+    let mut p = profile("ro2");
+    p.read_only = true;
+    session::connect(&state, p, PASSWORD.into()).await.unwrap();
+    session::open_tab(&state, "ro2", "ro2-tab").await.unwrap();
+
+    let r = exec::run_script(&state, "ro2-tab", "DROP TABLE users", true, None)
+        .await
+        .unwrap();
+    // **Whose refusal it is matters.** This read `Outcome::Error` and nothing
+    // else at first, and it passed with the clamp deliberately removed: MySQL
+    // refuses this `DROP` on its own, because another table has a foreign key
+    // into `users`. A test that cannot tell our refusal from the server's is
+    // not testing this feature — and would go on passing if the statement
+    // started reaching the server again.
+    match &r.statements[0].outcome {
+        Outcome::Error { message } => {
+            assert!(
+                message.contains("connection") && message.contains("Read-only"),
+                "refused, but not by us: {message}"
+            );
+        }
+        other => panic!("DROP must be refused: {other:?}"),
+    }
+
+    // The table is still there, and reading it still works.
+    let read = exec::run_script(
+        &state,
+        "ro2-tab",
+        "SELECT id FROM users LIMIT 1",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&read.statements[0].outcome, Outcome::Rows { .. }),
+        "reads must be untouched: {:?}",
+        read.statements[0].outcome
+    );
+
+    session::disconnect(&state, "ro2").await.ok();
+}
+
+/// The connection reports what it can do, and the frontend builds its menus
+/// from exactly this. A clamp that never reached `ConnInfo` would leave a
+/// `DROP` item on a connection that refuses `DROP`.
+#[tokio::test]
+#[ignore]
+async fn the_connection_reports_itself_as_read_only() {
+    let state = AppState::default();
+    let mut p = profile("ro3");
+    p.read_only = true;
+    let info = session::connect(&state, p, PASSWORD.into()).await.unwrap();
+    assert!(!info.capabilities.writes);
+    assert!(info.capabilities.read_only);
+
+    // And an ordinary connection is untouched by any of this.
+    let plain = session::connect(&state, profile("rw3"), PASSWORD.into())
+        .await
+        .unwrap();
+    assert!(plain.capabilities.writes);
+    assert!(!plain.capabilities.read_only);
+
+    session::disconnect(&state, "ro3").await.ok();
+    session::disconnect(&state, "rw3").await.ok();
 }

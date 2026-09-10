@@ -197,6 +197,7 @@ mod tests {
             url: String::new(),
             auth: Default::default(),
             no_password: false,
+            read_only: false,
         }
     }
 

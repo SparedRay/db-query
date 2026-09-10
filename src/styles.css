@@ -375,6 +375,19 @@ input.num {
   background: var(--warn); border: 2px solid var(--bg-rail);
 }
 
+/* A connection that refuses writes says so on the button, not only in the
+   tooltip: the whole point is to know before running something, and a tooltip
+   is read after you have already reached for the mouse. Top-left, because
+   bottom-right is the ad-hoc dot and a connection can be both. */
+.rail-item .ro-mark {
+  position: absolute; left: -3px; top: -3px;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--bg-rail); color: var(--fg-dim);
+  display: flex; align-items: center; justify-content: center;
+}
+.rail-item .ro-mark svg { width: 11px; height: 11px; stroke-width: 1.7; }
+.rail-item:not(.offline) .ro-mark { color: var(--fg); }
+
 .rail-add {
   flex: 0 0 auto; width: 32px; height: 32px; border-radius: 9px;
   background: none; border: 1px dashed var(--border-dashed); color: var(--fg-dim);
@@ -891,9 +904,14 @@ dialog.viewer .viewer-note {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
 }
 #settings-dialog label.toggle input { width: auto; margin: 0; }
-#settings-dialog .hint {
+#settings-dialog .hint,
+/* The read-only caveat. Sits under its toggle rather than beside it: it is a
+   sentence, not a label, and what it says (that this is not security) is the
+   part that must not be skimmed. */
+#conn-read-only-hint {
   margin: 8px 0 0; font-size: 11.5px; color: var(--fg-dim); line-height: 1.5;
 }
+#conn-read-only-hint { margin: -2px 0 4px 22px; }
 #settings-dialog .mini { margin-top: 8px; }
 
 /* --- query history -------------------------------------------------------
