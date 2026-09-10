@@ -311,6 +311,7 @@ export const MYSQL_CAPS = {
   delimiterBlocks: true,
   routines: true,
   cancellation: true,
+  migrations: true,
   streamingExport: true,
   rowCap: "clientLimit",
   namespaceLabel: "database",
@@ -321,6 +322,8 @@ export const READ_ONLY_CAPS = {
   ...MYSQL_CAPS,
   engine: "elasticsearch",
   writes: false,
+  // Flyway has no Elasticsearch support, so there is nothing to attach.
+  migrations: false,
   transactions: false,
   delimiterBlocks: false,
   routines: false,

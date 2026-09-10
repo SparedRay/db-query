@@ -35,6 +35,11 @@ export interface Settings {
   mcpEnabled: boolean;
   /** 0 means "whatever Rust's default is", resolved at boot from app_defaults. */
   mcpPort: number;
+
+  /** Where the Flyway command line is. Empty means "whatever is on the PATH",
+   *  which is right for anyone who installed it normally and useless for
+   *  anyone who did not — hence the setting. */
+  flywayPath: string;
 }
 
 /** The editor colour presets. `default` sets no attribute. */
@@ -75,6 +80,7 @@ export const DEFAULTS: Settings = {
   // Not a number: the default lives in Rust, and repeating it here is how the
   // two drift. `app_defaults` fills it in before Settings can be opened.
   mcpPort: 0,
+  flywayPath: "",
 };
 
 /**
@@ -203,6 +209,7 @@ export function load(): Settings {
     // range — including a stored 0 — falls back to the 0 sentinel, which means
     // "use whatever Rust says", so a nonsense value self-heals.
     mcpPort: bounded(Number(o.mcpPort), 1024, 65535, DEFAULTS.mcpPort),
+    flywayPath: text(o.flywayPath, DEFAULTS.flywayPath),
   };
 }
 

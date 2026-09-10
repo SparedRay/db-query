@@ -42,6 +42,8 @@ pub fn capabilities() -> Capabilities {
         delimiter_blocks: false,
         routines: false,
         cancellation: true,
+        // Flyway has no Elasticsearch support, so there is nothing to attach.
+        migrations: false,
         // Results arrive whole; there is no row-at-a-time source to stream from.
         streaming_export: false,
         row_cap: RowCap::ServerPageSize,

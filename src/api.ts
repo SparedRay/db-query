@@ -50,6 +50,12 @@ export interface ConnProfile {
    *  password is empty. Distinct from "no password is stored", which cannot
    *  tell "there isn't one" from "we don't know it". */
   noPassword?: boolean;
+  /** Path to a Flyway project's `flyway.toml`, when one is attached. The
+   *  path, never a copy of what is in it: the file lives in a repository and
+   *  changes with the branch. */
+  flywayProject?: string | null;
+  /** Which environment in that project this connection is. */
+  flywayEnvironment?: string | null;
   /** Refuse statements that change data or schema on this connection.
    *
    *  A guard rail, not a boundary: whoever can open the connection can clear
@@ -224,6 +230,9 @@ export interface Capabilities {
   delimiterBlocks: boolean;
   routines: boolean;
   cancellation: boolean;
+  /** Flyway can drive this engine, so a project can be attached to a
+   *  connection on it. A capability, never a check on the engine's name. */
+  migrations: boolean;
   /** `writes` is false because the *connection* was marked read-only, not
    *  because the engine cannot write. Only the refusal wording depends on the
    *  difference — everything else asks `writes`. */
@@ -240,6 +249,42 @@ export interface ConnInfo {
   databases: string[];
   currentDatabase: string | null;
   capabilities: Capabilities;
+}
+
+/** One environment in a Flyway project. Carries no password: no type on the
+ *  Rust side has a field for one. */
+export interface FlywayEnvironment {
+  id: string;
+  displayName: string | null;
+  url: string;
+  user: string | null;
+}
+
+export interface FlywayProject {
+  name: string | null;
+  databaseType: string | null;
+  environments: FlywayEnvironment[];
+  /** `[flyway] environment` — what the file currently targets, and so the
+   *  default offered at import. */
+  defaultEnvironment: string | null;
+  outOfOrder: boolean;
+}
+
+export type FlywayDisagreement = "host" | "port" | "database" | "user";
+
+/** One migration, in Flyway's own words. `state` is kept as Flyway sends it —
+ *  an unknown state should reach the user as itself, not as "other". */
+export interface FlywayMigration {
+  version: string | null;
+  description: string;
+  state: string;
+  category: string | null;
+  kind: string | null;
+  /** Absolute, which is why the app never reads `locations` itself. */
+  filepath: string | null;
+  installedOnUtc: string | null;
+  installedBy: string | null;
+  executionTimeMs: number | null;
 }
 
 export interface ProfileList {
@@ -537,6 +582,19 @@ export const api = {
    * than being dropped.
    */
   reorderProfiles: (ids: string[]) => invoke<void>("reorder_profiles", { ids }),
+
+  // --- Flyway (Stage 15). Everything here reads; nothing changes a database.
+  /** The chosen path, or null if the picker was dismissed. */
+  flywayPickProject: () => invoke<string | null>("flyway_pick_project"),
+  flywayReadProject: (path: string) => invoke<FlywayProject>("flyway_read_project", { path }),
+  /** Which fields disagree between an environment and a connection. Empty
+   *  means they agree; the decision on a disagreement is the user's. */
+  flywayCheck: (connectionId: string, path: string, environment: string) =>
+    invoke<FlywayDisagreement[]>("flyway_check", { connectionId, path, environment }),
+  /** What Flyway says about this connection's project. `program` empty means
+   *  whatever is on the PATH. */
+  flywayInfo: (connectionId: string, program: string) =>
+    invoke<FlywayMigration[]>("flyway_info", { connectionId, program }),
 
   // --- connections. Several can be live at once; every call names one.
   listRoutines: (connectionId: string, db: string) =>

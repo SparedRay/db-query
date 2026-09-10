@@ -1068,6 +1068,125 @@ fn read_file(path: String) -> Result<OpenedFile, String> {
     files::read_file(std::path::Path::new(&path))
 }
 
+// ---------------------------------------------------------------- Flyway
+//
+// Stage 15. Everything here reads: picking a project, parsing it, comparing it
+// with the connection it is about to be attached to, and asking Flyway what it
+// thinks the state is. Nothing in this section changes a database.
+
+/// Choose a `flyway.toml`. Returns the path, not the contents — the project is
+/// re-read every time it is used, because it lives in a repository and changes
+/// with the branch.
+#[tauri::command]
+async fn flyway_pick_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Flyway project", &["toml"])
+        .add_filter("All files", &["*"])
+        .pick_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let picked = rx
+        .await
+        .map_err(|_| "The file dialog closed unexpectedly.".to_string())?;
+    let Some(file) = picked else { return Ok(None) };
+    let path = file
+        .into_path()
+        .map_err(|e| format!("Unsupported file path: {e}"))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Read a project file. Re-read rather than remembered — see `flyway_project`
+/// on `ConnProfile`.
+#[tauri::command]
+fn flyway_read_project(path: String) -> Result<flyway::Project, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    flyway::parse(&text)
+}
+
+/// Which fields of a connection an environment disagrees with, before it is
+/// attached. Empty means they agree.
+///
+/// The decision on a disagreement is the **user's**, not this command's: it
+/// reports, the UI asks, and an override is a deliberate confirmation rather
+/// than a flag somebody set once.
+#[tauri::command]
+fn flyway_check(
+    app: tauri::AppHandle,
+    connection_id: String,
+    path: String,
+    environment: String,
+) -> Result<Vec<flyway::Disagreement>, String> {
+    let dir = config_dir(&app)?;
+    let profile = profiles::load(&dir)
+        .profiles
+        .into_iter()
+        .find(|p| p.id == connection_id)
+        .ok_or_else(|| "No saved connection with that id.".to_string())?;
+
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let project = flyway::parse(&text)?;
+    let env = project
+        .environment(&environment)
+        .ok_or_else(|| format!("This project has no environment called \"{environment}\"."))?;
+    Ok(flyway::disagreements(env, &profile))
+}
+
+/// What Flyway says about this connection's project.
+///
+/// `program` is the path to the CLI, which the user can set; empty means
+/// "whatever is on the PATH".
+#[tauri::command]
+async fn flyway_info(
+    app: tauri::AppHandle,
+    connection_id: String,
+    program: String,
+) -> Result<Vec<flywaycli::Migration>, String> {
+    let dir = config_dir(&app)?;
+    let profile = profiles::load(&dir)
+        .profiles
+        .into_iter()
+        .find(|p| p.id == connection_id)
+        .ok_or_else(|| "No saved connection with that id.".to_string())?;
+
+    let path = profile
+        .flyway_project
+        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
+    let environment = profile
+        .flyway_environment
+        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
+
+    let program = if program.trim().is_empty() {
+        flywaycli::DEFAULT_PROGRAM.to_string()
+    } else {
+        program
+    };
+    let out = flywaycli::run(
+        &program,
+        std::path::Path::new(&path),
+        &environment,
+        "info",
+        vec![],
+    )
+    .await?;
+
+    // Before the success shape, always: a refusal carries nothing else.
+    if let Some(c) = flywaycli::complaint(&out.stdout) {
+        return Err(c.message);
+    }
+    if !out.ok() {
+        return Err(format!(
+            "Flyway exited with {}. {}",
+            out.code
+                .map(|c| c.to_string())
+                .unwrap_or("no status".into()),
+            out.stderr.trim()
+        ));
+    }
+    flywaycli::migrations(&out.stdout)
+}
+
 /// Save over an existing file. `expect_mtime` is what we saw when the file was
 /// opened; a mismatch returns `Conflict` instead of overwriting someone's work.
 #[tauri::command]
@@ -1327,6 +1446,10 @@ pub fn run() {
             save_profile,
             delete_profile,
             reorder_profiles,
+            flyway_pick_project,
+            flyway_read_project,
+            flyway_check,
+            flyway_info,
             open_tab,
             close_tab,
             use_database,
