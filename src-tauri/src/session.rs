@@ -111,6 +111,19 @@ pub struct ConnProfile {
     /// restricted", which is what it meant when it was written.
     #[serde(default)]
     pub read_only: bool,
+
+    /// Path to a Flyway project's `flyway.toml`, when one is attached.
+    ///
+    /// **The path, never a copy of what is in it.** The file lives in a
+    /// repository and changes with the branch — that is how the environment is
+    /// targeted — so a snapshot of its values would go stale the moment the
+    /// branch changed and then claim the wrong folder with confidence.
+    #[serde(default)]
+    pub flyway_project: Option<String>,
+    /// Which environment in that project this connection is. A Flyway
+    /// environment *is* a database, so a connection answers this once.
+    #[serde(default)]
+    pub flyway_environment: Option<String>,
 }
 
 /// Every key a serialised [`ConnProfile`] has, in sorted order.
@@ -128,11 +141,13 @@ pub struct ConnProfile {
 ///
 /// One list rather than two, because two would eventually disagree and the
 /// weaker one would be the one still passing.
-pub const PROFILE_KEYS: [&str; 13] = [
+pub const PROFILE_KEYS: [&str; 15] = [
     "allowInvalidCerts",
     "auth",
     "colour",
     "database",
+    "flywayEnvironment",
+    "flywayProject",
     "host",
     "id",
     "kind",
@@ -862,6 +877,8 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only: false,
+            flyway_project: None,
+            flyway_environment: None,
         }
     }
 
