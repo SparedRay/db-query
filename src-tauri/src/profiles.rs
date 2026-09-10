@@ -135,6 +135,29 @@ pub fn save_all(dir: &Path, profiles: &[ConnProfile]) -> Result<(), String> {
     Ok(())
 }
 
+/// Put `profiles` in the order `ids` gives, which is the order the rail shows.
+///
+/// Two properties, both about not trusting the caller more than necessary:
+///
+///   * **Ids, not profiles.** The order is the only thing this is allowed to
+///     change; handing whole profiles back would let a drag on the rail
+///     silently rewrite what is in them.
+///   * **Nothing is dropped.** An id that is not here is ignored, and a profile
+///     the list never mentions **keeps its place, at the end**. The order
+///     arrives from a window that may have been opened before something else
+///     added a connection, and losing someone's server because two views
+///     disagreed about the order is not a trade worth making.
+pub fn reorder(mut profiles: Vec<ConnProfile>, ids: &[String]) -> Vec<ConnProfile> {
+    let mut out = Vec::with_capacity(profiles.len());
+    for id in ids {
+        if let Some(at) = profiles.iter().position(|p| &p.id == id) {
+            out.push(profiles.remove(at));
+        }
+    }
+    out.append(&mut profiles);
+    out
+}
+
 /// Insert or replace by id, preserving order for existing entries.
 pub fn upsert(profiles: &mut Vec<ConnProfile>, profile: ConnProfile) {
     match profiles.iter_mut().find(|p| p.id == profile.id) {
@@ -276,6 +299,50 @@ mod tests {
         assert!(fs::read_to_string(d.join(&kept[0]))
             .unwrap()
             .contains("not json"));
+    }
+
+    #[test]
+    fn reorder_puts_them_in_the_order_asked_for() {
+        let v = vec![sample("a"), sample("b"), sample("c")];
+        let ids = ["c".to_string(), "a".to_string(), "b".to_string()];
+        let out = reorder(v, &ids);
+        assert_eq!(
+            out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["c", "a", "b"]
+        );
+    }
+
+    /// The property that stops a stale list from deleting a connection.
+    #[test]
+    fn reorder_never_drops_a_profile_the_list_forgot() {
+        let v = vec![sample("a"), sample("b"), sample("c")];
+        // "b" was saved by something else after this order was taken, and "z"
+        // never existed.
+        let ids = ["c".to_string(), "z".to_string(), "a".to_string()];
+        let out = reorder(v, &ids);
+        assert_eq!(
+            out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["c", "a", "b"],
+            "an unnamed profile must survive, at the end"
+        );
+    }
+
+    #[test]
+    fn reorder_survives_a_round_trip_through_the_file() {
+        let d = tmpdir();
+        save_all(&d, &[sample("a"), sample("b"), sample("c")]).unwrap();
+        let ids = ["b".to_string(), "c".to_string(), "a".to_string()];
+        let ordered = reorder(load(&d).profiles, &ids);
+        save_all(&d, &ordered).unwrap();
+        assert_eq!(
+            load(&d)
+                .profiles
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c", "a"],
+            "the rail's order is the file's order, or it does not survive a restart"
+        );
     }
 
     #[test]

@@ -756,3 +756,50 @@ right; the interaction between two gestures was not, and only one of the four
 combinations was wrong.
 
 580 UI tests on both engines.
+
+## 19. The rail: what a connection says it is, and where it sits — 2026-09-10
+
+### A cluster that claimed to be on localhost
+
+The rail's tooltip was built as `user@host:port`. Elasticsearch is addressed by
+a URL and uses neither — but the connection editor **hides** the MySQL fields
+for a cluster without **blanking** them, so a saved Elasticsearch profile really
+does carry `localhost:3306` on disk. The tooltip read those out and reported an
+address the connection has never used.
+
+`address(profile)` now answers in the engine's own terms: `user@host:port` for
+MySQL, the URL for a cluster, with the basic-auth user in front of it when there
+is one.
+
+It branches on `kind`, not on capabilities, and that is the deliberate part.
+Capabilities arrive with the first successful connection; a tooltip has to be
+right on a saved profile that has **never** connected, which is exactly when
+somebody hovers a rail button to work out what it is. The engine-vs-capability
+rule from Stage 11 is about behaviour that engines can differ on; which fields
+hold the address is not behaviour, it is the shape of the profile.
+
+### Reordering, and what a reorder is allowed to change
+
+Move up / Move down on the connection's context menu, disabled at the ends
+rather than absent — a menu whose items move around is one you have to read
+every time.
+
+Two menu items rather than a drag, on purpose: a drag needs drop-position
+feedback and behaves differently under each of the two webviews this app ships
+on, and the job asked for was "put the one I use most at the top". Drag and drop
+can be added later without changing anything underneath.
+
+`reorder_profiles` takes **ids, not profiles**, and reloads the file before
+applying them. Two consequences worth having:
+
+  * the order is the only thing a reorder can change — sending whole profiles
+    back would let a drag on the rail silently rewrite their contents;
+  * a profile the list does not mention **keeps its place at the end** rather
+    than vanishing, so an order taken before something else saved a connection
+    cannot delete it.
+
+Both are asserted in `profiles::reorder`'s unit tests, including the round trip
+through the file — a reorder that has to be redone after every restart is a
+chore, not a feature.
+
+292 Rust unit tests, 590 UI tests on both engines.
