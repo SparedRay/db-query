@@ -10,7 +10,9 @@ import {
 import {
   defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory, redo,
 } from "@codemirror/commands";
-import { autocompletion, completionKeymap, closeBrackets } from "@codemirror/autocomplete";
+import {
+  autocompletion, acceptCompletion, completionKeymap, closeBrackets,
+} from "@codemirror/autocomplete";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import {
   bracketMatching, syntaxHighlighting, HighlightStyle, indentOnInput,
@@ -188,13 +190,39 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     { key: "Mod-Shift-f", preventDefault: true, run: () => (hooks.onFormat(), true) },
   ]);
 
+  /**
+   * **Tab accepts a completion. Enter never does.**
+   *
+   * CodeMirror's `completionKeymap` puts `acceptCompletion` on Enter and binds
+   * nothing to Tab. In a SQL buffer that is the wrong way round: the popup
+   * opens on its own while you type, so Enter — the key you press to start the
+   * next line — silently becomes "accept whatever is highlighted", and you get
+   * an identifier you never chose instead of a newline. Tab is the key every
+   * other editor uses for this, and it is not the key anyone presses to mean
+   * something else here.
+   *
+   * `acceptCompletion` **returns false when no completion is open**, so Tab
+   * falls through to `indentWithTab` in the keymap below and still indents.
+   * That is also why this sits before that one: earlier is higher precedence.
+   *
+   * `autocompletion({ defaultKeymap: false })` is what stops CodeMirror adding
+   * Enter back — its own binding is registered at `Prec.highest`, so filtering
+   * the array alone would not have been enough.
+   */
+  const completionKeys = keymap.of([
+    { key: "Tab", run: acceptCompletion },
+    // Everything else the popup needs — Escape to dismiss, arrows to move —
+    // kept exactly as CodeMirror ships it, minus the one binding above.
+    ...completionKeymap.filter((b) => b.key !== "Enter"),
+  ]);
+
   const extensions: Extension[] = [
     lineNumbers(),
     history(),
     bracketMatching(),
     closeBrackets(),
     highlightActiveLine(),
-    autocompletion(),
+    autocompletion({ defaultKeymap: false }),
     syntaxHighlighting(appHighlightStyle, { fallback: true }),
 
     // The rest of what a text editor is expected to be. These were missing, and
@@ -213,6 +241,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
 
     // Run keys come first so they win over the default keymap.
     runKeys,
+    completionKeys,
     // Redo, spelled the way every editor spells it. `historyKeymap` binds
     // Ctrl+Shift+Z only on the platforms it recognises as Linux, and Ctrl+Y
     // only where it does not — so on any platform one of the two habits fails.
@@ -222,7 +251,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
       { key: "Mod-y", preventDefault: true, run: redo },
     ]),
     keymap.of([
-      ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap, indentWithTab,
+      ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab,
     ]),
     schemaCompartment.of(sql({ ...sqlConfig, upperCaseKeywords: true })),
     lintCompartment.of([]),
@@ -241,7 +270,8 @@ export const STARTER_DOC =
   "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n" +
   "-- Ctrl+Shift+Enter runs the whole buffer.\n" +
   "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n" +
-  "-- Ctrl+F find · Ctrl+Shift+F format · Ctrl+Z undo · Ctrl+Shift+Z redo\n\n" +
+  "-- Ctrl+F find · Ctrl+Shift+F format · Ctrl+Z undo · Ctrl+Shift+Z redo\n" +
+  "-- Tab accepts a suggestion · Esc dismisses it\n\n" +
   "SELECT 1;\n";
 
 export type LintSource = (view: EditorView) => Promise<CmDiagnostic[]>;

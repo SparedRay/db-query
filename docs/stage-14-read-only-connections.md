@@ -214,3 +214,40 @@ bug still in.
   a live MySQL and a live cluster, but nobody has yet ticked the box in the
   real app and tried to break their own database with it.
 - Stage 13's M4 and M7 remain outstanding and are not affected by this.
+
+---
+
+## 11. Tab completes; Enter does not — 2026-09-10
+
+Asked for directly, and the right way round.
+
+CodeMirror's `completionKeymap` puts `acceptCompletion` on **Enter** and binds
+nothing to Tab. In a SQL buffer the popup opens by itself as you type, so
+Enter — the key you press to start the next line — silently means "accept
+whatever is highlighted", and you get an identifier you never chose instead of
+a newline.
+
+Tab now accepts and Enter never does. Two details make it safe:
+
+  * `acceptCompletion` **returns false when nothing is open**, so Tab falls
+    through to `indentWithTab` and still indents. Tested, because adding this
+    could otherwise have quietly removed indentation.
+  * `autocompletion({ defaultKeymap: false })` is required. CodeMirror
+    registers its own bindings at `Prec.highest`, so filtering Enter out of the
+    exported array would not have removed it.
+
+### The test was faster than a person
+
+`acceptCompletion` ignores an accept within `interactionDelay` — **75ms** by
+default — of the popup opening, so a keystroke already in flight cannot take an
+option nobody has seen. The first draft of the Tab test pressed the key
+immediately and got an indent, which looked like the binding had not worked.
+
+The Enter test is the reason this is written down rather than just fixed: it
+**passed without the wait**, and would have passed with Enter still bound —
+measuring CodeMirror's guard instead of our keymap. Both tests now wait past
+it, and both fail when the default keymap is restored while "Tab indents" and
+"Escape dismisses" keep passing.
+
+The starter document lists the two keys, since a binding nobody knows about is
+not a feature.
