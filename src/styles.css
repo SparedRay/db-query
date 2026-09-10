@@ -367,7 +367,16 @@ input.num {
   content: ""; position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
   width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--conn-colour);
 }
-.rail-item.offline.active::before { background: var(--fg-dim); }
+/* **Not drawn at all when the connection is down.** The bar is the same shape
+   as the one on a live connection, so a disconnected server still read as
+   "this one is up and you are on it" — greying it was not enough, because the
+   shape is what carries the meaning.
+   The selection itself is not cleared, and deliberately: `activeId` is still
+   what the Connect button prefills, still what keeps this connection's tabs on
+   screen, and the tab strip is still tinted its colour. That is what says
+   which connection you are looking at while it is down; the rail does not need
+   to say it twice, and the once it did say it was misread. */
+.rail-item.offline.active::before { content: none; }
 /* A one-off connection is marked, so "why is this gone tomorrow" has an answer. */
 .rail-item.adhoc::after {
   content: ""; position: absolute; right: -1px; bottom: -1px;
