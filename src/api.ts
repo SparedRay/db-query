@@ -50,6 +50,12 @@ export interface ConnProfile {
    *  password is empty. Distinct from "no password is stored", which cannot
    *  tell "there isn't one" from "we don't know it". */
   noPassword?: boolean;
+  /** Refuse statements that change data or schema on this connection.
+   *
+   *  A guard rail, not a boundary: whoever can open the connection can clear
+   *  it. Applied in Rust by narrowing the connection's capabilities at
+   *  connect, so the whole app keeps asking `capabilities.writes`. */
+  readOnly?: boolean;
 }
 
 export type EngineKind = "mysql" | "elasticsearch";
@@ -218,6 +224,10 @@ export interface Capabilities {
   delimiterBlocks: boolean;
   routines: boolean;
   cancellation: boolean;
+  /** `writes` is false because the *connection* was marked read-only, not
+   *  because the engine cannot write. Only the refusal wording depends on the
+   *  difference — everything else asks `writes`. */
+  readOnly: boolean;
   streamingExport: boolean;
   rowCap: "clientLimit" | "serverPageSize";
   /** What this engine calls the thing `USE` switches between. */

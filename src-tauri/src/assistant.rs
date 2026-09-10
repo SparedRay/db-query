@@ -237,13 +237,30 @@ pub fn system_prompt(
     );
 
     if let Some(caps) = caps {
-        if !caps.writes {
+        // Two reasons, two sentences — the same distinction the refusal makes.
+        // Telling the model "this engine is read-only" about a MySQL
+        // connection somebody ticked a box on is false, and it is the kind of
+        // false that comes back as a confidently wrong explanation.
+        if caps.read_only {
+            s.push_str(
+                "**This connection is marked read-only by the user.** It accepts SELECT, \
+                 SHOW and DESCRIBE only — no INSERT, UPDATE, DELETE or DDL. Never offer \
+                 one; if the user asks for a change, say that this connection refuses \
+                 writes and that the setting is theirs to change.\n\n",
+            );
+        } else if !caps.writes {
             s.push_str(
                 "**This engine is read-only through this interface.** It accepts SELECT, \
-                 SHOW and DESCRIBE only — no INSERT, UPDATE, DELETE or DDL, and no \
-                 transactions. Never offer one; if the user asks for a change, say that \
-                 it cannot be made from here.\n\n",
+                 SHOW and DESCRIBE only — no INSERT, UPDATE, DELETE or DDL. Never offer \
+                 one; if the user asks for a change, say that it cannot be made from \
+                 here.\n\n",
             );
+        }
+        // Its own clause, not a rider on the one above. A read-only connection
+        // to MySQL still has transactions; only the engine's own limit takes
+        // them away, and saying otherwise taught the model something untrue.
+        if !caps.transactions {
+            s.push_str("This engine has no transactions or session statements.\n\n");
         }
         if !caps.routines {
             s.push_str("This engine has no stored procedures or functions.\n\n");
@@ -930,6 +947,42 @@ mod tests {
         assert!(p.contains("elasticsearch client"), "{p}");
         assert!(p.contains("catalogs"), "{p}");
         assert!(p.contains("no stored procedures"), "{p}");
+    }
+
+    /// A read-only **connection** is a different sentence from a read-only
+    /// **engine**, and must not borrow the engine's other limits either.
+    #[test]
+    fn a_read_only_connection_is_described_as_one() {
+        let mut profile = crate::session::ConnProfile {
+            id: "p".into(),
+            name: "prod".into(),
+            colour: "#ef4444".into(),
+            host: "h".into(),
+            port: 3306,
+            user: "u".into(),
+            database: None,
+            allow_invalid_certs: false,
+            kind: Default::default(),
+            url: String::new(),
+            auth: Default::default(),
+            no_password: false,
+            read_only: true,
+        };
+        let caps = crate::engine::Capabilities::mysql().for_profile(&profile);
+        let p = system_prompt("8.4.0", None, Some(&caps));
+        assert!(p.contains("connection is marked read-only"), "{p}");
+        assert!(!p.contains("This engine is read-only"), "{p}");
+        // MySQL keeps its transactions; only the engine's own limit removes
+        // them, and this used to be asserted as a rider on "read-only".
+        assert!(!p.contains("no transactions"), "{p}");
+
+        profile.read_only = false;
+        let plain = system_prompt(
+            "8.4.0",
+            None,
+            Some(&crate::engine::Capabilities::mysql().for_profile(&profile)),
+        );
+        assert!(!plain.contains("read-only"), "{plain}");
     }
 
     /// MySQL gains no restrictions it did not have.

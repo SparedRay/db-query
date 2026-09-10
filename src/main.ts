@@ -74,6 +74,7 @@ const els = {
   connColours: $("conn-colours"),
   connSave: $<HTMLInputElement>("conn-save"),
   connRemember: $<HTMLInputElement>("conn-remember"),
+  connReadOnly: $<HTMLInputElement>("conn-read-only"),
   resultNote: $<HTMLElement>("result-note"),
   btnCopy: $<HTMLButtonElement>("btn-copy"),
   btnCopyHead: $<HTMLButtonElement>("btn-copy-head"),
@@ -480,6 +481,7 @@ function openConnectionEditor(existing?: ConnectionEntry) {
     p?.allowInvalidCerts ?? false;
   els.connSave.checked = existing ? existing.saved : true;
   els.connRemember.checked = p?.rememberPassword ?? false;
+  els.connReadOnly.checked = p?.readOnly ?? false;
   // A password can only be remembered against something that is saved.
   els.connRememberRow.hidden = !els.connSave.checked;
 
@@ -556,6 +558,7 @@ els.form.addEventListener("submit", async (e) => {
     user: String(fd.get("user") ?? "").trim(),
     database: String(fd.get("database") ?? "").trim() || null,
     allowInvalidCerts: fd.get("allowInvalidCerts") === "on",
+    readOnly: els.connReadOnly.checked,
     kind,
     url,
     auth,
@@ -597,26 +600,11 @@ els.form.addEventListener("submit", async (e) => {
       databases: [],
     };
 
-    // Connect FIRST, and add nothing anywhere until it succeeds. A failed
-    // attempt used to leave a dead icon in the rail for every typo, and put its
-    // error in the results pane rather than next to the fields being corrected.
-    //
     // An empty password box on a profile that already remembers one means "use
     // the stored one", not "connect with a blank password".
     const useStored = !typed && (editing?.profile.rememberPassword ?? false);
-    const res = useStored
-      ? await conns.connectStored(entry)
-      : await conns.connectWith(entry, typed);
 
-    if (!res.ok) {
-      els.connError.textContent = res.error ?? "Could not connect.";
-      els.connError.hidden = false;
-      return;
-    }
-
-    // Only a connection that actually works is worth writing down — and this
-    // way the password is validated before it reaches the keychain.
-    if (wantSave) {
+    const persist = async () => {
       // Three-way: a string remembers it, "" forgets it, null leaves it alone.
       // Leaving it alone is what lets someone edit a port without retyping.
       const password = els.connRemember.checked
@@ -636,7 +624,52 @@ els.form.addEventListener("submit", async (e) => {
       // setActiveConnection early-returns when the id has not changed.
       tabs.render();
       if (outcome.passwordWarning) results.setMessage(outcome.passwordWarning);
+    };
+
+    /**
+     * **The one case where the profile is written before connecting.**
+     *
+     * `connect_saved` connects from the *file* — it has to, because the whole
+     * point of it is that the stored password never reaches JavaScript, and
+     * the id is what looks it up. So an edit that reuses the stored password
+     * and connects first connects with the values it is replacing.
+     *
+     * Read-only is how that surfaced: clearing the box and pressing OK looked
+     * like it did nothing, and — far worse — *ticking* it did nothing while
+     * looking like protection. But it was never specific to this flag. Editing
+     * the port of a connection with a remembered password had exactly the same
+     * shape, and had since Stage 2.
+     *
+     * The usual order exists so a password is validated before it reaches the
+     * keychain. On this path there is no new password: the box is empty, and
+     * `password` below resolves to null, meaning "leave what is stored alone".
+     * So nothing that order protects is at stake here.
+     *
+     * The cost is that an edit which then fails to connect stays written down.
+     * That is the better failure: the connection was already saved, the user
+     * changed it deliberately, and their edit surviving a bad port is what
+     * lets them fix the port.
+     */
+    const writeBeforeConnecting = wantSave && useStored;
+    if (writeBeforeConnecting) await persist();
+
+    // Otherwise connect FIRST, and add nothing anywhere until it succeeds. A
+    // failed attempt used to leave a dead icon in the rail for every typo, and
+    // put its error in the results pane rather than next to the fields being
+    // corrected.
+    const res = useStored
+      ? await conns.connectStored(entry)
+      : await conns.connectWith(entry, typed);
+
+    if (!res.ok) {
+      els.connError.textContent = res.error ?? "Could not connect.";
+      els.connError.hidden = false;
+      return;
     }
+
+    // Only a connection that actually works is worth writing down — and this
+    // way the password is validated before it reaches the keychain.
+    if (wantSave && !writeBeforeConnecting) await persist();
 
     els.dialog.close();
   } catch (err) {

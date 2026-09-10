@@ -166,6 +166,7 @@ fn profile() -> ConnProfile {
         url: std::env::var("ES_URL").unwrap_or_else(|_| "http://localhost:9200".into()),
         auth: Auth::None,
         no_password: false,
+        read_only: false,
     }
 }
 

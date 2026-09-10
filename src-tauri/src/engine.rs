@@ -42,6 +42,14 @@ pub struct Capabilities {
     pub engine: String,
     /// Statements that change data or schema are accepted at all.
     pub writes: bool,
+    /// `writes` is false because **this connection was marked read-only**,
+    /// not because the engine cannot write.
+    ///
+    /// Only [`Capabilities::for_profile`] sets it. It exists so the refusal
+    /// can name the real reason: telling someone that "mysql is read-only
+    /// through this interface" when they ticked a box themselves is a lie
+    /// about the engine and no help at all about the cause.
+    pub read_only: bool,
     /// `BEGIN` / `COMMIT` / `ROLLBACK` mean something.
     pub transactions: bool,
     /// More than one statement can be sent in a script.
@@ -69,6 +77,7 @@ impl Capabilities {
         Self {
             engine: "mysql".into(),
             writes: true,
+            read_only: false,
             transactions: true,
             multi_statement: true,
             delimiter_blocks: true,
@@ -78,6 +87,24 @@ impl Capabilities {
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
         }
+    }
+
+    /// What a **connection** can do: what its engine declares, narrowed by
+    /// what the profile allows.
+    ///
+    /// Called once per connect, on every path, so that everything downstream
+    /// keeps asking the one question it already asks — *does this connection
+    /// do writes?* A second notion of "may I write", checked somewhere else,
+    /// would be a second thing to forget.
+    ///
+    /// It only ever takes capability away. A profile cannot grant a connection
+    /// something its engine does not have.
+    pub fn for_profile(mut self, profile: &crate::session::ConnProfile) -> Self {
+        if profile.read_only {
+            self.writes = false;
+            self.read_only = true;
+        }
+        self
     }
 }
 
@@ -221,6 +248,16 @@ pub trait Engine: Send + Sync {
 pub fn refusal(caps: &Capabilities, kind: crate::exec::StatementKind) -> Option<String> {
     use crate::exec::StatementKind;
     match kind {
+        // Two different reasons, and they must not be confused. An engine that
+        // cannot write is a fact about the engine; a connection the user marked
+        // read-only is a choice they made and can unmake, and saying "mysql is
+        // read-only" to that person is false about MySQL and silent about the
+        // cause.
+        StatementKind::Modify | StatementKind::Other if caps.read_only => Some(
+            "This connection is marked read-only, so it accepts only statements that read. \
+             Edit the connection and clear \"Read-only\" to allow writes."
+                .into(),
+        ),
         StatementKind::Modify | StatementKind::Other if !caps.writes => Some(format!(
             "{} is read-only through this interface — it accepts SELECT, SHOW and DESCRIBE.",
             caps.engine
@@ -281,6 +318,7 @@ mod tests {
         Capabilities {
             engine: "elasticsearch".into(),
             writes: false,
+            read_only: false,
             transactions: false,
             multi_statement: true,
             delimiter_blocks: false,
@@ -290,6 +328,102 @@ mod tests {
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),
         }
+    }
+
+    // ------------------------------------------- a read-only *connection*
+
+    fn profile(read_only: bool) -> crate::session::ConnProfile {
+        crate::session::ConnProfile {
+            id: "p".into(),
+            name: "prod".into(),
+            colour: "#ef4444".into(),
+            host: "db.example.com".into(),
+            port: 3306,
+            user: "reporting".into(),
+            database: None,
+            allow_invalid_certs: false,
+            kind: Default::default(),
+            url: String::new(),
+            auth: Default::default(),
+            no_password: false,
+            read_only,
+        }
+    }
+
+    #[test]
+    fn a_profile_marked_read_only_takes_writes_off_its_connection() {
+        let caps = Capabilities::mysql().for_profile(&profile(true));
+        assert!(!caps.writes, "the engine writes; this connection must not");
+        assert!(caps.read_only, "and the reason has to travel with it");
+        // Only writes. Reading, transactions and routines are untouched —
+        // narrowing more than was asked for is a different feature.
+        assert!(caps.transactions);
+        assert!(caps.routines);
+        assert!(caps.multi_statement);
+        assert_eq!(caps.namespace_label, "database");
+    }
+
+    #[test]
+    fn an_unmarked_profile_changes_nothing_at_all() {
+        assert_eq!(
+            Capabilities::mysql().for_profile(&profile(false)),
+            Capabilities::mysql()
+        );
+    }
+
+    /// A profile can only ever take capability away. Marking a read-only
+    /// *engine* as read-only must not look like it granted anything, and
+    /// clearing the box must not hand Elasticsearch a write path.
+    #[test]
+    fn a_profile_cannot_grant_what_the_engine_does_not_have() {
+        let caps = read_only().for_profile(&profile(false));
+        assert!(!caps.writes, "the engine still cannot write");
+        assert!(!caps.read_only, "and that is not the connection's doing");
+    }
+
+    /// **The two reasons must not be confused.** Telling somebody who ticked a
+    /// box that "mysql is read-only through this interface" is false about the
+    /// engine and says nothing about the cause.
+    #[test]
+    fn the_refusal_names_the_connection_not_the_engine() {
+        let caps = Capabilities::mysql().for_profile(&profile(true));
+        let why = refusal(&caps, crate::exec::StatementKind::Modify)
+            .expect("a write must be refused on a read-only connection");
+        assert!(why.contains("connection"), "{why}");
+        assert!(
+            !why.contains("mysql"),
+            "it must not blame the engine: {why}"
+        );
+        // And it says how to undo it. It deliberately does *not* add "the next
+        // time you connect": saving an edit reconnects, so the change applies
+        // at once, and warning about a step that does not exist is its own
+        // small lie. See the Stage 14 tracker.
+        assert!(why.contains("Read-only"), "{why}");
+        assert!(!why.contains("next time"), "{why}");
+
+        // DDL classifies as `Other`, which is the arm that catches DROP and
+        // TRUNCATE — the statements this feature exists for.
+        assert!(refusal(&caps, crate::exec::StatementKind::Other).is_some());
+    }
+
+    #[test]
+    fn a_read_only_connection_still_reads_and_still_switches_database() {
+        let caps = Capabilities::mysql().for_profile(&profile(true));
+        assert_eq!(refusal(&caps, crate::exec::StatementKind::Select), None);
+        assert_eq!(
+            refusal(&caps, crate::exec::StatementKind::RowReturning),
+            None
+        );
+        // `USE`, `BEGIN` and `SET` are Session, and MySQL has transactions.
+        assert_eq!(refusal(&caps, crate::exec::StatementKind::Session), None);
+    }
+
+    /// The engine's own refusal must keep its own words.
+    #[test]
+    fn an_engine_that_cannot_write_still_blames_itself() {
+        let why = refusal(&read_only(), crate::exec::StatementKind::Modify).expect("refused");
+        assert!(why.contains("elasticsearch"), "{why}");
+        assert!(!why.contains("marked read-only"), "{why}");
     }
 
     /// The whole point of doing this from capabilities: MySQL is unaffected,

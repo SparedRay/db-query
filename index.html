@@ -342,6 +342,19 @@
           <input type="checkbox" name="remember" id="conn-remember" />
           Remember password in the system keychain
         </label>
+        <label class="toggle">
+          <input type="checkbox" name="readOnly" id="conn-read-only" />
+          Read-only — refuse statements that change data
+        </label>
+        <!-- Said where the choice is made, because a tick box on its own
+             reads as a guarantee. It is not one: this stops an accident, not
+             a person. -->
+        <p class="hint" id="conn-read-only-hint">
+          Blocks INSERT, UPDATE, DELETE and DDL before they are sent. Anyone
+          using this app can turn it back off, so it is a guard rail, not
+          security — for that, connect with an account that has no write
+          permissions.
+        </p>
 
         <p id="conn-error" class="error" hidden></p>
         <menu>
