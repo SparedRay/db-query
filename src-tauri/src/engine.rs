@@ -347,6 +347,8 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only,
+            flyway_project: None,
+            flyway_environment: None,
         }
     }
 

@@ -169,6 +169,10 @@ podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
   "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa;"
 """
 
+[tasks.test-flyway]
+description = "Tests needing the Flyway CLI and fixture (see flyway-up)"
+run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_flyway -- --ignored --test-threads=1"
+
 [tasks.test-es]
 description = "Tests needing the Elasticsearch fixture (see es-up)"
 run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic -- --ignored --test-threads=1"

@@ -167,6 +167,8 @@ fn profile() -> ConnProfile {
         auth: Auth::None,
         no_password: false,
         read_only: false,
+        flyway_project: None,
+        flyway_environment: None,
     }
 }
 

@@ -293,3 +293,44 @@ output does not contain one.
 The fixture is `mise run flyway-up`: the pinned CLI (13.5.0, matching the
 version Flyway Desktop ships as 13.5.0-rc2720) plus `dev/flyway/`, whose
 `locations` is deliberately **relative** and whose `V4` fails on purpose.
+
+---
+
+## 11. The runner, and the test that catches the mistake — 2026-09-10
+
+`src-tauri/src/flywaycli.rs` runs the CLI and reads what comes back.
+
+**The first process this app has ever started**, so three rules are written
+into the module rather than left to habit: arguments are a **vector**, never a
+shell string (a test passes `dev; rm -rf /` as an environment name and asserts
+it stays one argument); the **working directory is the project's folder**; and
+a missing binary is an ordinary answer that says where to fix it, because most
+people will not have Flyway on their PATH the first time.
+
+`std::process::Command` on the blocking pool, not `tokio::process` — that
+feature pulls tokio's unix signal machinery for what is one short command run
+when somebody clicks a button.
+
+**A refusal is looked for before the success shape**, because a `migrate`
+against a failed history returns `{"error": {…}}` and *nothing else*: code that
+reads `migrations` first sees an empty run rather than a refusal.
+
+### What the live suite is for
+
+`tests/live_flyway.rs`, `#[ignore]`d beside the MySQL and Elasticsearch ones,
+run by `mise run test-flyway`. Four things a JSON parser cannot tell you:
+that the arguments we build are arguments **Flyway accepts**, that a relative
+`locations` **resolves**, that `-environment=` really **picks the database**,
+and that an unknown environment comes back as Flyway's own complaint.
+
+The middle two are the ones that matter, and this is why:
+
+> **A wrong working directory does not look like an error.** Flyway finds no
+> migrations and reports a *successful* run of an empty project.
+
+So the test was checked by breaking it on purpose — running from a temporary
+directory with an absolute `-configFiles` so only the working directory
+changed. The two tests that read migrations failed; the two that do not depend
+on `locations` kept passing. That is the shape a real regression would have.
+
+**324 Rust unit tests, 4 live Flyway.**
