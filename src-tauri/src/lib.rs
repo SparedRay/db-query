@@ -7,6 +7,7 @@ pub mod engine;
 pub mod exec;
 pub mod export;
 pub mod files;
+pub mod flyway;
 pub mod history;
 pub mod httpsql;
 pub mod lint;

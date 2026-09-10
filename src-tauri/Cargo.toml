@@ -49,6 +49,11 @@ zeroize = "1"
 # Licence verified 2026-09-05: MIT OR Apache-2.0.
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
+# Reading a Flyway project file (Stage 15). **No new crate**: `tauri` already
+# links toml 1.1 through `tauri-utils`, so cargo unifies this into a build that
+# already exists — measured with `cargo tree -i`, not assumed. Licence read from
+# the vendored Cargo.toml on 2026-09-10: MIT OR Apache-2.0.
+toml = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 

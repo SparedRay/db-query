@@ -1,0 +1,35 @@
+# A Flyway project shaped like the real one this stage was designed against.
+#
+# Three things here are deliberate, and each one exercises something the
+# implementation could get wrong:
+#
+#   * `locations` is **relative**. Flyway resolves it against the process
+#     working directory, not against this file — which is why the app runs the
+#     CLI with its working directory set to this folder. An absolute path here
+#     would make that bug untestable.
+#   * Two environments on **different databases**, so the import guard has
+#     something real to compare and to refuse.
+#   * `environment` names one of them, the way a branch's real config does.
+#
+# The password is the fixture's own (`dev/seed.sql`, `mise run db-up`) and is
+# not a secret. The app never reads it: Flyway reads its own config.
+databaseType = "MySql"
+name = "db-query fixture"
+
+[environments.development]
+displayName = "Development database"
+url = "jdbc:mysql://127.0.0.1:3306/flyway_dev?allowPublicKeyRetrieval=true&useSSL=false&createDatabaseIfNotExist=true"
+user = "root"
+password = "devpassword"
+
+[environments.qa]
+displayName = "QA database"
+url = "jdbc:mysql://127.0.0.1:3306/flyway_qa?allowPublicKeyRetrieval=true&useSSL=false&createDatabaseIfNotExist=true"
+user = "root"
+password = "devpassword"
+
+[flyway]
+environment = "development"
+locations = [ "filesystem:migrations" ]
+outOfOrder = false
+validateMigrationNaming = true

@@ -63,9 +63,10 @@ and gains a migrations view.
 ### 3.2 The CLI does the work. We do not reimplement Flyway.
 
 `flyway info -outputType=json` reports every migration with its `version`,
-`description`, `state`, `installedOn`, `checksum` **and the full path of the
-file** — so "click to read the SQL" is answered by Flyway, not by us walking
-`locations`. `migrate` and `repair` are Flyway's own.
+`description`, `state`, `installedOnUTC` **and the full path of the file** — so
+"click to read the SQL" is answered by Flyway, not by us walking `locations`.
+`migrate` and `repair` are Flyway's own. The exact field names are §9, measured
+rather than read.
 
 Reimplementing any of it means owning checksum rules, ordering and — worst —
 `repair`, which rewrites the schema history. Being subtly wrong there is the
@@ -212,3 +213,83 @@ broken to repair.
 - **Scope.** This widens the app from "talk to a database over its protocol" to
   "drive a tool and show its state". Said out loud here so it is a decision
   rather than a drift.
+
+---
+
+## 9. What the CLI actually says — measured 2026-09-10, Flyway 13.5.0
+
+Run against the fixture, not read from documentation, and it matters: **the
+documentation I had been working from was wrong in three places.**
+
+### `info -outputType=json`
+
+    top level  allSchemasEmpty database exception flywayVersion licenseFailed
+               migrations operation schemaName schemaVersion timestamp
+    migration  category description executionTime filepath installedBy
+               installedOnUTC rawVersion shouldExecuteExpression state type
+               undoFilepath undoable version
+
+  * The path is **`filepath`**, not `script` — and it is absolute, which is
+    what makes §3.2's claim ("Flyway answers where the file is") true.
+  * The timestamp is **`installedOnUTC`**, not `installedOn`.
+  * **There is no `checksum`.** The tracker claimed one before this was run.
+    Nothing needs it — but a plan that says a field exists is a plan somebody
+    will later write code against.
+
+`state` is `Pending`, `Success` or `Failed` in the cases the fixture produces.
+
+### `migrate -outputType=json`
+
+Two **different shapes**, and code that assumes one will panic on the other:
+
+    succeeded   migrationsExecuted, migrations[], success, totalMigrationTime,
+                targetSchemaVersion, warnings[]
+    refused     { "error": { "errorCode": …, "message": … } }   — and nothing else
+
+The second is what a run against a history with a failed migration returns:
+
+> Validate failed: Migrations have failed validation. Detected failed migration
+> to version 4 (deliberately broken). Please remove any half-completed changes
+> then run repair to fix the schema history.
+
+Which is exactly the text F6 should put in front of the user, verbatim. Note
+also that a run which **partly** succeeds reports `"success": false` with
+`migrationsExecuted: 3` — "did it work" is not a yes/no, and the UI has to say
+how far it got.
+
+### `repair -outputType=json`
+
+    database flywayVersion migrationsAligned migrationsDeleted
+    migrationsRemoved operation repairActions warnings
+
+`migrationsRemoved` carried `{version: "4", description: "deliberately broken"}`
+— so the confirmation after a repair can say what it did rather than "done".
+
+### Exit codes and streams
+
+**Exit 1 on failure, 0 on success. All output on stdout; stderr was empty even
+for the failure.** So the JSON is the thing to parse and the exit code is the
+thing to trust — and a first attempt at measuring this read `$?` after a pipe
+and got `tail`'s status, which is the sort of mistake that turns into "why does
+it think the migration worked".
+
+## 10. Phase 1 groundwork — 2026-09-10
+
+`src-tauri/src/flyway.rs`: the project file parser, the JDBC URL reader and the
+import guard, with the user's own (redacted) file as the fixture in its tests —
+including its two awkward properties, environments that differ only by user and
+a `shadowEnvironment` naming an environment the file never defines.
+
+**`toml` costs nothing.** `tauri` already links toml 1.1 through `tauri-utils`
+at runtime, so cargo unifies it: `cargo tree -i` confirmed it before the line
+was added, and the lockfile diff is **one line**. Licence read from the
+vendored `Cargo.toml`: MIT OR Apache-2.0.
+
+**No type in that module has a password field**, the same construction
+`ConnProfile` uses — so a secret from the project file cannot be logged,
+serialised or shown by accident, and a test asserts the parsed value's debug
+output does not contain one.
+
+The fixture is `mise run flyway-up`: the pinned CLI (13.5.0, matching the
+version Flyway Desktop ships as 13.5.0-rc2720) plus `dev/flyway/`, whose
+`locations` is deliberately **relative** and whose `V4` fails on purpose.

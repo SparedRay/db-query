@@ -13,3 +13,7 @@ src-tauri/THIRD-PARTY-LICENSES.txt
 test-results/
 playwright-report/
 .playwright/
+
+# The pinned Flyway CLI, fetched by `mise run flyway-up`. ~1GB extracted, and
+# it is somebody else's release artifact — never committed.
+dev/.flyway/

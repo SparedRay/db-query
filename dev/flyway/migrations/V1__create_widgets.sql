@@ -1,0 +1,5 @@
+CREATE TABLE widgets (
+  id     INT PRIMARY KEY AUTO_INCREMENT,
+  name   VARCHAR(64) NOT NULL,
+  made_on DATE NULL
+);
