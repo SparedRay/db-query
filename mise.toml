@@ -114,6 +114,61 @@ echo "elasticsearch ready on http://localhost:9200 (index: orders, 3 docs)"
 description = "Stop and remove the Elasticsearch fixture"
 run = "podman stop db-query-es && podman rm db-query-es"
 
+# Flyway is **not** run in a container, deliberately. The app invokes the user's
+# own CLI with its working directory set to the project folder, because that is
+# how a relative `locations` resolves. In a container the paths are mounts, the
+# working directory is the container's and the database host is not the one the
+# TOML names — every part of that would be replaced by something the app never
+# does. See §7 of the Stage 15 tracker.
+#
+# The version is pinned to the one Flyway Desktop ships (13.5.0; Desktop calls
+# its build 13.5.0-rc2720). The download is ~584MB because it carries its own
+# JRE, which is what makes it a one-command fixture rather than "install Java
+# first".
+[tasks.flyway-up]
+description = "Fetch the pinned Flyway CLI and prepare the migration fixture databases"
+run = """
+set -e
+VERSION=13.5.0
+DEST=dev/.flyway
+BIN="$DEST/flyway-$VERSION/flyway"
+
+if [ ! -x "$BIN" ]; then
+  mkdir -p "$DEST"
+  TAR="$DEST/flyway-$VERSION.tar.gz"
+  BASE=https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/$VERSION
+  echo "Downloading Flyway $VERSION (~584MB, includes its own JRE)…"
+  curl -fL --progress-bar -o "$TAR" "$BASE/flyway-commandline-$VERSION-linux-x64.tar.gz"
+  # Verified, not trusted: a truncated download would otherwise show up much
+  # later as an unreadable archive or a mysteriously missing driver.
+  WANT=$(curl -fsSL "$BASE/flyway-commandline-$VERSION-linux-x64.tar.gz.sha1")
+  GOT=$(sha1sum "$TAR" | cut -d' ' -f1)
+  [ "$WANT" = "$GOT" ] || { echo "sha1 mismatch: wanted $WANT, got $GOT"; exit 1; }
+  tar -xzf "$TAR" -C "$DEST"
+  rm -f "$TAR"
+fi
+
+# The two databases the fixture's environments point at. `db-up` owns the
+# server; these are this fixture's own, so the two do not tread on each other.
+until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do
+  echo "waiting for the MySQL fixture (mise run db-up)…"; sleep 2
+done
+podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
+  "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa; \
+   CREATE DATABASE flyway_dev; CREATE DATABASE flyway_qa;"
+
+"$BIN" --version >/dev/null 2>&1 || { echo "the downloaded flyway will not run"; exit 1; }
+echo "flyway $VERSION ready at $BIN"
+echo "project: dev/flyway/flyway.toml (environments: development, qa)"
+"""
+
+[tasks.flyway-down]
+description = "Drop the migration fixture databases (leaves the downloaded CLI)"
+run = """
+podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
+  "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa;"
+"""
+
 [tasks.test-es]
 description = "Tests needing the Elasticsearch fixture (see es-up)"
 run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic -- --ignored --test-threads=1"
