@@ -410,11 +410,23 @@ export class ResultView {
    * Shared by rows and columns because they behave identically — and because
    * two copies of this is how the two drift apart.
    */
+  /**
+   * `alone` is whether `set` was the *whole* selection before the click, and
+   * it is what the plain-click deselect below is allowed to act on.
+   *
+   * Asking only "is this the one entry in my own set" was wrong across
+   * gestures. Click cell b2 and the columns are `{b}`; click b's header next
+   * and that rule read as "you clicked the only selected column, so deselect
+   * it" — clearing everything. Empty means *all*, so the copy silently widened
+   * from one cell to the entire result, which is what a user reported after
+   * clicking a column and getting far more than they had selected.
+   */
   private applyGesture(
     set: Set<number>,
     i: number,
     anchor: number | null,
     e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+    alone: boolean,
   ): number | null {
     if (e.shiftKey && anchor !== null) {
       const [a, b] = [anchor, i].sort((x, y) => x - y);
@@ -428,7 +440,7 @@ export class ResultView {
     }
     // Clicking the only selected entry clears it, so there is a way back to
     // "nothing selected" without hunting for one.
-    const onlyThis = set.size === 1 && set.has(i);
+    const onlyThis = alone && set.size === 1 && set.has(i);
     set.clear();
     if (!onlyThis) set.add(i);
     return i;
@@ -436,15 +448,19 @@ export class ResultView {
 
   /** A column header: selects whole columns, across every row. */
   private clickColumn(e: MouseEvent, i: number) {
+    // Asked before the rows are cleared: see `applyGesture`.
+    const wasOnlyColumns = this.selection.rows.size === 0;
     this.selection.rows.clear();
-    this.lastCol = this.applyGesture(this.selection.cols, i, this.lastCol, e);
+    this.lastCol = this.applyGesture(this.selection.cols, i, this.lastCol, e, wasOnlyColumns);
     this.settle();
   }
 
   /** A row number: selects whole rows, across every column. */
   private clickRow(e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, i: number) {
+    // Asked before the columns are cleared: see `applyGesture`.
+    const wasOnlyRows = this.selection.cols.size === 0;
     this.selection.cols.clear();
-    this.lastRow = this.applyGesture(this.selection.rows, i, this.lastRow, e);
+    this.lastRow = this.applyGesture(this.selection.rows, i, this.lastRow, e, wasOnlyRows);
     this.settle();
   }
 

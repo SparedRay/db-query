@@ -105,7 +105,10 @@ const themeRules = {
     color: "var(--fg-dim)",
     border: "none",
   },
-  ".cm-activeLine": { backgroundColor: "var(--bg-row-hover)" },
+  // Translucent, and it must stay that way: the selection layer is painted
+  // *behind* the lines, so an opaque active line hides the selection on the one
+  // line a short selection is always on. See --editor-active-line.
+  ".cm-activeLine": { backgroundColor: "var(--editor-active-line)" },
   ".cm-activeLineGutter": { backgroundColor: "var(--chip-bg)" },
   // Selection, at the specificity CodeMirror's own base theme uses.
   //

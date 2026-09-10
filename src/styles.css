@@ -42,6 +42,18 @@
   /* The same, while the editor does NOT have focus: quieter, so it reads as
      "this was selected" rather than "this is". */
   --sel-editor-bg-blur: #273349;
+  /* The editor's active line, and the reason it is **translucent**.
+     CodeMirror paints the selection in a layer *behind* the lines, so any
+     opaque line background hides it — and `highlightActiveLine` marks the line
+     under the cursor head whether or not the selection is empty. So the one
+     line a short selection is always on was the one line that could not show
+     it: selecting a word looked like nothing happened, while selecting several
+     lines worked, because only the head line was covered.
+     CodeMirror's own defaults (#cceeff44 / #99eeff33) carry alpha for exactly
+     this reason. Composited over --bg this is #1b1e25 — the same --bg-row-hover
+     the grid uses, to the byte — so the active line is unchanged and the
+     selection now shows through it. */
+  --editor-active-line: rgba(105, 124, 162, 0.06);
   --danger: #ef4444;
   --danger-fg: #fca5a5;
   --warn: #f59e0b;
@@ -85,6 +97,8 @@
      on the screen it was chosen on is not contrast. */
   --sel-editor-bg: #8ab4f8;
   --sel-editor-bg-blur: #dde6f5;
+  /* Composites to #f3f5f8 over white — light's --bg-row-hover, to the byte. */
+  --editor-active-line: rgba(55, 88, 138, 0.06);
   --danger: #dc2626;
   --danger-fg: #b3261e;
   --warn: #b45309;
