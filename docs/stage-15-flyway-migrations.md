@@ -903,7 +903,9 @@ cannot be recovered from the text by anybody who is not Flyway.
 
 The flag is per connection, and **cleared only by a repair** — not by the
 render that follows the failed apply, which would take the button away in the
-same breath it appeared. An unrelated refusal ("Unable to connect") sets
+same breath it appeared. (Superseded in part by §16.2: the button is now always
+offered, and this flag decides emphasis rather than existence. The clearing
+rule is unchanged, and so is the reason for it.) An unrelated refusal ("Unable to connect") sets
 nothing: rewriting a schema history because a database was unreachable would
 be a real change made in answer to an imaginary problem.
 
@@ -912,3 +914,127 @@ one is never edited: apply three, edit one of them, and watch `info` carry on
 calling it `Success` while `migrate` refuses.
 
 **696 UI tests on both engines, 382 Rust, 11 live Flyway.**
+
+## 16. What the third hands-on pass found — 2026-09-16
+
+Phase 3 went out and was used. Four notes came back, and none of them was a
+defect: every one was the pane describing itself accurately and being read to
+mean something else.
+
+> *"Currently the category is labeled as Will not Run which is highly
+> misreading as failed. Probably we just will need 2 sections here: Executed
+> and Pendings … Also our text is showing where's the toml file but will be
+> ideal that it allow us to swap envs if we need and show exactly from where is
+> reading the migration files so we are aware."*
+
+### 16.1 The headings named the axis, not the pile
+
+The grouping axis is *what the next apply will do* — §12 argued for that and it
+is still right, because it is the question worth answering before pressing
+Apply. The mistake was putting the axis in the heading. "Will not run" over a
+list of successfully applied migrations reads as a verdict on them: as though
+they had been rejected, when most of them are simply done.
+
+`Pending` / `Executed` / `Failed` now. **Nothing moved between groups** — the
+same `Group` enum, the same rows, the same order; only the words changed, and a
+test asserts the applied migration is still under the heading an apply will not
+touch, so a future "fix" cannot quietly regroup them.
+
+"Executed" is the loosest of the three, deliberately. A `Skipped`, `Ignored` or
+`Missing` migration was never executed at all. But it is *settled*, and the
+only thing a heading has to answer is whether the pile below it is waiting for
+you; each row still carries Flyway's own word for itself, which is where the
+precision lives.
+
+### 16.2 Repair, on demand — a reversal
+
+§15 hid the Repair button unless something was `Failed`, reasoning that it
+rewrites a schema history and should not be a button somebody presses to see
+what it does.
+
+**That was backwards, and §15.4 contained the proof without noticing it.** Two
+of the three things repair fixes are invisible in this list: a checksum that
+drifted when a migration was edited after it ran, and an entry whose file has
+since been deleted. `info` reports both as `Success`. A button that appears
+only when the list looks wrong is therefore absent in exactly the cases the
+list cannot see — and §15.4's own fix, revealing it after a refused apply, only
+covered the one of those that someone happened to press Apply into.
+
+So it is always offered. What keeps it safe is the confirmation, which is where
+it always was — and there are now **two of them**, because repair does two
+different jobs and agreeing to one is not agreeing to the other:
+
+| | with something failed | with nothing failed |
+|---|---|---|
+| what it does | removes the failed entry | realigns drifted checksums |
+| the database | keeps every change the migration already made | untouched |
+| afterwards | the migration is pending, and runs again from the start | the migration stays applied **as it was first executed** |
+
+That last cell is the one worth the words. Realigning a checksum records the
+edit as though it had always been there; it never applies it. Somebody shown
+only the failed-entry wording would reasonably expect the opposite.
+
+Measured on 2026-09-16 against a copy of the fixture, V1–V3 applied and V2 then
+edited:
+
+```json
+{ "migrationsAligned": [ { "version": "2", "description": "seed widgets" } ],
+  "migrationsRemoved": [], "migrationsDeleted": [],
+  "repairActions": [ "Aligned applied migration checksums" ] }
+```
+
+```
+history:  2 | checksum 402850573 | installed_on 23:09:42 | execution_time 4
+          (installed_on and execution_time unchanged — nothing re-ran)
+info:     1 ✓  2 ✓  3 ✓  4 Pending      (the refusal is gone)
+```
+
+The live test now carries both halves: it captures V2's history row *before*
+the edit and compares it after the repair, so "nothing re-ran" is a comparison
+rather than an assumption, and it asserts the row is non-empty first so the
+comparison cannot pass as empty-against-empty.
+
+`suggestsRepair` survives the reversal with a smaller job. It no longer decides
+whether the button exists — it decides whether the button is *urging*
+(§15.4's "cleared only by a repair" still holds, for the same reason). It is
+the one moment the app knows, from Flyway itself, that a repair is the way out,
+and that is worth showing even when the button is already there.
+
+### 16.3 The environment was two clicks deep
+
+It was a caption; changing it meant "Change…" → "Change environment…". The
+environment decides which database every migration in the list would be applied
+to, and moving between a dev and a UAT one is what this pane gets used for
+most. It is now a button in the line that names it.
+
+**Same guard, same dialog.** The shortcut goes through `agreedOrOverridden`
+exactly as the menu route does — a faster way to change which database gets
+written to must not also be a way around the check that asks whether you meant
+it. There is a test for that specifically, because it is the kind of thing a
+shortcut quietly skips.
+
+### 16.4 Where the migrations actually come from
+
+The pane said which `flyway.toml` it was using, which answers a different
+question from the one being asked. Knowing the file is on a branch says nothing
+about which folder it points `locations` at — and that is what somebody is
+checking when a migration they just wrote is not in the list.
+
+There is now a second line for it, and it is **derived from the files Flyway
+reported, never from `locations`**. That setting is resolved against the
+working directory, can be a list, can name a classpath entry and can be
+overridden per environment; re-deriving it here would produce a path that is
+merely plausible, which is worse than none. Every migration carries the full
+path Flyway actually opened, so the folders are a fact. This is the same
+refusal `flyway.rs` has made since §10 — *"the folder is Flyway's business, not
+ours"* — finally being shown to the user rather than only honoured internally.
+
+A project whose migrations report no paths shows no line at all, rather than a
+label with nothing after it.
+
+### 16.5 Counts
+
+**708 UI tests on both engines, 381 Rust (1 ignored), 11 live Flyway.** All six new or
+changed behaviours were falsified before being believed: the headings, the
+button's presence, its emphasis, the two dialogs, the environment shortcut and
+the folder line each failed when the code behind them was reverted.

@@ -2887,27 +2887,45 @@ const migrationsOutOfOrder = new Map<string, boolean>();
  *
  * The case is a migration edited after it ran: `info` still reports it as
  * `Success`, so the list looks healthy, and the only sign is `migrate`
- * refusing with a checksum mismatch and saying to run repair. Without this the
- * app printed that instruction and offered no way to follow it.
+ * refusing with a checksum mismatch and saying to run repair.
+ *
+ * Repair is now offered whether or not this is set, so it no longer decides
+ * whether the button exists — it decides whether the button is *urging*,
+ * and what its tooltip says. That is still worth carrying: it is the one
+ * moment the app knows, from Flyway itself, that a repair is the way out.
  *
  * Set from Flyway's own words (decided in Rust, not matched here) and cleared
- * only by a repair — not by the render that follows the failed apply, which
- * would take the button away again in the same breath.
+ * only by a repair — not by the render that follows the refused apply,
+ * which would undo the emphasis in the same breath it appeared.
  */
 const migrationsRepairAsked = new Set<string>();
 
-/** What each group is called, and why it is a group. */
+/**
+ * What each group is called.
+ *
+ * **Named for what happened, not for what an apply would do about it.** The
+ * grouping axis is still the second one \u2014 that is the question worth
+ * answering before applying \u2014 but the first pass put the axis in the
+ * heading, and "Will not run" over a pile of applied migrations read as a
+ * verdict: as though they had been rejected, when most of them are simply
+ * done. Only the words changed here; nothing moved between groups.
+ *
+ * "Executed" is the loosest of the three, deliberately. A `Skipped`, `Ignored`
+ * or `Missing` migration was never executed at all \u2014 but it is settled,
+ * and the only thing a heading has to answer is whether the pile below it is
+ * waiting for you. Each row still carries Flyway's own word for itself.
+ */
 const GROUP_LABELS: Record<FlywayGroup, { title: string; hint: string }> = {
-  pending: { title: "Will run", hint: "Flyway will apply these, in this order." },
+  pending: { title: "Pending", hint: "Flyway will apply these, in this order." },
   failed: {
     title: "Failed",
     hint: "This blocks every other migration until it is repaired.",
   },
   done: {
-    title: "Will not run",
+    title: "Executed",
     hint:
-      "Applied, skipped, superseded or baselined \u2014 whatever the reason, an " +
-      "apply will not touch these.",
+      "Applied \u2014 or settled some other way: skipped, superseded, baselined. " +
+      "An apply will not run these. Each row shows Flyway's own word for it.",
   },
 };
 
@@ -2961,6 +2979,7 @@ async function renderMigrations() {
       return migrationsMessage("This project has no migrations.");
     }
     renderMigrationGroups(list);
+    showMigrationSource(list);
     syncApplyButton(active.profile.readOnly ?? false, list);
   } catch (err) {
     // Flyway's own words. It explains itself well, and paraphrasing would
@@ -2997,19 +3016,36 @@ function showFlywayProject(
   change.title = "Change the project file or the environment, or detach it";
   change.onclick = () => void changeFlywayProject(project);
 
-  const where = elem("div", "mig-proj-where", `${file} in ${folder || "\u2014"}`);
+  const where = elem("div", "mig-proj-where", `Config \u00b7 ${file} in ${folder || "\u2014"}`);
   where.title = path;
 
+  // Filled in by `showMigrationSource` once Flyway has answered, because the
+  // answer is the only honest source for it. Hidden until then rather than
+  // showing a guess.
+  const from = elem("div", "mig-proj-from");
+  from.hidden = true;
+
+  // The environment is a button, not a caption. It decides which database
+  // every migration in this list would be applied to, and moving between a dev
+  // and a UAT one is what this pane gets used for most \u2014 it should not be
+  // two clicks deep inside "Change\u2026", which is where it was.
   const env = elem("div", "mig-proj-env");
-  env.append(
-    document.createTextNode("Environment "),
-    Object.assign(document.createElement("b"), { textContent: environment }),
-  );
+  env.append(document.createTextNode("Environment "));
+  if (project) {
+    const swap = elem("button", "mig-proj-swap", environment) as HTMLButtonElement;
+    swap.title = "Switch this connection to another environment in this project";
+    swap.onclick = () => void changeFlywayEnvironment(project);
+    env.append(swap);
+  } else {
+    // The project file could not be read, so there is no list of environments
+    // to choose from. Name the one we are on anyway.
+    env.append(Object.assign(document.createElement("b"), { textContent: environment }));
+  }
 
   const top = elem("div", "mig-proj-top");
   top.append(name, change);
 
-  els.migEnv.replaceChildren(top, where, env);
+  els.migEnv.replaceChildren(top, where, from, env);
 
   // Out-of-order changes which migrations Flyway will run, so it belongs where
   // the list is — toggling it re-asks and the answer visibly changes, rather
@@ -3031,6 +3067,42 @@ function showFlywayProject(
     label.append(box, document.createTextNode("Out of order"));
     els.migEnv.append(label);
   }
+}
+
+/**
+ * Where the migrations are actually being read from.
+ *
+ * **Taken from the files Flyway reported, never from `locations`.** That
+ * setting can be relative to the working directory, can be a list, can name a
+ * classpath entry and can be overridden per environment; re-implementing its
+ * resolution would produce a path that is merely plausible, which is worse
+ * than none at all. Every migration in the list carries the full path Flyway
+ * actually read, so the folders are a fact rather than a reconstruction \u2014
+ * the same reason `flyway.rs` refuses to parse `locations` at all.
+ */
+function showMigrationSource(list: FlywayMigration[]) {
+  const el = els.migEnv.querySelector(".mig-proj-from") as HTMLElement | null;
+  if (!el) return;
+  const folders = [
+    ...new Set(
+      list
+        .map((m) => m.filepath)
+        .filter((p): p is string => !!p)
+        .map((p) => {
+          const cut = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+          return cut > 0 ? p.slice(0, cut) : p;
+        }),
+    ),
+  ];
+  // A repeatable-only project, or a Flyway that reported no paths: say nothing
+  // rather than "Migrations \u00b7".
+  el.hidden = folders.length === 0;
+  if (!folders.length) return;
+  el.textContent = `Migrations \u00b7 ${folders.join("  \u00b7  ")}`;
+  el.title =
+    folders.length === 1
+      ? `Flyway is reading migrations from ${folders[0]}`
+      : `Flyway is reading migrations from:\n${folders.join("\n")}`;
 }
 
 /** Offer the three things that can be done to an attached project. */
@@ -3168,18 +3240,33 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
   const pending = list.filter((m) => m.group === "pending");
   const failed = list.filter((m) => m.group === "failed");
 
-  // Repair appears only when there is something to repair. It is not a
-  // maintenance button somebody might press to see what it does: it rewrites
-  // the schema history, and offering it against a healthy one invites exactly
-  // that.
+  // **Repair is always offered.** It used to appear only when something was
+  // `Failed`, on the reasoning that it rewrites the schema history and should
+  // not be a button somebody presses to see what it does. That reasoning was
+  // backwards: two of the three things repair fixes are invisible in this
+  // list. A checksum that drifted when a migration was edited after it ran is
+  // reported by `info` as `Success`, and so is an entry whose file has since
+  // been deleted. A button that appears only when the list looks wrong is
+  // missing in exactly the cases the list cannot see.
+  //
+  // What keeps it safe is the confirmation, not the hiding: it names what will
+  // be rewritten and what will not be undone, and it differs between the two
+  // situations.
   const asked = migrationsRepairAsked.has(conns?.active()?.profile.id ?? "");
-  els.btnMigRepair.hidden = failed.length === 0 && !asked;
+  els.btnMigRepair.hidden = false;
   els.btnMigRepair.disabled = readOnly;
+  // Available always, urged only when something has actually asked for it \u2014
+  // a failure blocking the list, or Flyway's own instruction after it refused
+  // an apply.
+  els.btnMigRepair.classList.toggle("urge", !readOnly && (failed.length > 0 || asked));
   els.btnMigRepair.title = readOnly
     ? "This connection is marked read-only. Editing the schema history is a write."
     : failed.length
       ? `Clear the failed entry for ${failed.map((m) => m.version ?? "?").join(", ")}`
-      : "Flyway asked for a repair when the last apply was refused.";
+      : asked
+        ? "Flyway asked for a repair when the last apply was refused."
+        : "Make the schema history agree with the migration files \u2014 after one " +
+          "was edited, deleted, or failed.";
 
   els.btnMigApply.hidden = false;
   els.btnMigApply.textContent = pending.length
@@ -3273,6 +3360,14 @@ async function applyMigrations() {
  *
  * So the dialog says three things, in this order: what it removes, what it
  * does **not** undo, and what happens next.
+ *
+ * **Two situations, two dialogs**, because repair does two different jobs and
+ * agreeing to one is not agreeing to the other. With something failed it
+ * clears that entry and the migration becomes pending again. With nothing
+ * failed it realigns checksums — which leaves an edited migration applied
+ * in its *original* form while the history now claims the edited file ran.
+ * Somebody told only the first sentence would reasonably expect the edit to
+ * have been applied.
  */
 async function repairMigrations() {
   const active = conns?.active();
@@ -3283,20 +3378,36 @@ async function repairMigrations() {
     .catch(() => null);
   if (!list) return void renderMigrations();
   const failed = list.filter((m) => m.group === "failed");
-  if (!failed.length) return void renderMigrations();
 
   const named = failed
     .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
     .join("\n");
   const go = await choose(
     `Repair the schema history of "${active.profile.flywayEnvironment}"?`,
-    `Flyway will remove the failed entry from this environment's schema ` +
-      `history:\n\n${named}\n\n` +
-      "It does not undo anything the migration already did. If it ran some of " +
-      "its statements before it failed, those changes are still in the " +
-      "database \u2014 check them yourself first.\n\n" +
-      "Afterwards the migration counts as pending again, and the next apply " +
-      "will run it from the start.",
+    failed.length
+      ? `Flyway will remove the failed entry from this environment's schema ` +
+        `history:\n\n${named}\n\n` +
+        "It does not undo anything the migration already did. If it ran some of " +
+        "its statements before it failed, those changes are still in the " +
+        "database \u2014 check them yourself first.\n\n" +
+        "Afterwards the migration counts as pending again, and the next apply " +
+        "will run it from the start."
+      : // Nothing is failed, so this is repair's other half \u2014 the half that
+        // answers a checksum mismatch. Measured against Flyway 13.5.0 on
+        // 2026-09-16: it reported `Aligned applied migration checksums`, and
+        // the history row kept its original `installed_on` and
+        // `execution_time`. Only the checksum column was rewritten; nothing
+        // re-ran.
+        "Nothing here is failed, so this is repair's other half: making the " +
+        "schema history agree with the migration files as they are now.\n\n" +
+        "Flyway will realign the checksum of any migration whose file was " +
+        "edited after it ran, and mark as deleted any entry whose file is " +
+        "gone.\n\n" +
+        "It does not run, re-run or undo anything, and it does not touch your " +
+        "tables. An edited migration stays applied exactly as it was first " +
+        "executed \u2014 the edit is recorded as though it had always been " +
+        "there, not applied to the database.\n\n" +
+        "You will be told what it changed.",
     [
       { value: "cancel", label: "Cancel", primary: true },
       { value: "go", label: `Repair ${active.profile.flywayEnvironment}`, danger: true },
