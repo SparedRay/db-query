@@ -370,7 +370,7 @@ async fn repairing_a_healthy_history_reports_that_it_did_nothing() {
 /// Runs against a **copy** of the fixture, so the real one is never edited.
 #[tokio::test]
 #[ignore]
-async fn a_migration_edited_after_it_ran_is_still_reported_as_success() {
+async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out() {
     use std::fs;
 
     reset("flyway_qa");
@@ -405,6 +405,17 @@ async fn a_migration_edited_after_it_ran_is_still_reported_as_success() {
     .expect("flyway ran");
     assert!(first.ok(), "{}", first.stderr);
 
+    let before_v2 = sql(
+        "flyway_qa",
+        "SELECT version, installed_on, execution_time FROM flyway_schema_history \
+         WHERE version = '2';",
+    );
+
+    assert!(
+        before_v2.contains('2'),
+        "the comparison below would be empty against empty: {before_v2}"
+    );
+
     // Edit one of them, the way somebody does when they "just fix a typo".
     let v2 = copy.join("migrations/V2__seed_widgets.sql");
     let mut text = fs::read_to_string(&v2).unwrap();
@@ -438,6 +449,52 @@ async fn a_migration_edited_after_it_ran_is_still_reported_as_success() {
     assert_eq!(c.code.as_deref(), Some("VALIDATE_ERROR"));
     assert!(c.message.contains("checksum mismatch"), "{}", c.message);
     assert!(c.suggests_repair(), "{}", c.message);
+
+    // **And repair is the way out, which is the other half of the claim.**
+    // Measured against Flyway 13.5.0 on 2026-09-16: `repairActions` came back
+    // as "Aligned applied migration checksums", and nothing was removed
+    // — there was nothing failed to remove.
+    let fixed = flywaycli::run(&program(), &toml, "qa", "repair", vec![])
+        .await
+        .expect("flyway ran");
+    assert!(fixed.ok(), "{}", fixed.stderr);
+    let r = flywaycli::repaired(&fixed.stdout).unwrap();
+    assert_eq!(r.aligned.len(), 1, "{r:?}");
+    assert_eq!(r.aligned[0].version.as_deref(), Some("2"));
+    assert!(
+        r.removed.is_empty(),
+        "nothing failed, so nothing is removed"
+    );
+    assert!(r.deleted.is_empty(), "the file is still there");
+
+    // **Nothing re-ran.** V2 keeps the timestamp and the execution time it was
+    // first applied with: only its checksum column was rewritten. This is what
+    // the confirmation means by "the edit is recorded as though it had always
+    // been there, not applied to the database" — and it is the part somebody
+    // pressing Repair is most likely to misread.
+    let rows = sql(
+        "flyway_qa",
+        "SELECT version, installed_on, execution_time FROM flyway_schema_history \
+         WHERE version = '2';",
+    );
+    assert_eq!(rows.trim(), before_v2.trim(), "V2 was re-run: {rows}");
+
+    // And the apply that was refused now goes ahead.
+    let after = flywaycli::run(
+        &program(),
+        &toml,
+        "qa",
+        "migrate",
+        vec!["-target=3".to_string()],
+    )
+    .await
+    .expect("flyway ran");
+    assert!(after.ok(), "{}", after.stderr);
+    assert!(
+        flywaycli::complaint(&after.stdout).is_none(),
+        "still refused: {}",
+        after.stdout
+    );
 
     let _ = fs::remove_dir_all(&copy);
 }

@@ -303,10 +303,19 @@ body {
   flex: 1; min-width: 0; font-weight: 600; color: var(--fg);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.mig-proj-where, .mig-proj-env {
+.mig-proj-where, .mig-proj-from, .mig-proj-env {
   margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.mig-proj-where { font-family: var(--mono); font-size: 10.5px; }
+.mig-proj-where, .mig-proj-from { font-family: var(--mono); font-size: 10.5px; }
+/* The environment is a button, because moving between dev and UAT is what this
+   pane gets used for most. Underlined rather than boxed, so the line still
+   reads as a sentence instead of growing a second control next to Change. */
+.mig-proj-swap {
+  padding: 0; border: none; background: none; cursor: pointer;
+  font: inherit; font-weight: 600; color: var(--fg);
+  border-bottom: 1px dashed var(--border);
+}
+.mig-proj-swap:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .mig-ooo {
   display: flex; align-items: center; gap: 6px;
   margin-top: 6px; cursor: pointer; user-select: none;
@@ -404,6 +413,9 @@ button.mini {
 button.mini:hover:not(:disabled) { background: var(--btn-bg-hover); }
 button.mini:disabled { opacity: .45; cursor: default; }
 button.mini.danger { border-color: var(--danger); color: var(--danger-fg); }
+/* Available always, urged only when something asked for it — a failed
+   migration, or Flyway's own instruction after it refused an apply. */
+button.mini.urge { border-color: var(--warn-fg); color: var(--warn-fg); }
 kbd { font: 10px var(--mono); color: var(--fg-dim); margin-left: 4px; }
 
 input.num {

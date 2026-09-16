@@ -194,12 +194,19 @@ test("the list shows Flyway's own states, and which environment it is", async ({
   await expect(page.locator(".mig")).toHaveCount(3);
   await expect(page.locator('.mig[data-state="failed"] .d')).toHaveText("deliberately broken");
   await expect(page.locator('.mig[data-state="pending"] .d')).toHaveText("add colour");
-  // Grouped by what an apply would do, not by what has happened.
+  // Grouped by what an apply would do; *named* for what has happened. The
+  // headings used to be "Will run" / "Will not run", which read as a verdict:
+  // an applied migration under "Will not run" looked rejected.
   await expect(page.locator('.mig-group[data-group="pending"] .mig-group-title')).toHaveText(
-    "Will run",
+    "Pending",
   );
   await expect(page.locator('.mig-group[data-group="done"] .mig-group-title')).toHaveText(
-    "Will not run",
+    "Executed",
+  );
+  // The grouping itself did not move: the applied one is still under the
+  // heading an apply will not touch.
+  await expect(page.locator('.mig-group[data-group="done"] .mig .d')).toHaveText(
+    "create widgets",
   );
   // §3.5's second half: the environment is never out of sight, because a guard
   // can only compare what differs.
@@ -325,6 +332,81 @@ test("the pane says which project file and folder it is using", async ({ page })
   await expect(page.locator(".mig-proj-where")).toContainText("flyway.toml");
   await expect(page.locator(".mig-proj-where")).toContainText("/p");
   await expect(page.locator(".mig-proj-name")).toHaveAttribute("title", "/p/flyway.toml");
+});
+
+/**
+ * **Where the migrations come from, which the config line does not answer.**
+ * Knowing the `flyway.toml` is on a branch says nothing about which folder it
+ * points `locations` at, and that is the thing somebody is checking when they
+ * wonder why a migration they just wrote is not listed.
+ *
+ * Taken from the files Flyway reported, never from `locations`: that setting
+ * is relative, can be a list, can name a classpath entry and can be overridden
+ * per environment, so re-deriving it would produce a plausible path rather
+ * than a true one.
+ */
+test("the pane says which folder the migrations were actually read from", async ({ page }) => {
+  await attach(page);
+  await expect(page.locator(".mig-proj-from")).toContainText("/p");
+  await expect(page.locator(".mig-proj-from")).toHaveAttribute(
+    "title",
+    /reading migrations from/,
+  );
+});
+
+test("several folders are all named, and none is invented", async ({ page }) => {
+  await attach(page, {
+    flyway_info: () => [
+      { ...MIGRATIONS[0], filepath: "/repo/sql/common/V1__create_widgets.sql" },
+      { ...MIGRATIONS[1], filepath: "/repo/sql/uat/V2__add_colour.sql" },
+    ],
+  });
+  const from = page.locator(".mig-proj-from");
+  await expect(from).toContainText("/repo/sql/common");
+  await expect(from).toContainText("/repo/sql/uat");
+});
+
+/** No paths to derive one from, so it says nothing rather than guessing. */
+test("a list with no file paths leaves the folder line out", async ({ page }) => {
+  await attach(page, {
+    // The pending one, because the executed group starts collapsed and
+    // `attach` waits for a visible row.
+    flyway_info: () => [{ ...MIGRATIONS[1], filepath: null }],
+  });
+  await expect(page.locator(".mig-proj-from")).toBeHidden();
+});
+
+/**
+ * The environment decides which database every migration here would be applied
+ * to, and moving between a dev and a UAT one is what this pane gets used for
+ * most — it was two clicks deep inside "Change\u2026", where nobody found it.
+ */
+test("the environment can be swapped from the line that names it", async ({ page }) => {
+  await attach(page);
+  await expect(page.locator(".mig-proj-swap")).toHaveText("uat");
+
+  await page.click(".mig-proj-swap");
+  await page.locator('dialog.ask button:has-text("Development database")').click();
+
+  await expect.poll(async () => (await attachments(page)).length).toBe(2);
+  expect((await attachments(page))[1].env).toBe("development");
+});
+
+/**
+ * Same switch, same guard. The shortcut must not become the way around the
+ * check that stops somebody watching one database while changing another.
+ */
+test("swapping from that line goes through the guard too", async ({ page }) => {
+  let asked = 0;
+  await attach(page, { flyway_check: () => (asked++ === 0 ? [] : ["host"]) });
+
+  await page.click(".mig-proj-swap");
+  await page.locator('dialog.ask button:has-text("Development database")').click();
+
+  await expect(page.locator("dialog.ask")).toContainText("points somewhere else");
+  await page.locator('dialog.ask button:has-text("Cancel")').click();
+  expect(await attachments(page)).toHaveLength(1);
+  expect((await attachments(page))[0].env).toBe("uat");
 });
 
 test("the environment can be changed, and goes through the same guard", async ({ page }) => {
@@ -500,25 +582,73 @@ test("out of order belongs to the connection, not to the window", async ({ page 
 // ------------------------------------------------------------- repairing
 
 /**
- * Repair rewrites the schema history. It is not a maintenance button somebody
- * might press to see what it does, so it is not there unless there is
- * something to repair.
+ * Repair rewrites the schema history, so the first pass hid the button unless
+ * something was `Failed`: not a maintenance button somebody might press to see
+ * what it does.
+ *
+ * That was backwards. Two of the three things repair fixes — a checksum that
+ * drifted when a migration was edited after it ran, an entry whose file has
+ * since been deleted — are reported by `info` as `Success`, so the button
+ * was absent in exactly the cases this list cannot see. It is now always
+ * offered, and *urged* only when something has asked for it.
  */
-test("Repair is offered only while something has failed", async ({ page }) => {
+test("Repair is always offered, and urged while something has failed", async ({ page }) => {
   // Failed to begin with, healthy once the list is asked again — which is what
-  // a successful repair looks like from here, and proves the button tracks the
-  // list rather than being decided once.
+  // a successful repair looks like from here, and proves the emphasis tracks
+  // the list rather than being decided once.
   let asked = 0;
   await attach(page, {
     flyway_info: () => (asked++ === 0 ? MIGRATIONS : [MIGRATIONS[0], MIGRATIONS[1]]),
   });
   await expect(page.locator("#btn-mig-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-repair")).toHaveClass(/urge/);
 
   await page.click("#btn-mig-refresh");
   await expect(page.locator('.mig[data-state="failed"]')).toHaveCount(0);
-  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+  // Still offered: this is precisely what a checksum mismatch looks like from
+  // here, and there would otherwise be no way to act on one.
+  await expect(page.locator("#btn-mig-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
   // And Apply becomes possible again, which is the point of having repaired.
   await expect(page.locator("#btn-mig-apply")).toBeEnabled();
+});
+
+/**
+ * **Repair does two different jobs, and agreeing to one is not agreeing to the
+ * other.** With nothing failed there is no entry to remove: it realigns the
+ * checksum of a migration whose file was edited after it ran, which leaves the
+ * database holding the *original* version while the history claims the edited
+ * one ran. Somebody shown only the failed-entry wording would reasonably
+ * expect their edit to have been applied.
+ *
+ * Measured against Flyway 13.5.0 on 2026-09-16: `repairActions` came back as
+ * `Aligned applied migration checksums`, and the history row kept its original
+ * `installed_on` and `execution_time` — only the checksum column was
+ * rewritten.
+ */
+test("repairing with nothing failed says what realigning a checksum means", async ({ page }) => {
+  await attach(page, {
+    flyway_info: () => [MIGRATIONS[0], MIGRATIONS[1]],
+    flyway_repair: () => ({
+      actions: ["Aligned applied migration checksums"],
+      removed: [],
+      deleted: [],
+      aligned: [{ version: "1", description: "create widgets" }],
+    }),
+  });
+
+  await page.click("#btn-mig-repair");
+  const ask = page.locator("dialog.ask");
+  // Not the failed-entry wording, which would be a lie here.
+  await expect(ask).not.toContainText("remove the failed entry");
+  await expect(ask).toContainText("realign the checksum");
+  // The part that is easy to misread, said out loud.
+  await expect(ask).toContainText("does not run, re-run or undo anything");
+  await expect(ask).toContainText("as it was first executed");
+
+  await ask.locator('button:has-text("Repair uat")').click();
+  await expect(page.locator("#grid .empty")).toContainText("Aligned applied migration checksums");
+  await expect(page.locator("#grid .empty")).toContainText("V1");
 });
 
 /**
@@ -597,6 +727,9 @@ test("a read-only connection cannot repair either", async ({ page }) => {
   await expect(page.locator("#btn-mig-repair")).toBeVisible();
   await expect(page.locator("#btn-mig-repair")).toBeDisabled();
   await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /read-only/);
+  // Not urged either: there is a failed migration here, but nothing this
+  // connection is allowed to do about it.
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
 });
 
 test("a refused repair shows Flyway's own message", async ({ page }) => {
@@ -616,12 +749,13 @@ test("a refused repair shows Flyway's own message", async ({ page }) => {
  * **The dead end this closes.** A migration edited after it ran is still
  * reported by `info` as `Success`, so the list looks entirely healthy and
  * nothing is failed. Apply is offered, Flyway refuses it with a checksum
- * mismatch and says to run repair — and until this, there was no Repair button
- * anywhere to follow that instruction with.
+ * mismatch and says to run repair. Repair is offered here whatever the list
+ * says, so the button exists; this is about pushing it forward at the one
+ * moment Flyway itself has named it as the way out.
  *
  * Measured against Flyway 13.5.0 on 2026-09-16; the message below is its own.
  */
-test("Repair appears when Flyway asks for one, even with nothing failed", async ({ page }) => {
+test("Repair is urged when Flyway asks for one, even with nothing failed", async ({ page }) => {
   const HEALTHY = [MIGRATIONS[0], MIGRATIONS[1]]; // done + pending, nothing failed
   await attach(page, {
     flyway_info: () => HEALTHY,
@@ -636,14 +770,15 @@ test("Repair appears when Flyway asks for one, even with nothing failed", async 
     },
   });
 
-  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
   await page.click("#btn-mig-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  // Flyway's own words, and then a way to act on them.
+  // Flyway's own words, and the button that follows them pushed forward.
   await expect(page.locator("#grid .empty")).toContainText("checksum mismatch");
-  await expect(page.locator("#btn-mig-repair")).toBeVisible();
   await expect(page.locator("#btn-mig-repair")).toBeEnabled();
+  await expect(page.locator("#btn-mig-repair")).toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /asked for a repair/);
 });
 
 /**
@@ -666,5 +801,5 @@ test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("Unable to connect");
-  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
 });
