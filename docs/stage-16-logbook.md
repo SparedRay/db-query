@@ -211,7 +211,37 @@ until a profile is saved. So the log would have failed silently for exactly
 the person most likely to need it: somebody whose very first attempt at
 something did not work. `open_in` creates the directory.
 
-### 7.5 What it does not cover
+### 7.5 Two tests that only ran on Linux — caught by Windows CI
+
+Both Windows failures were tests, not product. Both are worth recording,
+because one of them was passing here for a reason that had nothing to do with
+what it claimed.
+
+**The easy one.** `directories_are_exhausted_one_at_a_time` compared
+`p.display().to_string()` against a hand-typed `"a/flyway.cmd"`. A candidate is
+a *path*, and its separator belongs to the platform — so the assertion tested
+this file's spelling rather than the rule, and Windows correctly produced
+`a\flyway.cmd`. Candidates are now built with `join` on both sides.
+
+**The one worth thinking about.** `an_unwritable_file_is_counted_not_raised`
+pointed `open_in` at `/definitely/not/a/directory/that/exists`. That premise
+stopped being true the moment §7.4 taught `open_in` to create its directory —
+and the test kept passing here anyway, because nobody may `mkdir` in `/`. It
+was asserting a fact about root permissions on Linux, not about this code. On
+Windows the same string is drive-relative, the directory was created happily,
+the write succeeded, and the test failed — after littering `C:\`.
+
+So the obstacle is now **a regular file where a directory has to go**, which
+cannot be a directory on any platform and stays inside the temporary
+directory. Verified the way every test here is: by removing the counting in
+`append` and watching it fail.
+
+The general lesson is not "be careful with paths". It is that **a change can
+invalidate a test's premise while leaving it green**, and that the platform a
+test is written on decides which of those it gets away with. Nothing here
+tests the Windows rules on Windows except CI, which is exactly what CI caught.
+
+### 7.6 What it does not cover
 
 The batch flush is 200ms, so a hard crash can lose up to that much. Errors
 flush immediately, which is the cheap mitigation and not a complete one.

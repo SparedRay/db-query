@@ -620,15 +620,32 @@ mod tests {
     }
 
     /// A log that cannot be written must not be able to stop anything.
+    ///
+    /// **The obstacle is a file where a directory has to go.** This once used
+    /// an absurd absolute path, `/definitely/not/a/directory/that/exists`,
+    /// which stopped meaning anything the moment `open_in` learned to create
+    /// its directory: on Linux the test kept passing because nobody may
+    /// `mkdir` in `/`, which is a fact about root permissions and not about
+    /// this code. On Windows the same path is drive-relative, the directory
+    /// was created happily, the write succeeded — and the test failed while
+    /// littering `C:\` on the way.
+    ///
+    /// A regular file cannot be a directory on any platform, so this obstacle
+    /// is the same everywhere, and it stays inside the temporary directory.
     #[test]
     fn an_unwritable_file_is_counted_not_raised() {
+        let blocker = tmp("blocked").join("in-the-way");
+        fs::write(&blocker, b"not a directory").unwrap();
+
         let mut b = Logbook::new();
-        b.open_in(Path::new("/definitely/not/a/directory/that/exists"));
+        b.open_in(&blocker);
         b.note(Level::Info, "app", "still fine");
 
-        assert_eq!(b.write_failures, 1);
+        assert_eq!(b.write_failures, 1, "the write failed and was counted");
         // And the entry is still in memory, which is where the button reads.
         assert_eq!(b.len(), 1);
         assert!(b.lines()[0].ends_with("still fine"));
+        // The obstacle is untouched: nothing clobbered it trying to get past.
+        assert_eq!(fs::read_to_string(&blocker).unwrap(), "not a directory");
     }
 }
