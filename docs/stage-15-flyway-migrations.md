@@ -155,7 +155,7 @@ works. We read the environment table, `[flyway] environment`, and
 - [x] **F5 — Apply works, and is deliberate.** Pending migrations apply through
       `flyway migrate`; the confirmation names the versions; out-of-order is a
       choice made at apply time, defaulted from the file.
-- [ ] **F6 — Repair works on a genuinely failed migration**, and a failure
+- [x] **F6 — Repair works on a genuinely failed migration**, and a failure
       shows Flyway's own words.
 - [x] **F7 — Read-only refuses.** A connection marked read-only offers neither
       apply nor repair.
@@ -183,8 +183,8 @@ works. We read the environment table, `[flyway] environment`, and
 - [x] Read-only refuses
 
 ### Phase 3 — Repair
-- [ ] `repair`, behind a stronger confirmation
-- [ ] Flyway's own error text, verbatim
+- [x] `repair`, behind a stronger confirmation
+- [x] Flyway's own error text, verbatim
 
 ## 7. The fixture, and why it is not a container
 
@@ -756,3 +756,113 @@ line, the SQL state on the next and the database error after that, and
 collapsing that into a paragraph loses the shape that makes it readable.
 
 **680 UI tests on both engines, 376 Rust, 8 live Flyway.**
+
+## 15. Phase 3: repair — 2026-09-16
+
+### 15.1 What repair actually does, measured
+
+Everything below was read off Flyway 13.5.0 against the fixture on 2026-09-16,
+not from the documentation. Starting from a history with V1–V3 applied and V4
+failed:
+
+```json
+{ "migrationsRemoved": [ { "version": "4", "description": "deliberately broken" } ],
+  "migrationsDeleted": [], "migrationsAligned": [],
+  "repairActions": [ "Removed failed migrations" ] }
+```
+
+Exit 0, no `error` key. And afterwards:
+
+```
+history:  1 ✓   2 ✓   3 ✓          (the failed row is gone)
+widgets:  id, name, made_on, colour (unchanged)
+info:     4 | Pending
+```
+
+**Three lists, not a count.** `removed`, `deleted` and `aligned` are three
+different things happening to a schema history, and `aligned` in particular is
+a different problem wearing the same button: it rewrites checksums to match
+migrations that were *edited after they ran*.
+
+A repair with nothing to repair is a success with every list empty and
+`repairActions: []`. That is why `Repaired::is_empty` exists — reporting it as
+"repaired" would tell somebody their problem was fixed when nothing was
+touched. The UI says *"Flyway found nothing to repair"* instead, and the test
+for it fails with the message that would otherwise have shipped: `Repaired: .
+The database itself is unchanged.`
+
+### 15.2 The confirmation is the feature
+
+`repair` sounds like it fixes the database. **It does not**, and the gap between
+those two is the entire risk in this phase. Flyway's own refusal says so —
+*"Please remove any half-completed changes then run repair to fix the schema
+history"* — and that instruction is worthless to somebody who thinks repair is
+what removes them.
+
+MySQL has no transactional DDL, so a migration that ran three of its five
+statements before failing really did run three of them. Clear the history row,
+apply again, and Flyway runs that migration from the first statement, on a
+database where the first three have already happened.
+
+So the dialog says three things in this order: **what it removes**, **what it
+does not undo**, and **what happens next**.
+
+> Flyway will remove the failed entry from this environment's schema history:
+>
+> **V4 deliberately broken**
+>
+> It does not undo anything the migration already did. If it ran some of its
+> statements before it failed, those changes are still in the database — check
+> them yourself first.
+>
+> Afterwards the migration counts as pending again, and the next apply will run
+> it from the start.
+
+Cancel is the default button. "Repair uat" names the environment, like Apply
+does.
+
+### 15.3 Proved where it counts
+
+The claim the dialog stakes itself on is *"it does not undo anything"*, so the
+live test proves that with `SHOW COLUMNS` rather than with Flyway's own report
+of itself:
+
+```rust
+assert_eq!(
+    sql("flyway_qa", "SHOW COLUMNS FROM widgets;"),
+    before,
+    "repair must not have altered the table"
+);
+```
+
+— and that the failed row is gone, the successful ones are not, and V4 is back
+in the `Pending` group where the next apply will find it.
+
+### 15.4 The button, and F7's other half
+
+Repair is **hidden unless something has failed**. It is not a maintenance
+button somebody might press to see what it does; offering it against a healthy
+history invites exactly that. The test proves it tracks the list rather than
+being decided once: failed to begin with, hidden after the list comes back
+clean — and Apply enabled at the same moment, which is the point of having
+repaired.
+
+**F7 was marked done a phase early.** The milestone says a read-only connection
+offers *neither* apply nor repair, and Phase 2 only did the first half. Both
+now go through one guard, `flyway::write_refusal`, which takes a `Write::Apply`
+or `Write::Repair` and says which was refused — a connection that will not
+repair should not be told migrations will not be applied, which is not what it
+was asked to do.
+
+The environment re-check applies to repair too. It writes less than an apply
+does — one table rather than a schema — but it writes to the *wrong* database
+just as easily.
+
+### 15.5 One shared preamble
+
+`flyway_target` loads the profile, its project path and environment, and parses
+the TOML **as it reads now**. Apply and repair both start with it, so the
+"re-read rather than remember" rule cannot hold in one command and lapse in the
+other.
+
+**692 UI tests on both engines, 380 Rust, 10 live Flyway.**

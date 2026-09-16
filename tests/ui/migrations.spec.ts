@@ -72,6 +72,12 @@ function attached(extra: Record<string, unknown> = {}) {
     flyway_pick_project: () => "/p/flyway.toml",
     flyway_check: () => [],
     flyway_migrate: () => ({ executed: 1, target: "2" }),
+    flyway_repair: () => ({
+      actions: ["Removed failed migrations"],
+      removed: [{ version: "3", description: "deliberately broken" }],
+      deleted: [],
+      aligned: [],
+    }),
     ...extra,
   };
 }
@@ -489,4 +495,119 @@ test("out of order belongs to the connection, not to the window", async ({ page 
     .filter((c) => c.cmd === "flyway_info")
     .map((c) => c.args.outOfOrder);
   expect(flags[flags.length - 1]).toBe(false);
+});
+
+// ------------------------------------------------------------- repairing
+
+/**
+ * Repair rewrites the schema history. It is not a maintenance button somebody
+ * might press to see what it does, so it is not there unless there is
+ * something to repair.
+ */
+test("Repair is offered only while something has failed", async ({ page }) => {
+  // Failed to begin with, healthy once the list is asked again — which is what
+  // a successful repair looks like from here, and proves the button tracks the
+  // list rather than being decided once.
+  let asked = 0;
+  await attach(page, {
+    flyway_info: () => (asked++ === 0 ? MIGRATIONS : [MIGRATIONS[0], MIGRATIONS[1]]),
+  });
+  await expect(page.locator("#btn-mig-repair")).toBeVisible();
+
+  await page.click("#btn-mig-refresh");
+  await expect(page.locator('.mig[data-state="failed"]')).toHaveCount(0);
+  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+  // And Apply becomes possible again, which is the point of having repaired.
+  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
+});
+
+/**
+ * **The confirmation is the feature.** "Repair" sounds like it fixes the
+ * database, and it does not — it removes a row from the schema history and
+ * leaves every change that migration made in place. Somebody who misreads that
+ * will apply again on top of a half-applied migration.
+ */
+test("the repair confirmation says what it does not undo", async ({ page }) => {
+  await attach(page);
+  await page.click("#btn-mig-repair");
+
+  const ask = page.locator("dialog.ask");
+  await expect(ask).toContainText("uat");
+  // Which entry, by version and description.
+  await expect(ask).toContainText("V3");
+  await expect(ask).toContainText("deliberately broken");
+  // What it does not do.
+  await expect(ask).toContainText("does not undo");
+  await expect(ask).toContainText("still in the database");
+  // And what happens next, so "pending again" is not a surprise.
+  await expect(ask).toContainText("pending again");
+
+  await ask.locator('button:has-text("Cancel")').click();
+  expect(await commandNames(page)).not.toContain("flyway_repair");
+});
+
+test("confirming repairs, says what Flyway did, and re-reads the list", async ({ page }) => {
+  await attach(page);
+  const before = (await calls(page)).filter((c) => c.cmd === "flyway_info").length;
+
+  await page.click("#btn-mig-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+
+  await expect.poll(async () => commandNames(page)).toContain("flyway_repair");
+  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
+  await expect(page.locator("#grid .empty")).toContainText("V3");
+  // The claim the confirmation made, repeated where it is acted on.
+  await expect(page.locator("#grid .empty")).toContainText("database itself is unchanged");
+
+  // The list is asked again: after a repair the failed row is gone and the
+  // migration is pending, and a stale pane would still show it as blocking.
+  await expect
+    .poll(async () => (await calls(page)).filter((c) => c.cmd === "flyway_info").length)
+    .toBeGreaterThan(before);
+});
+
+/**
+ * Success and "nothing needed doing" are different answers. Flyway reports the
+ * second as a success with every list empty, and calling that "repaired" tells
+ * somebody their problem is fixed when nothing was touched.
+ */
+test("a repair that found nothing to do says so, rather than claiming success", async ({
+  page,
+}) => {
+  await attach(page, {
+    flyway_repair: () => ({ actions: [], removed: [], deleted: [], aligned: [] }),
+  });
+
+  await page.click("#btn-mig-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("found nothing to repair");
+  await expect(page.locator("#grid .empty")).not.toContainText("Removed");
+});
+
+/** F7's other half. Refused in Rust too; this is the courtesy. */
+test("a read-only connection cannot repair either", async ({ page }) => {
+  await attach(page, {
+    save_profile: (a: Record<string, unknown>) => ({
+      profile: { ...(a.profile as object), readOnly: true, rememberPassword: false, needsSecret: false },
+      passwordWarning: null, passwordStored: false,
+    }),
+  });
+
+  await expect(page.locator("#btn-mig-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-repair")).toBeDisabled();
+  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /read-only/);
+});
+
+test("a refused repair shows Flyway's own message", async ({ page }) => {
+  await attach(page, {
+    flyway_repair: () => {
+      throw new Error("Unable to connect to the database. Check the connection details.");
+    },
+  });
+
+  await page.click("#btn-mig-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("Unable to connect to the database");
 });

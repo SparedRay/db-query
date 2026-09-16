@@ -493,6 +493,94 @@ pub fn complaint(stdout: &str) -> Option<Complaint> {
     })
 }
 
+// ---------------------------------------------------------------- repair
+
+/// One migration a repair touched. Enough to name it, and nothing more —
+/// `repair` reports no state, because the row it is talking about is gone.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Touched {
+    pub version: Option<String>,
+    pub description: String,
+}
+
+/// What a repair did.
+///
+/// **Three separate lists, not a count**, because they are three different
+/// things happening to somebody's schema history and only one of them is the
+/// one people mean by "repair":
+///
+///   * `removed` — failed entries taken out. The common case.
+///   * `deleted` — migrations marked as deleted.
+///   * `aligned` — checksums rewritten to match the files on disk. This one is
+///     worth naming out loud: it makes Flyway agree with a migration that was
+///     *edited after it ran*, which is a different problem wearing the same
+///     button.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Repaired {
+    /// Flyway's own sentences — "Removed failed migrations". Kept verbatim and
+    /// shown as-is: it describes what happened better than a count of three
+    /// arrays would.
+    pub actions: Vec<String>,
+    pub removed: Vec<Touched>,
+    pub deleted: Vec<Touched>,
+    pub aligned: Vec<Touched>,
+}
+
+impl Repaired {
+    /// Nothing needed doing. Flyway reports this as success with every list
+    /// empty, and saying "repaired" would be a small lie.
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.deleted.is_empty() && self.aligned.is_empty()
+    }
+}
+
+/// Read what `repair` says it did.
+pub fn repaired(stdout: &str) -> Result<Repaired, String> {
+    let v: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))?;
+
+    let list = |key: &str| -> Vec<Touched> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .map(|m| Touched {
+                        version: m
+                            .get("version")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                        description: m
+                            .get("description")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("(no description)")
+                            .to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    Ok(Repaired {
+        actions: v
+            .get("repairActions")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        removed: list("migrationsRemoved"),
+        deleted: list("migrationsDeleted"),
+        aligned: list("migrationsAligned"),
+    })
+}
+
 /// The migrations `info` reported, in the order Flyway listed them.
 pub fn migrations(stdout: &str) -> Result<Vec<Migration>, String> {
     let v: serde_json::Value = serde_json::from_str(stdout)
@@ -648,6 +736,76 @@ mod tests {
         );
         assert_eq!(m[1].kind.as_deref(), Some("SQL"));
         assert_eq!(m[1].execution_time_ms, Some(7));
+    }
+
+    /// **Real output**, from repairing the fixture's failed V4 on 2026-09-16.
+    const REPAIR: &str = r#"{
+      "database": "flyway_dev",
+      "flywayVersion": "13.5.0",
+      "migrationsAligned": [],
+      "migrationsDeleted": [],
+      "migrationsRemoved": [
+        { "description": "deliberately broken", "filepath": "", "version": "4" }
+      ],
+      "operation": "repair",
+      "repairActions": [ "Removed failed migrations" ],
+      "warnings": []
+    }"#;
+
+    /// Repair with nothing to repair. Also real, and the reason `is_empty`
+    /// exists: Flyway calls this a success and every list is empty.
+    const REPAIR_NOOP: &str = r#"{
+      "database": "flyway_dev",
+      "flywayVersion": "13.5.0",
+      "migrationsAligned": [],
+      "migrationsDeleted": [],
+      "migrationsRemoved": [],
+      "operation": "repair",
+      "repairActions": [],
+      "warnings": []
+    }"#;
+
+    #[test]
+    fn a_repair_says_which_entry_it_removed() {
+        let r = repaired(REPAIR).expect("real repair output");
+        assert_eq!(r.removed.len(), 1);
+        assert_eq!(r.removed[0].version.as_deref(), Some("4"));
+        assert_eq!(r.removed[0].description, "deliberately broken");
+        // Flyway's own sentence, kept: it describes what happened better than
+        // three array lengths would.
+        assert_eq!(r.actions, ["Removed failed migrations"]);
+        assert!(r.deleted.is_empty() && r.aligned.is_empty());
+        assert!(!r.is_empty());
+    }
+
+    /// Success with nothing done is not "repaired". Reporting it as one would
+    /// tell somebody their problem was fixed when nothing was touched.
+    #[test]
+    fn a_repair_with_nothing_to_do_says_so() {
+        let r = repaired(REPAIR_NOOP).expect("real repair output");
+        assert!(r.is_empty());
+        assert!(r.actions.is_empty());
+    }
+
+    /// `repair` fails the same way everything else does, so the same reader
+    /// finds it — and it is checked before the success shape, because a
+    /// refusal carries none of these keys.
+    #[test]
+    fn a_refused_repair_is_read_as_a_complaint() {
+        const REFUSED: &str = r#"{"error": {"errorCode": "CONFIGURATION", "message":
+          "Failed to configure parameters:\nEnvironment 'nope' not found."}}"#;
+        let c = complaint(REFUSED).expect("a refused repair");
+        assert_eq!(c.code.as_deref(), Some("CONFIGURATION"));
+        assert!(c.message.contains("not found"), "{}", c.message);
+        // And the success reader finds nothing in it, which is why order
+        // matters.
+        assert!(repaired(REFUSED).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_repair_answer_that_is_not_json_says_so_rather_than_panicking() {
+        let e = repaired("Flyway is not installed").unwrap_err();
+        assert!(e.contains("could not be read"), "{e}");
     }
 
     /// The grouping the pane hangs on, and the one the apply dialog counts.

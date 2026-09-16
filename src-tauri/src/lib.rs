@@ -1245,27 +1245,10 @@ async fn flyway_migrate(
     program: String,
     out_of_order: bool,
 ) -> Result<Applied, String> {
-    let dir = config_dir(&app)?;
-    let profile = profiles::load(&dir)
-        .profiles
-        .into_iter()
-        .find(|p| p.id == connection_id)
-        .ok_or_else(|| "No saved connection with that id.".to_string())?;
-
-    let path = profile
-        .flyway_project
-        .clone()
-        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
-    let environment = profile
-        .flyway_environment
-        .clone()
-        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
-
-    // Re-read rather than remembered: the file is in a repository and the
-    // branch may have moved since it was attached.
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let project = flyway::parse(&text)?;
-    if let Some(reason) = flyway::apply_refusal(&project, &profile, &environment) {
+    let (profile, path, environment, project) = flyway_target(&app, &connection_id)?;
+    if let Some(reason) =
+        flyway::write_refusal(&project, &profile, &environment, flyway::Write::Apply)
+    {
         logbook::warn("flyway", "apply refused before it started");
         return Err(reason);
     }
@@ -1314,6 +1297,93 @@ async fn flyway_migrate(
             .and_then(|x| x.as_str())
             .map(str::to_string),
     })
+}
+
+/// Repair this environment's schema history.
+///
+/// **This does not undo anything.** Flyway's repair rewrites the history
+/// table: it removes failed entries, marks deleted ones, and realigns
+/// checksums. The database itself is untouched — measured, not assumed, on
+/// 2026-09-16 against the fixture, where repairing a failed `ALTER TABLE` left
+/// every column exactly as it was and moved the migration back to `Pending`.
+///
+/// That is the whole reason the confirmation in front of this is worded the
+/// way it is. A migration that applied three of its five statements before
+/// failing still applied them, and the next apply will run it again from the
+/// first.
+///
+/// Guarded exactly as `flyway_migrate` is: read-only refuses, and the
+/// environment is re-checked against the file as it is now.
+#[tauri::command]
+async fn flyway_repair(
+    app: tauri::AppHandle,
+    connection_id: String,
+    program: String,
+) -> Result<flywaycli::Repaired, String> {
+    let (profile, path, environment, project) = flyway_target(&app, &connection_id)?;
+    if let Some(reason) =
+        flyway::write_refusal(&project, &profile, &environment, flyway::Write::Repair)
+    {
+        logbook::warn("flyway", "repair refused before it started");
+        return Err(reason);
+    }
+
+    logbook::info("flyway", format!("repairing {environment}"));
+    let out = flywaycli::run(
+        &program_or_default(program),
+        std::path::Path::new(&path),
+        &environment,
+        "repair",
+        vec![],
+    )
+    .await?;
+
+    // Before the success shape, always.
+    if let Some(c) = flywaycli::complaint(&out.stdout) {
+        logbook::warn("flyway", "repair refused by Flyway");
+        return Err(c.message);
+    }
+    if !out.ok() {
+        return Err(format!(
+            "Flyway exited with {}. {}",
+            out.code
+                .map(|c| c.to_string())
+                .unwrap_or("no status".into()),
+            out.stderr.trim()
+        ));
+    }
+    flywaycli::repaired(&out.stdout)
+}
+
+/// The connection, its project path, its environment, and the project as the
+/// file reads **now**.
+///
+/// Shared by apply and repair. Re-reading rather than remembering is the point:
+/// the TOML lives in a repository and changes with the branch, so a project
+/// cached at attach time is a description of whatever was checked out then.
+fn flyway_target(
+    app: &tauri::AppHandle,
+    connection_id: &str,
+) -> Result<(session::ConnProfile, String, String, flyway::Project), String> {
+    let dir = config_dir(app)?;
+    let profile = profiles::load(&dir)
+        .profiles
+        .into_iter()
+        .find(|p| p.id == connection_id)
+        .ok_or_else(|| "No saved connection with that id.".to_string())?;
+
+    let path = profile
+        .flyway_project
+        .clone()
+        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
+    let environment = profile
+        .flyway_environment
+        .clone()
+        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
+
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let project = flyway::parse(&text)?;
+    Ok((profile, path, environment, project))
 }
 
 // ------------------------------------------------------------- the logbook
@@ -1635,6 +1705,7 @@ pub fn run() {
             flyway_check,
             flyway_info,
             flyway_migrate,
+            flyway_repair,
             open_tab,
             close_tab,
             use_database,

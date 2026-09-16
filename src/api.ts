@@ -385,6 +385,29 @@ export interface FlywayApplied {
   target: string | null;
 }
 
+/** One migration a repair touched. Enough to name it; the row it describes is
+ *  gone, so there is no state to report. */
+export interface FlywayTouched {
+  version: string | null;
+  description: string;
+}
+
+/**
+ * What a repair did.
+ *
+ * Three lists rather than a count, because they are three different things
+ * happening to a schema history — and `aligned` in particular is a different
+ * problem wearing the same button: it rewrites checksums to match migrations
+ * that were **edited after they ran**.
+ */
+export interface FlywayRepaired {
+  /** Flyway's own sentences, e.g. "Removed failed migrations". */
+  actions: string[];
+  removed: FlywayTouched[];
+  deleted: FlywayTouched[];
+  aligned: FlywayTouched[];
+}
+
 export interface ProfileList {
   profiles: ProfileView[];
   /** Set when the config file could not be read and was moved aside. */
@@ -704,6 +727,11 @@ export const api = {
    *  re-checks the environment guard before anything runs. */
   flywayMigrate: (connectionId: string, program: string, outOfOrder: boolean) =>
     invoke<FlywayApplied>("flyway_migrate", { connectionId, program, outOfOrder }),
+
+  /** Rewrite the schema history so a failed migration stops blocking the rest.
+   *  **Changes no data and undoes nothing** — same guards as an apply. */
+  flywayRepair: (connectionId: string, program: string) =>
+    invoke<FlywayRepaired>("flyway_repair", { connectionId, program }),
 
   /** The whole diagnostic report — build, Flyway probe, log tail — as text
    *  meant to be pasted where somebody can read it. */
