@@ -77,6 +77,7 @@ const els = {
   migList: $("mig-list"),
   btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
   btnMigApply: $<HTMLButtonElement>("btn-mig-apply"),
+  btnMigRepair: $<HTMLButtonElement>("btn-mig-repair"),
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
@@ -2844,6 +2845,7 @@ els.btnSchema.classList.add("on");
 els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
 els.btnMigRefresh.onclick = () => void renderMigrations();
 els.btnMigApply.onclick = () => void applyMigrations();
+els.btnMigRepair.onclick = () => void repairMigrations();
 
 /** An empty pane that says what to do next, rather than an empty pane. */
 function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
@@ -2901,6 +2903,7 @@ async function renderMigrations() {
   const { flywayProject, flywayEnvironment } = active.profile;
   els.migEnv.hidden = !flywayProject;
   els.btnMigApply.hidden = true;
+  els.btnMigRepair.hidden = true;
   if (!flywayProject || !flywayEnvironment) {
     els.migTitle.textContent = "Migrations";
     return migrationsMessage(
@@ -3150,6 +3153,16 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
   const pending = list.filter((m) => m.group === "pending");
   const failed = list.filter((m) => m.group === "failed");
 
+  // Repair appears only when there is something to repair. It is not a
+  // maintenance button somebody might press to see what it does: it rewrites
+  // the schema history, and offering it against a healthy one invites exactly
+  // that.
+  els.btnMigRepair.hidden = failed.length === 0;
+  els.btnMigRepair.disabled = readOnly;
+  els.btnMigRepair.title = readOnly
+    ? "This connection is marked read-only. Editing the schema history is a write."
+    : `Clear the failed entry for ${failed.map((m) => m.version ?? "?").join(", ")}`;
+
   els.btnMigApply.hidden = false;
   els.btnMigApply.textContent = pending.length
     ? `Apply ${pending.length}\u2026`
@@ -3220,6 +3233,71 @@ async function applyMigrations() {
   } catch (err) {
     // Flyway's own words, verbatim. It names the file, the line and the SQL
     // error, and a paraphrase would throw all three away.
+    results.setMessage(String(err));
+  }
+  await renderMigrations();
+}
+
+/**
+ * Repair the schema history, once the user has agreed to what that means.
+ *
+ * **The confirmation is the feature.** `repair` sounds like it fixes the
+ * database and it does not: measured against the fixture on 2026-09-16, it
+ * removed the failed row and left every column exactly as it was. Flyway's own
+ * refusal says it too — *"Please remove any half-completed changes then run
+ * repair"* — and that instruction is worthless to somebody who thinks repair
+ * is what removes them.
+ *
+ * So the dialog says three things, in this order: what it removes, what it
+ * does **not** undo, and what happens next.
+ */
+async function repairMigrations() {
+  const active = conns?.active();
+  if (!active) return;
+
+  const list = await api
+    .flywayInfo(active.profile.id, settings.flywayPath, outOfOrderFor(active.profile.id))
+    .catch(() => null);
+  if (!list) return void renderMigrations();
+  const failed = list.filter((m) => m.group === "failed");
+  if (!failed.length) return void renderMigrations();
+
+  const named = failed
+    .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
+    .join("\n");
+  const go = await choose(
+    `Repair the schema history of "${active.profile.flywayEnvironment}"?`,
+    `Flyway will remove the failed entry from this environment's schema ` +
+      `history:\n\n${named}\n\n` +
+      "It does not undo anything the migration already did. If it ran some of " +
+      "its statements before it failed, those changes are still in the " +
+      "database \u2014 check them yourself first.\n\n" +
+      "Afterwards the migration counts as pending again, and the next apply " +
+      "will run it from the start.",
+    [
+      { value: "cancel", label: "Cancel", primary: true },
+      { value: "go", label: `Repair ${active.profile.flywayEnvironment}`, danger: true },
+    ],
+  );
+  if (go !== "go") return;
+
+  els.btnMigRepair.disabled = true;
+  migrationsMessage("Flyway is repairing\u2026");
+  try {
+    const out = await api.flywayRepair(active.profile.id, settings.flywayPath);
+    const touched = [...out.removed, ...out.deleted, ...out.aligned];
+    results.setMessage(
+      touched.length === 0
+        ? // Success and "nothing needed doing" are different answers, and
+          // reporting the second as the first tells somebody their problem is
+          // fixed when nothing was touched.
+          "Flyway found nothing to repair. The schema history is already consistent."
+        : `${out.actions.join(". ") || "Repaired"}: ` +
+            touched.map((m) => (m.version ? `V${m.version}` : m.description)).join(", ") +
+            ". The database itself is unchanged.",
+    );
+  } catch (err) {
+    // Flyway's own words, verbatim.
     results.setMessage(String(err));
   }
   await renderMigrations();

@@ -21,7 +21,7 @@ decisions that were corrected along the way.
 | 12 | [Stabilisation: result sets, idle connections, carried bugs](stage-12-stabilisation-and-result-sets.md) | ✅ **Built and confirmed** — B1-B7 verified by hand 2026-09-09 (§16); also tree/type icons, a schema filter, tabbed settings, formatted definitions and a dialect-aware linter (§13-15) |
 | 13 | [Letting other tools in: an MCP server](stage-13-mcp-server.md) | 🚧 **Built** — schema and "put this query in my editor" over MCP, on loopback, off by default, nothing that executes; M1/M2 confirmed by hand 2026-09-09, M4 and M7 outstanding |
 | 14 | [Read-only connections](stage-14-read-only-connections.md) | 🚧 **Built** — a connection can refuse writes before they are sent, deferred from Stage 2; hands-on pass outstanding |
-| 15 | [Flyway migrations](stage-15-flyway-migrations.md) | 🚧 **Built** — list and read migrations on a connection that has a Flyway project; apply and repair outstanding |
+| 15 | [Flyway migrations](stage-15-flyway-migrations.md) | 🚧 **Built** — list, read, apply and repair migrations on a connection that has a Flyway project; hands-on pass outstanding |
 | 16 | [A logbook](stage-16-logbook.md) | 🚧 **Built** — what the app did, kept where a user can copy it; Settings → About → Diagnostics |
 
 ## Rules

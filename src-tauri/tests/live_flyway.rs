@@ -246,3 +246,115 @@ async fn a_failed_migration_blocks_the_next_apply_with_an_instruction() {
     // avoids: reading the success shape first would report an empty run.
     assert!(flywaycli::migrations(&again.stdout).is_err());
 }
+
+// -------------------------------------------------------------- repairing
+
+/// Run SQL against a fixture database and return the output, so a test can see
+/// what Flyway did to a schema rather than what Flyway says it did.
+fn sql(db: &str, statement: &str) -> String {
+    let out = std::process::Command::new("podman")
+        .args([
+            "exec",
+            "-i",
+            "db-query-mysql",
+            "mysql",
+            "-uroot",
+            "-pdevpassword",
+            "-N",
+            db,
+            "-e",
+        ])
+        .arg(statement)
+        .output()
+        .expect("podman exec");
+    assert!(
+        out.status.success(),
+        "{statement}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// **F6, and the claim the confirmation makes.**
+///
+/// Repair rewrites the schema history and leaves the database alone. That
+/// second half is the part a user is being asked to agree to, so it is the
+/// part worth proving with `SHOW COLUMNS` rather than with Flyway's own
+/// report of itself.
+#[tokio::test]
+#[ignore]
+async fn repair_clears_the_failed_entry_and_changes_nothing_in_the_database() {
+    reset("flyway_qa");
+    let _ = flywaycli::run(&program(), &project(), "qa", "migrate", vec![]).await;
+
+    // V1–V3 applied, V4 failed. That is the situation repair exists for.
+    let before = sql("flyway_qa", "SHOW COLUMNS FROM widgets;");
+    assert!(before.contains("colour"), "V3 ran: {before}");
+    let history = sql(
+        "flyway_qa",
+        "SELECT version, success FROM flyway_schema_history ORDER BY installed_rank;",
+    );
+    assert!(
+        history.contains("4\t0"),
+        "V4 is recorded as failed: {history}"
+    );
+
+    let out = flywaycli::run(&program(), &project(), "qa", "repair", vec![])
+        .await
+        .expect("flyway ran");
+    assert!(out.ok(), "{}", out.stderr);
+
+    let r = flywaycli::repaired(&out.stdout).expect("a repair report");
+    assert_eq!(r.removed.len(), 1);
+    assert_eq!(r.removed[0].version.as_deref(), Some("4"));
+    assert!(
+        r.actions.iter().any(|a| a.contains("Removed failed")),
+        "{:?}",
+        r.actions
+    );
+
+    // The history lost exactly one row.
+    let after = sql(
+        "flyway_qa",
+        "SELECT version, success FROM flyway_schema_history ORDER BY installed_rank;",
+    );
+    assert!(!after.contains("4\t0"), "the failed row is gone: {after}");
+    assert!(
+        after.contains("3\t1"),
+        "and the successful ones are not: {after}"
+    );
+
+    // **And the schema is untouched.** This is what "it does not undo
+    // anything" means, and it is the sentence the confirmation stakes itself on.
+    assert_eq!(
+        sql("flyway_qa", "SHOW COLUMNS FROM widgets;"),
+        before,
+        "repair must not have altered the table"
+    );
+
+    // Which is why V4 is Pending again rather than gone: the next apply will
+    // run it from the start.
+    let listed = flywaycli::migrations(&info("qa").await.stdout).unwrap();
+    let v4 = listed
+        .iter()
+        .find(|m| m.version.as_deref() == Some("4"))
+        .expect("V4 is still listed");
+    assert_eq!(v4.group, flywaycli::Group::Pending);
+}
+
+/// Repairing a history with nothing wrong is a success that did nothing, and
+/// the two must not be reported as the same thing.
+#[tokio::test]
+#[ignore]
+async fn repairing_a_healthy_history_reports_that_it_did_nothing() {
+    reset("flyway_qa");
+
+    let out = flywaycli::run(&program(), &project(), "qa", "repair", vec![])
+        .await
+        .expect("flyway ran");
+    assert!(out.ok());
+
+    let r = flywaycli::repaired(&out.stdout).unwrap();
+    assert!(r.is_empty(), "{r:?}");
+    assert!(r.actions.is_empty(), "{:?}", r.actions);
+}

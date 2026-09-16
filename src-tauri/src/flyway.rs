@@ -225,9 +225,30 @@ impl Disagreement {
     }
 }
 
-/// Why an apply must not go ahead, or `None`.
+/// What a connection is about to be asked to do. Only the read-only sentence
+/// differs, and it differs in the one word that says what was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Write {
+    Apply,
+    Repair,
+}
+
+impl Write {
+    fn phrase(self) -> &'static str {
+        match self {
+            Write::Apply => "apply migrations",
+            Write::Repair => "repair the schema history",
+        }
+    }
+}
+
+/// Why a write must not go ahead, or `None`.
 ///
-/// **Extracted from the command so the guards are testable without a running
+/// Shared by apply and repair. Repair writes less than apply does — one table
+/// rather than a schema — but it writes to the *wrong* database just as
+/// easily, so it is asked the same two questions.
+///
+/// **Extracted from the commands so the guards are testable without a running
 /// app.** Each of these is the difference between changing the database you
 /// are looking at and changing a different one, and none of them should be
 /// reachable only through a Tauri handle.
@@ -235,16 +256,17 @@ impl Disagreement {
 /// The order matters. Read-only is a decision the user made and can unmake, so
 /// it is said first and on its own terms; a disagreement is a fact about two
 /// files that drifted apart, and it names the fields.
-pub fn apply_refusal(
+pub fn write_refusal(
     project: &Project,
     profile: &crate::session::ConnProfile,
     environment: &str,
+    what: Write,
 ) -> Option<String> {
     if profile.read_only {
-        return Some(
-            r#"This connection is marked read-only, so it will not apply migrations. Edit the connection and clear "Read-only" to allow writes."#
-                .into(),
-        );
+        return Some(format!(
+            r#"This connection is marked read-only, so it will not {}. Edit the connection and clear "Read-only" to allow writes."#,
+            what.phrase()
+        ));
     }
 
     let Some(env) = project.environment(environment) else {
@@ -272,7 +294,7 @@ pub fn apply_refusal(
         // "user differs" for one and "host and user differ" for two: a
         // guard that cannot manage a plural reads as machine output, and
         // this one is asking somebody to stop and check something.
-        r#""{environment}" no longer matches this connection: {fields} {verb}. The project file may have changed since it was attached. Re-attach it from the migrations pane before applying."#
+        r#""{environment}" no longer matches this connection: {fields} {verb}. The project file may have changed since it was attached. Re-attach it from the migrations pane first."#
     ))
 }
 
@@ -596,30 +618,42 @@ ignoreNewlinesInTextObjects = "off"
     #[test]
     fn an_agreeing_environment_is_not_refused() {
         let p = parse(REAL).unwrap();
-        assert_eq!(apply_refusal(&p, &agreeing(), "development"), None);
+        assert_eq!(
+            write_refusal(&p, &agreeing(), "development", Write::Apply),
+            None
+        );
     }
 
     /// F7. Said in the connection's own terms — it is a choice the user made
     /// and can unmake — and *before* anything else, because it is true
     /// whatever the project file says.
     #[test]
-    fn a_read_only_connection_refuses_to_apply() {
+    fn a_read_only_connection_refuses_both_apply_and_repair() {
         let p = parse(REAL).unwrap();
         let mut ro = agreeing();
         ro.read_only = true;
 
-        let reason = apply_refusal(&p, &ro, "development").expect("refused");
+        let reason = write_refusal(&p, &ro, "development", Write::Apply).expect("refused");
         assert!(reason.contains("read-only"), "{reason}");
+        assert!(reason.contains("apply migrations"), "{reason}");
         assert!(
             reason.contains("Edit the connection"),
             "it says how to undo it"
+        );
+
+        // A repair is not an apply, and the refusal says which was refused.
+        let repairing = write_refusal(&p, &ro, "development", Write::Repair).expect("refused");
+        assert!(repairing.contains("read-only"), "{repairing}");
+        assert!(
+            repairing.contains("repair the schema history"),
+            "{repairing}"
         );
 
         // And it refuses even when the environment would *also* have been
         // wrong, so the user is not sent to fix the wrong thing first.
         let mut wrong = ro.clone();
         wrong.host = "somewhere.else".into();
-        assert!(apply_refusal(&p, &wrong, "development")
+        assert!(write_refusal(&p, &wrong, "development", Write::Apply)
             .unwrap()
             .contains("read-only"));
     }
@@ -632,7 +666,7 @@ ignoreNewlinesInTextObjects = "off"
         let p = parse(REAL).unwrap();
         let moved = profile("dev.example.com", 3306, Some("flyway"), "someone_else");
 
-        let reason = apply_refusal(&p, &moved, "development").expect("refused");
+        let reason = write_refusal(&p, &moved, "development", Write::Apply).expect("refused");
         assert!(
             reason.contains("user differs"),
             "it names what differs: {reason}"
@@ -648,7 +682,7 @@ ignoreNewlinesInTextObjects = "off"
         // both the server and the account are somebody else's.
         let elsewhere = profile("dev.example.com", 3306, Some("flyway"), "cftconn_dev_app");
 
-        let reason = apply_refusal(&p, &elsewhere, "qa").expect("refused");
+        let reason = write_refusal(&p, &elsewhere, "qa", Write::Apply).expect("refused");
         assert!(reason.contains("host and user differ"), "{reason}");
     }
 
@@ -658,7 +692,7 @@ ignoreNewlinesInTextObjects = "off"
     #[test]
     fn an_environment_that_no_longer_exists_says_so() {
         let p = parse(REAL).unwrap();
-        let reason = apply_refusal(&p, &agreeing(), "staging").expect("refused");
+        let reason = write_refusal(&p, &agreeing(), "staging", Write::Apply).expect("refused");
         assert!(reason.contains("staging"), "{reason}");
         assert!(reason.contains("renamed or removed"), "{reason}");
     }
