@@ -123,7 +123,7 @@ async fn an_unknown_environment_comes_back_as_flyways_own_refusal() {
 #[tokio::test]
 #[ignore]
 async fn the_report_carries_flyways_own_version() {
-    let text = flywaycli::diagnose(&program()).await;
+    let text = flywaycli::probe(&program()).await;
     println!("{text}");
 
     assert!(text.contains("exit       0"), "{text}");
@@ -132,4 +132,28 @@ async fn the_report_carries_flyways_own_version() {
         text.contains("Flyway") && text.contains("13.5.0"),
         "the version is the point of it: {text}"
     );
+}
+
+/// The whole report, end to end, against a Flyway that is really there.
+#[tokio::test]
+#[ignore]
+async fn the_whole_report_reads_as_one_document() {
+    use db_query_lib::logbook;
+    logbook::info("app", "db-query 0.4.2 starting on linux x86_64");
+    logbook::warn(
+        "mysql",
+        "Access denied for user 'root'@'localhost' (using password: YES)",
+    );
+    logbook::error("mysql", "connecting to mysql://root:hunter2@db:3306/app");
+
+    let text = logbook::report(&flywaycli::probe(&program()).await);
+    println!("{text}");
+
+    assert!(text.contains("=== Flyway ==="), "{text}");
+    assert!(text.contains("13.5.0"), "{text}");
+    assert!(
+        text.contains("(using password: YES)"),
+        "the useful line survives"
+    );
+    assert!(!text.contains("hunter2"), "and the secret does not");
 }

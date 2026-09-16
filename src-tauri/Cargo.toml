@@ -71,6 +71,15 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 tauri-plugin-updater = "2.11.0"
 
+# Timestamps for the logbook. **No new crate**: chrono 0.4 is already in the
+# tree three ways — `rmcp`, `schemars` and `sqlx-core` (the `chrono` feature)
+# all depend on it — so naming it directly adds a line here and nothing to the
+# build. `default-features = false` drops the `oldtime` and `js-sys` baggage;
+# `clock` is what `Utc::now` needs.
+# Licence: `MIT OR Apache-2.0`, read from the vendored Cargo.toml and
+# LICENSE.txt on 2026-09-16, not from memory.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # The Anthropic API client. **No new crates**: reqwest is already linked via
 # `tauri-plugin-updater`, and these are exactly the features that plugin asks
 # for, so cargo unifies them into the build that already exists. Measured, not

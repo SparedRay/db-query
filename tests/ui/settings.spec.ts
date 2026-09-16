@@ -250,14 +250,16 @@ test("settings reopen on the section last used", async ({ page }) => {
  * owns is that the button reaches it with **what is in the box right now**,
  * and that the report lands somewhere it can be copied from.
  */
-test("Test Flyway reports on the path currently typed, not the one last saved", async ({
+test("Diagnostics reports on the Flyway path currently typed, not the one last saved", async ({
   page,
 }) => {
   await connect(page, {
     ...schemaBackend,
-    flyway_diagnose: (a) => `db-query — Flyway diagnostics\nsetting ${String(a.program)}\n`,
+    diagnostics: (a) => `db-query — Flyway diagnostics\nsetting ${String(a.program)}\n`,
   });
   await open(page);
+  // The path lives under Integrations; the button that reports on it lives
+  // under About, which is where somebody looks for "what is wrong with this".
   await settingsSection(page, "integrations");
 
   // Set without dispatching `change`. Filling it fires one, which commits the
@@ -268,9 +270,10 @@ test("Test Flyway reports on the path currently typed, not the one last saved", 
   await page.locator("#set-flyway-path").evaluate((el) => {
     (el as HTMLInputElement).value = "C:\\tools\\flyway.cmd";
   });
-  await page.click("#btn-flyway-test");
+  await settingsSection(page, "about");
+  await page.click("#btn-diagnostics");
 
-  const asked = (await calls(page)).filter((c) => c.cmd === "flyway_diagnose");
+  const asked = (await calls(page)).filter((c) => c.cmd === "diagnostics");
   expect(asked).toHaveLength(1);
   expect(asked[0].args.program).toBe("C:\\tools\\flyway.cmd");
 
@@ -285,15 +288,15 @@ test("Test Flyway reports on the path currently typed, not the one last saved", 
 test("a failed diagnostic says so and leaves the button usable", async ({ page }) => {
   await connect(page, {
     ...schemaBackend,
-    flyway_diagnose: () => {
+    diagnostics: () => {
       throw new Error("the command panicked");
     },
   });
   await open(page);
-  await settingsSection(page, "integrations");
+  await settingsSection(page, "about");
 
-  await page.click("#btn-flyway-test");
-  await expect(page.locator("#set-flyway-note")).toContainText("panicked");
-  await expect(page.locator("#btn-flyway-test")).toBeEnabled();
+  await page.click("#btn-diagnostics");
+  await expect(page.locator("#set-diagnostics-note")).toContainText("panicked");
+  await expect(page.locator("#btn-diagnostics")).toBeEnabled();
   await expect(page.locator("dialog.viewer")).toHaveCount(0);
 });

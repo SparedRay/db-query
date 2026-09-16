@@ -176,16 +176,18 @@ pub fn resolve(program: &str) -> Resolution {
 /// to read — or paste — that.
 const MISS_LIMIT: usize = 40;
 
-/// A plain-text account of what happened when we went looking for Flyway and
-/// asked it its version.
+/// A live probe: go looking for Flyway, run it, and say what happened.
 ///
-/// **Written to be pasted somewhere else.** When Flyway will not start, the
-/// question is always one of three — which command did you use, where did it
-/// look, and what did the program itself say — and a user cannot answer any of
-/// them from "Flyway was not found". It carries no secret: the project file,
-/// the JDBC URL and the connection are not part of it. It does carry file
-/// paths, and on Windows the PATH, so it says so at the top.
-pub async fn diagnose(program: &str) -> String {
+/// **A section of the diagnostics report, not a report of its own.** The
+/// header and the log tail belong to `diagnostics` in `lib.rs`; this answers
+/// the three questions that come up when Flyway will not start — which
+/// command, where was it looked for, and what did the program itself say —
+/// none of which a user can answer from "Flyway was not found".
+///
+/// It carries no secret: the project file, the JDBC URL and the connection are
+/// not part of it. It does carry file paths, and on Windows effectively the
+/// PATH, which is why the report says so at the top.
+pub async fn probe(program: &str) -> String {
     let asked = if program.trim().is_empty() {
         DEFAULT_PROGRAM
     } else {
@@ -194,14 +196,6 @@ pub async fn diagnose(program: &str) -> String {
     let r = resolve(asked);
 
     let mut out = String::new();
-    out.push_str("db-query \u{2014} Flyway diagnostics\n");
-    out.push_str("(paths only, no passwords \u{2014} redact if you like)\n\n");
-    out.push_str(&format!(
-        "app        {}\nos         {} {}\n",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-    ));
     out.push_str(&format!(
         "setting    {}\n",
         if program.trim().is_empty() {
@@ -311,7 +305,22 @@ pub async fn run(
 async fn spawn(program: &str, args: Vec<String>, dir: Option<PathBuf>) -> Result<Finished, String> {
     // What the user asked for, for the message; what was found, for the spawn.
     let shown = program.to_string();
-    let program = resolve(program).program;
+    let r = resolve(program);
+    match (&r.found, r.tried.len()) {
+        (Some(found), n) => crate::logbook::info(
+            "flyway",
+            format!(
+                "resolved {shown:?} to {} after {n} candidates",
+                found.display()
+            ),
+        ),
+        (None, 0) => crate::logbook::info("flyway", format!("running {shown:?} as given")),
+        (None, n) => crate::logbook::warn(
+            "flyway",
+            format!("{shown:?} matched none of {n} candidates; trying it as given"),
+        ),
+    }
+    let program = r.program;
 
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(&program);
@@ -325,19 +334,44 @@ async fn spawn(program: &str, args: Vec<String>, dir: Option<PathBuf>) -> Result
         let out = cmd.output().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "Flyway was not found at \"{shown}\". Install the Flyway command line, or set \
-                 the path to it in Settings \u{2192} Integrations \u{2014} where \u{201c}Test \
-                 Flyway\u{201d} prints every path that was tried."
+                 the path to it in Settings \u{2192} Integrations. Settings \u{2192} About \
+                 \u{2192} Diagnostics prints every path that was tried."
             ),
             std::io::ErrorKind::PermissionDenied => {
                 format!("\"{shown}\" cannot be run: permission denied.")
             }
             _ => format!("Could not run \"{shown}\": {e}"),
-        })?;
-        Ok(Finished {
+        });
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => {
+                crate::logbook::error("flyway", &e);
+                return Err(e);
+            }
+        };
+        let finished = Finished {
             code: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        };
+        // The arguments are not recorded: `-environment=uat` is harmless and
+        // the habit of logging an argument vector is not. The operation is the
+        // last one, and it is the part worth knowing.
+        let op = args.last().map(String::as_str).unwrap_or("?");
+        let code = finished
+            .code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into());
+        crate::logbook::note(
+            if finished.ok() {
+                crate::logbook::Level::Info
+            } else {
+                crate::logbook::Level::Warn
+            },
+            "flyway",
+            format!("{op} exited {code}"),
+        );
+        Ok(finished)
     })
     .await
     .map_err(|e| format!("The Flyway run could not be waited for: {e}"))?
@@ -686,14 +720,16 @@ mod tests {
         }
     }
 
-    /// The report has to survive the case it is most often asked about.
+    /// The probe has to survive the case it is most often asked about.
+    ///
+    /// The build and the platform are asserted where they are now written —
+    /// `diagnostics` in `lib.rs`, which owns the header this section sits
+    /// under.
     #[tokio::test]
-    async fn the_report_describes_a_flyway_that_is_not_there() {
-        let text = diagnose("definitely-not-a-real-program").await;
-        assert!(text.contains("db-query"), "{text}");
+    async fn the_probe_describes_a_flyway_that_is_not_there() {
+        let text = probe("definitely-not-a-real-program").await;
         assert!(text.contains("definitely-not-a-real-program"), "{text}");
         assert!(text.contains("FAILED"), "{text}");
-        assert!(text.contains(std::env::consts::OS), "{text}");
         // Nothing about the connection or the project belongs in something
         // written to be pasted into a chat window.
         assert!(!text.contains("jdbc:"), "{text}");
@@ -703,7 +739,7 @@ mod tests {
     /// rather than leaving a blank where the command should be.
     #[tokio::test]
     async fn an_empty_setting_reports_the_default_it_fell_back_to() {
-        let text = diagnose("   ").await;
+        let text = probe("   ").await;
         assert!(text.contains("using the default"), "{text}");
         assert!(text.contains("\"flyway\""), "{text}");
     }

@@ -1,5 +1,85 @@
 // Typed mirror of the Rust command surface. Keep in sync with src-tauri/src.
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke as sendToRust } from "@tauri-apps/api/core";
+
+// ------------------------------------------------------------- the logbook
+//
+// Every command in this file goes through the wrapper below, so the log gets a
+// line per call without 58 call sites saying so.
+//
+// **The arguments are passed through and never read.** That is the whole
+// discipline: three commands here take a password, and a wrapper that logged
+// `args` would write one down the first time somebody connected. It logs the
+// command *name*, how long it took, and — when it fails — the error.
+
+type NoteLevel = "debug" | "info" | "warn" | "error";
+type Note = { level: NoteLevel; area: string; message: string };
+
+/** Queued notes, flushed together. One IPC call per log line would double the
+ *  traffic across the boundary to say nothing new. */
+let queued: Note[] = [];
+let flushTimer: number | undefined;
+
+function flush() {
+  flushTimer = undefined;
+  const entries = queued;
+  queued = [];
+  if (entries.length === 0) return;
+  // A failure to log is not a failure worth surfacing, and re-logging it would
+  // be a loop.
+  void sendToRust("log_notes", { entries }).catch(() => {});
+}
+
+/**
+ * Record something. Batched by default; `now` sends immediately, which is what
+ * an error wants — the interesting line is usually the last one before things
+ * stopped working, and a crash inside the flush window would lose it.
+ */
+export function note(level: NoteLevel, area: string, message: string, now = false) {
+  queued.push({ level, area, message });
+  if (now || level === "error") {
+    if (flushTimer !== undefined) clearTimeout(flushTimer);
+    flush();
+    return;
+  }
+  if (flushTimer === undefined) flushTimer = window.setTimeout(flush, 200);
+}
+
+/**
+ * Send a command, and tell the log what happened.
+ *
+ * Shadows the imported `invoke` deliberately: every call site below already
+ * says `invoke(...)`, so instrumenting them is this one function rather than
+ * 58 edits that can be forgotten one at a time.
+ */
+/**
+ * Commands whose *success* is not news.
+ *
+ * Named rather than filtered by a duration, because a threshold makes the log
+ * different on a fast machine than a slow one and different again in a test.
+ * This list is short and the reason is the same for each: they run on a timer
+ * or on every keystroke, and the ring is only 2000 entries — `save_session`
+ * alone, debounced at one a second, would push a whole session's worth of
+ * interesting lines out of the report while somebody typed.
+ *
+ * **A failure is always logged, including these.** What is suppressed is
+ * "nothing happened, repeatedly".
+ */
+const ROUTINE = new Set(["save_session", "tab_status", "list_connections"]);
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const started = performance.now();
+  try {
+    const out = await sendToRust<T>(cmd, args);
+    const ms = Math.round(performance.now() - started);
+    if (!ROUTINE.has(cmd)) note("debug", "ui", `${cmd} ok in ${ms}ms`);
+    return out;
+  } catch (err) {
+    const ms = Math.round(performance.now() - started);
+    note("error", "ui", `${cmd} failed after ${ms}ms: ${String(err)}`);
+    throw err;
+  }
+}
+
 
 /**
  * Everything about a connection except its secret. **This is exactly what is
@@ -596,8 +676,9 @@ export const api = {
   flywayInfo: (connectionId: string, program: string) =>
     invoke<FlywayMigration[]>("flyway_info", { connectionId, program }),
 
-  /** The diagnostic report, as text meant to be pasted into a bug report. */
-  flywayDiagnose: (program: string) => invoke<string>("flyway_diagnose", { program }),
+  /** The whole diagnostic report — build, Flyway probe, log tail — as text
+   *  meant to be pasted where somebody can read it. */
+  diagnostics: (program: string) => invoke<string>("diagnostics", { program }),
 
   // --- connections. Several can be live at once; every call names one.
   listRoutines: (connectionId: string, db: string) =>
