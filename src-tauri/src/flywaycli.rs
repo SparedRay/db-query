@@ -640,17 +640,23 @@ mod tests {
     /// The bug this whole section exists for. Flyway Desktop installs
     /// `flyway.cmd`; Windows appends `.exe` and only `.exe`; so the one
     /// spelling that matters is the one nobody would have tried.
+    ///
+    /// **Built with `join` rather than written out**, here and below. A
+    /// candidate is a path, and the separator in it belongs to the platform —
+    /// comparing `display()` against a hand-typed `a/flyway.cmd` tests this
+    /// file's spelling rather than the rule, and fails on Windows for a reason
+    /// that has nothing to do with Flyway. Which it did.
     #[test]
     fn a_bare_name_on_windows_is_tried_as_cmd_first() {
-        let c = candidates("flyway", &dirs(&["C:\\tools"]), WIN);
+        let tools = PathBuf::from("C:\\tools");
         assert_eq!(
-            c,
-            dirs(&[
-                "C:\\tools/flyway.cmd",
-                "C:\\tools/flyway.bat",
-                "C:\\tools/flyway.exe",
-                "C:\\tools/flyway",
-            ])
+            candidates("flyway", std::slice::from_ref(&tools), WIN),
+            vec![
+                tools.join("flyway.cmd"),
+                tools.join("flyway.bat"),
+                tools.join("flyway.exe"),
+                tools.join("flyway"),
+            ]
         );
     }
 
@@ -659,10 +665,9 @@ mod tests {
     #[test]
     fn directories_are_exhausted_one_at_a_time() {
         let c = candidates("flyway", &dirs(&["a", "b"]), WIN);
-        let names: Vec<String> = c.iter().map(|p| p.display().to_string()).collect();
-        assert_eq!(names[0], "a/flyway.cmd");
-        assert_eq!(names[4], "b/flyway.cmd");
         assert_eq!(c.len(), 8);
+        assert_eq!(c[0], PathBuf::from("a").join("flyway.cmd"));
+        assert_eq!(c[4], PathBuf::from("b").join("flyway.cmd"), "b starts at 4");
     }
 
     /// Somebody who typed `flyway.cmd` has said which file they mean, and
