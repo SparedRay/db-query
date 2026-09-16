@@ -1212,6 +1212,31 @@ fn out_of_order_flag(on: bool) -> Vec<String> {
     }
 }
 
+/// Why an apply did not happen.
+///
+/// **A structure rather than a string**, only because one bit of it cannot be
+/// recovered from the text by anybody who is not Flyway: whether the way out
+/// is a repair. The checksum case is invisible in `info` — the migration that
+/// drifted is still reported as `Success` — so without this the app would
+/// print Flyway's instruction to run repair and offer no way to run it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyFailed {
+    /// Flyway's own words, or ours when we refused before Flyway was reached.
+    pub message: String,
+    pub suggests_repair: bool,
+}
+
+impl ApplyFailed {
+    /// A refusal of ours: never a repair, always our sentence.
+    fn ours(message: String) -> Self {
+        Self {
+            message,
+            suggests_repair: false,
+        }
+    }
+}
+
 /// What an apply did.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1244,13 +1269,14 @@ async fn flyway_migrate(
     connection_id: String,
     program: String,
     out_of_order: bool,
-) -> Result<Applied, String> {
-    let (profile, path, environment, project) = flyway_target(&app, &connection_id)?;
+) -> Result<Applied, ApplyFailed> {
+    let (profile, path, environment, project) =
+        flyway_target(&app, &connection_id).map_err(ApplyFailed::ours)?;
     if let Some(reason) =
         flyway::write_refusal(&project, &profile, &environment, flyway::Write::Apply)
     {
         logbook::warn("flyway", "apply refused before it started");
-        return Err(reason);
+        return Err(ApplyFailed::ours(reason));
     }
 
     logbook::info(
@@ -1264,31 +1290,37 @@ async fn flyway_migrate(
         "migrate",
         out_of_order_flag(out_of_order),
     )
-    .await?;
+    .await
+    .map_err(ApplyFailed::ours)?;
 
     // Before the success shape, always: a refused migrate is an object with
     // an `error` and nothing else in it.
     if let Some(c) = flywaycli::complaint(&out.stdout) {
         logbook::warn(
             "flyway",
-            format!("migrate refused: {}", c.code.unwrap_or_default()),
+            format!("migrate refused: {}", c.code.clone().unwrap_or_default()),
         );
-        return Err(c.message);
+        // The one thing the renderer cannot work out from the text.
+        return Err(ApplyFailed {
+            suggests_repair: c.suggests_repair(),
+            message: c.message,
+        });
     }
-    let v: serde_json::Value = serde_json::from_str(&out.stdout)
-        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).map_err(|e| {
+        ApplyFailed::ours(format!("Flyway's answer could not be read as JSON: {e}"))
+    })?;
     let executed = v
         .get("migrationsExecuted")
         .and_then(|x| x.as_u64())
         .unwrap_or(0) as u32;
     if !out.ok() {
-        return Err(format!(
+        return Err(ApplyFailed::ours(format!(
             "Flyway exited with {}. {}",
             out.code
                 .map(|c| c.to_string())
                 .unwrap_or("no status".into()),
             out.stderr.trim()
-        ));
+        )));
     }
     Ok(Applied {
         executed,

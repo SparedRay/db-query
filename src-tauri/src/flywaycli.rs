@@ -472,6 +472,25 @@ pub struct Complaint {
     pub message: String,
 }
 
+impl Complaint {
+    /// Is Flyway telling the user to repair?
+    ///
+    /// **Asked of the message rather than worked out from the state**, because
+    /// the case that matters does not show up in `info` at all. A migration
+    /// that was edited after it ran is still reported as `Success`; the only
+    /// sign is that `migrate` refuses with a checksum mismatch and says:
+    ///
+    /// > Either revert the changes to the migration, or run repair to update
+    /// > the schema history.
+    ///
+    /// Both of Flyway's repair instructions are matched — "fix the schema
+    /// history" after a failed migration, "update the schema history" after a
+    /// checksum mismatch — by the words they share.
+    pub fn suggests_repair(&self) -> bool {
+        self.message.to_ascii_lowercase().contains("run repair")
+    }
+}
+
 /// Pull `{ "error": { … } }` out of any operation's output.
 ///
 /// Checked **before** the success shape, because a refused `migrate` returns an
@@ -806,6 +825,37 @@ mod tests {
     fn a_repair_answer_that_is_not_json_says_so_rather_than_panicking() {
         let e = repaired("Flyway is not installed").unwrap_err();
         assert!(e.contains("could not be read"), "{e}");
+    }
+
+    /// **Both real**, captured on 2026-09-16: the first from applying over a
+    /// failed migration, the second from applying after a migration file was
+    /// edited. They are the two ways Flyway asks for a repair, and they do not
+    /// use the same words for it.
+    #[test]
+    fn flyways_two_ways_of_asking_for_a_repair_are_both_recognised() {
+        let failed = complaint(REFUSED).unwrap();
+        assert!(failed
+            .message
+            .contains("run repair to fix the schema history"));
+        assert!(failed.suggests_repair());
+
+        const CHECKSUM: &str = r#"{"error": {"errorCode": "VALIDATE_ERROR", "message":
+          "Validate failed: Migrations have failed validation\nMigration checksum mismatch for migration version 2\n-> Applied to database : -1449498836\n-> Resolved locally    : 402850573\nEither revert the changes to the migration, or run repair to update the schema history."}}"#;
+        let drift = complaint(CHECKSUM).unwrap();
+        assert!(drift.suggests_repair(), "{}", drift.message);
+        // And this is why it cannot be worked out from `info`: the migration
+        // whose checksum drifted is still reported as Success.
+        assert_eq!(drift.code.as_deref(), Some("VALIDATE_ERROR"));
+    }
+
+    /// A refusal that is not about repair must not offer it. "Unable to
+    /// connect" is answered by fixing the connection, and a repair button
+    /// beside it is an invitation to rewrite a schema history for no reason.
+    #[test]
+    fn an_unrelated_refusal_does_not_ask_for_a_repair() {
+        const CONN: &str = r#"{"error": {"errorCode": "CONFIGURATION", "message":
+          "Unable to connect to the database. Check the connection details."}}"#;
+        assert!(!complaint(CONN).unwrap().suggests_repair());
     }
 
     /// The grouping the pane hangs on, and the one the apply dialog counts.

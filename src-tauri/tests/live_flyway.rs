@@ -358,3 +358,86 @@ async fn repairing_a_healthy_history_reports_that_it_did_nothing() {
     assert!(r.is_empty(), "{r:?}");
     assert!(r.actions.is_empty(), "{:?}", r.actions);
 }
+
+/// **The case `info` cannot see.**
+///
+/// A migration edited after it ran keeps its `Success` state — nothing in the
+/// list changes — and the only sign is `migrate` refusing with a checksum
+/// mismatch. That is why `Complaint::suggests_repair` reads Flyway's message
+/// rather than the migration's state, and why the Repair button can appear
+/// when nothing is `Failed`.
+///
+/// Runs against a **copy** of the fixture, so the real one is never edited.
+#[tokio::test]
+#[ignore]
+async fn a_migration_edited_after_it_ran_is_still_reported_as_success() {
+    use std::fs;
+
+    reset("flyway_qa");
+    let copy = std::env::temp_dir().join(format!(
+        "db-query-drift-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(copy.join("migrations")).unwrap();
+    fs::copy(project(), copy.join("flyway.toml")).unwrap();
+    for entry in fs::read_dir(repo().join("dev/flyway/migrations")).unwrap() {
+        let from = entry.unwrap().path();
+        fs::copy(
+            &from,
+            copy.join("migrations").join(from.file_name().unwrap()),
+        )
+        .unwrap();
+    }
+    let toml = copy.join("flyway.toml");
+
+    // Apply the three that work, leaving a clean history.
+    let first = flywaycli::run(
+        &program(),
+        &toml,
+        "qa",
+        "migrate",
+        vec!["-target=3".to_string()],
+    )
+    .await
+    .expect("flyway ran");
+    assert!(first.ok(), "{}", first.stderr);
+
+    // Edit one of them, the way somebody does when they "just fix a typo".
+    let v2 = copy.join("migrations/V2__seed_widgets.sql");
+    let mut text = fs::read_to_string(&v2).unwrap();
+    text.push_str("\n-- edited after it ran\n");
+    fs::write(&v2, text).unwrap();
+
+    // `info` notices nothing at all.
+    let listed = flywaycli::migrations(
+        &flywaycli::run(&program(), &toml, "qa", "info", vec![])
+            .await
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let v2row = listed
+        .iter()
+        .find(|m| m.version.as_deref() == Some("2"))
+        .unwrap();
+    assert_eq!(v2row.state, "Success", "the list still looks healthy");
+    assert_eq!(v2row.group, flywaycli::Group::Done);
+    assert!(
+        listed.iter().all(|m| m.group != flywaycli::Group::Failed),
+        "nothing is failed, so nothing would reveal the Repair button"
+    );
+
+    // And the apply is refused, with the instruction the button now follows.
+    let refused = flywaycli::run(&program(), &toml, "qa", "migrate", vec![])
+        .await
+        .unwrap();
+    let c = flywaycli::complaint(&refused.stdout).expect("refused");
+    assert_eq!(c.code.as_deref(), Some("VALIDATE_ERROR"));
+    assert!(c.message.contains("checksum mismatch"), "{}", c.message);
+    assert!(c.suggests_repair(), "{}", c.message);
+
+    let _ = fs::remove_dir_all(&copy);
+}

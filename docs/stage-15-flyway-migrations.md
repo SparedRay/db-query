@@ -865,4 +865,50 @@ the TOML **as it reads now**. Apply and repair both start with it, so the
 "re-read rather than remember" rule cannot hold in one command and lapse in the
 other.
 
-**692 UI tests on both engines, 380 Rust, 10 live Flyway.**
+### 15.6 The dead end found while writing this up
+
+Repair has a second job: realigning checksums when a migration is **edited
+after it ran**. Stage 15's own notes call that out — it "changes its checksum
+and breaks the next validation" — and the button, gated on
+`failed.length > 0`, could never appear for it.
+
+Measured on 2026-09-16, and the reason it is worse than it sounds:
+
+```
+info:     2 | Success          <- the list looks completely healthy
+migrate:  VALIDATE_ERROR
+          Migration checksum mismatch for migration version 2
+          -> Applied to database : -1449498836
+          -> Resolved locally    : 402850573
+          Either revert the changes to the migration, or run repair to
+          update the schema history.
+```
+
+**`info` reports it as `Success`.** Nothing is failed, nothing is out of place,
+Apply is offered — and Flyway then refuses it and tells the user to run a
+repair the app gave them no way to run.
+
+So the trigger is Flyway's own instruction rather than anything derived from
+the list. `Complaint::suggests_repair` looks for the words Flyway's two repair
+messages share — "fix the schema history" after a failure, "update the schema
+history" after a mismatch — and `flyway_migrate` now fails with a structure
+rather than a string:
+
+```rust
+pub struct ApplyFailed { pub message: String, pub suggests_repair: bool }
+```
+
+A string would have been enough for everything except this one bit, which
+cannot be recovered from the text by anybody who is not Flyway.
+
+The flag is per connection, and **cleared only by a repair** — not by the
+render that follows the failed apply, which would take the button away in the
+same breath it appeared. An unrelated refusal ("Unable to connect") sets
+nothing: rewriting a schema history because a database was unreachable would
+be a real change made in answer to an imaginary problem.
+
+The live test proves the premise against a **copy** of the fixture, so the real
+one is never edited: apply three, edit one of them, and watch `info` carry on
+calling it `Success` while `migrate` refuses.
+
+**696 UI tests on both engines, 382 Rust, 11 live Flyway.**
