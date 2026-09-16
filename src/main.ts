@@ -22,6 +22,7 @@ import {
   type Capabilities,
   type EngineKind,
   type HttpAuth,
+  type FlywayApplyFailed,
   type FlywayGroup,
   type FlywayProject,
   type FlywayMigration,
@@ -2881,6 +2882,20 @@ const migrationsCollapsed = new Set<FlywayGroup>(["done"]);
  */
 const migrationsOutOfOrder = new Map<string, boolean>();
 
+/**
+ * Connections where Flyway has asked for a repair but nothing is *failed*.
+ *
+ * The case is a migration edited after it ran: `info` still reports it as
+ * `Success`, so the list looks healthy, and the only sign is `migrate`
+ * refusing with a checksum mismatch and saying to run repair. Without this the
+ * app printed that instruction and offered no way to follow it.
+ *
+ * Set from Flyway's own words (decided in Rust, not matched here) and cleared
+ * only by a repair — not by the render that follows the failed apply, which
+ * would take the button away again in the same breath.
+ */
+const migrationsRepairAsked = new Set<string>();
+
 /** What each group is called, and why it is a group. */
 const GROUP_LABELS: Record<FlywayGroup, { title: string; hint: string }> = {
   pending: { title: "Will run", hint: "Flyway will apply these, in this order." },
@@ -3157,11 +3172,14 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
   // maintenance button somebody might press to see what it does: it rewrites
   // the schema history, and offering it against a healthy one invites exactly
   // that.
-  els.btnMigRepair.hidden = failed.length === 0;
+  const asked = migrationsRepairAsked.has(conns?.active()?.profile.id ?? "");
+  els.btnMigRepair.hidden = failed.length === 0 && !asked;
   els.btnMigRepair.disabled = readOnly;
   els.btnMigRepair.title = readOnly
     ? "This connection is marked read-only. Editing the schema history is a write."
-    : `Clear the failed entry for ${failed.map((m) => m.version ?? "?").join(", ")}`;
+    : failed.length
+      ? `Clear the failed entry for ${failed.map((m) => m.version ?? "?").join(", ")}`
+      : "Flyway asked for a repair when the last apply was refused.";
 
   els.btnMigApply.hidden = false;
   els.btnMigApply.textContent = pending.length
@@ -3233,7 +3251,12 @@ async function applyMigrations() {
   } catch (err) {
     // Flyway's own words, verbatim. It names the file, the line and the SQL
     // error, and a paraphrase would throw all three away.
-    results.setMessage(String(err));
+    const failure = err as Partial<FlywayApplyFailed>;
+    results.setMessage(failure.message ?? String(err));
+    // And if Flyway said the way out is a repair, make one reachable. It is
+    // the only signal for a checksum mismatch, which shows up nowhere in the
+    // list.
+    if (failure.suggestsRepair) migrationsRepairAsked.add(active.profile.id);
   }
   await renderMigrations();
 }
@@ -3285,6 +3308,7 @@ async function repairMigrations() {
   migrationsMessage("Flyway is repairing\u2026");
   try {
     const out = await api.flywayRepair(active.profile.id, settings.flywayPath);
+    migrationsRepairAsked.delete(active.profile.id);
     const touched = [...out.removed, ...out.deleted, ...out.aligned];
     results.setMessage(
       touched.length === 0

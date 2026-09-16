@@ -611,3 +611,60 @@ test("a refused repair shows Flyway's own message", async ({ page }) => {
 
   await expect(page.locator("#grid .empty")).toContainText("Unable to connect to the database");
 });
+
+/**
+ * **The dead end this closes.** A migration edited after it ran is still
+ * reported by `info` as `Success`, so the list looks entirely healthy and
+ * nothing is failed. Apply is offered, Flyway refuses it with a checksum
+ * mismatch and says to run repair — and until this, there was no Repair button
+ * anywhere to follow that instruction with.
+ *
+ * Measured against Flyway 13.5.0 on 2026-09-16; the message below is its own.
+ */
+test("Repair appears when Flyway asks for one, even with nothing failed", async ({ page }) => {
+  const HEALTHY = [MIGRATIONS[0], MIGRATIONS[1]]; // done + pending, nothing failed
+  await attach(page, {
+    flyway_info: () => HEALTHY,
+    flyway_migrate: () => {
+      throw {
+        message:
+          "Validate failed: Migrations have failed validation\n" +
+          "Migration checksum mismatch for migration version 2\n" +
+          "Either revert the changes to the migration, or run repair to update the schema history.",
+        suggestsRepair: true,
+      };
+    },
+  });
+
+  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+  await page.click("#btn-mig-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+
+  // Flyway's own words, and then a way to act on them.
+  await expect(page.locator("#grid .empty")).toContainText("checksum mismatch");
+  await expect(page.locator("#btn-mig-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-repair")).toBeEnabled();
+});
+
+/**
+ * A refusal that has nothing to do with repair must not offer one. Rewriting a
+ * schema history because the database was unreachable would be a real change
+ * made in answer to an imaginary problem.
+ */
+test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
+  await attach(page, {
+    flyway_info: () => [MIGRATIONS[0], MIGRATIONS[1]],
+    flyway_migrate: () => {
+      throw {
+        message: "Unable to connect to the database. Check the connection details.",
+        suggestsRepair: false,
+      };
+    },
+  });
+
+  await page.click("#btn-mig-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("Unable to connect");
+  await expect(page.locator("#btn-mig-repair")).toBeHidden();
+});

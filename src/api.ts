@@ -379,6 +379,19 @@ export interface FlywayMigration {
  */
 export type FlywayGroup = "pending" | "failed" | "done";
 
+/**
+ * Why an apply did not happen.
+ *
+ * A structure rather than a string for one reason: `suggestsRepair` cannot be
+ * worked out from the list. A migration edited after it ran is still reported
+ * as `Success` by `info`, so the only sign of it is Flyway refusing the apply
+ * and saying to run repair.
+ */
+export interface FlywayApplyFailed {
+  message: string;
+  suggestsRepair: boolean;
+}
+
 /** What an apply did. `executed` is Flyway's own count. */
 export interface FlywayApplied {
   executed: number;
