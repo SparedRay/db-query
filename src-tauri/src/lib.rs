@@ -12,6 +12,7 @@ pub mod flywaycli;
 pub mod history;
 pub mod httpsql;
 pub mod lint;
+pub mod logbook;
 pub mod mcp;
 pub mod mysql;
 pub mod profiles;
@@ -1187,15 +1188,59 @@ async fn flyway_info(
     flywaycli::migrations(&out.stdout)
 }
 
-/// A plain-text account of the search for Flyway and what it said when asked
-/// its version.
+// ------------------------------------------------------------- the logbook
+
+/// One thing the frontend saw.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Note {
+    level: String,
+    area: String,
+    message: String,
+}
+
+/// Record what the frontend saw.
 ///
-/// Exists because "Flyway was not found" is unanswerable from the outside. It
-/// is written to be copied out of the dialog and pasted where somebody can
-/// read it, which is why it is text rather than a structure.
+/// **A batch**, because the renderer logs every command it sends and one IPC
+/// call per log line would double the traffic across the boundary for no gain.
+/// A failure is sent as a batch of one, immediately, since the interesting
+/// case is the log line written just before something stopped working.
+///
+/// The level and the area are checked rather than trusted: a renderer that has
+/// gone wrong should not be able to fill the log with entries claiming to be
+/// something they are not. `MAX_BATCH` is the same argument — a runaway loop
+/// in the UI must not be able to push anything useful out of the ring in one
+/// call.
 #[tauri::command]
-async fn flyway_diagnose(program: String) -> String {
-    flywaycli::diagnose(&program).await
+fn log_notes(entries: Vec<Note>) {
+    const MAX_BATCH: usize = 200;
+    for note in entries.into_iter().take(MAX_BATCH) {
+        let level = match note.level.as_str() {
+            "error" => logbook::Level::Error,
+            "warn" => logbook::Level::Warn,
+            "debug" => logbook::Level::Debug,
+            _ => logbook::Level::Info,
+        };
+        // One vocabulary, so a log can be read by area. Anything else is `ui`,
+        // which is where an unexpected one came from anyway.
+        let area = match note.area.as_str() {
+            "ui" | "flyway" | "mysql" | "elastic" | "mcp" | "update" | "app" => note.area.as_str(),
+            _ => "ui",
+        };
+        logbook::note(level, area, note.message);
+    }
+}
+
+/// Everything a maintainer needs to read a problem that happened somewhere
+/// else: what this build is, what Flyway resolution sees right now, and what
+/// the app has been doing.
+///
+/// **The log is history; the Flyway part is a live probe.** Both are wanted —
+/// "it failed an hour ago" and "here is what it does when I press it" are
+/// different questions.
+#[tauri::command]
+async fn diagnostics(program: String) -> String {
+    logbook::report(&flywaycli::probe(&program).await)
 }
 
 /// Save over an existing file. `expect_mtime` is what we saw when the file was
@@ -1461,7 +1506,6 @@ pub fn run() {
             flyway_read_project,
             flyway_check,
             flyway_info,
-            flyway_diagnose,
             open_tab,
             close_tab,
             use_database,
@@ -1507,7 +1551,26 @@ pub fn run() {
             mcp_set_focus,
             mcp_token,
             mcp_regenerate_token,
+            log_notes,
+            diagnostics,
         ])
+        .setup(|app| {
+            // The first thing the app does, so a failure in anything after it
+            // has a line above it saying what version failed where.
+            if let Ok(dir) = config_dir(&app.handle().clone()) {
+                logbook::open_in(&dir);
+            }
+            logbook::info(
+                "app",
+                format!(
+                    "db-query {} starting on {} {}",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ),
+            );
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

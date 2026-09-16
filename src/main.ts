@@ -3,6 +3,7 @@ import type { SQLNamespace } from "@codemirror/lang-sql";
 
 import {
   api,
+  note,
   defaultCsvOptions,
   MCP_PUT_QUERY_EVENT,
   type AppDefaults,
@@ -126,7 +127,8 @@ const els = {
   setMcpPort: $<HTMLInputElement>("set-mcp-port"),
   setFlywayPath: $<HTMLInputElement>("set-flyway-path"),
   setFlywayNote: $("set-flyway-note"),
-  btnFlywayTest: $<HTMLButtonElement>("btn-flyway-test"),
+  setDiagnosticsNote: $("set-diagnostics-note"),
+  btnDiagnostics: $<HTMLButtonElement>("btn-diagnostics"),
   setMcpStatus: $<HTMLElement>("set-mcp-status"),
   setMcpLive: $<HTMLElement>("set-mcp-live"),
   setMcpToken: $<HTMLInputElement>("set-mcp-token"),
@@ -2247,31 +2249,33 @@ for (const el of [
 els.setTheme.onchange = commit;
 
 /**
- * Run Flyway and show what happened.
+ * Build the diagnostics report and show it.
+ *
+ * It runs Flyway on the way past, which is why the Flyway path is committed
+ * first: reporting on what is in the box beats reporting on what was saved
+ * before you typed.
  *
  * The report goes through `showValue` because that dialog already scrolls,
  * already escapes what it shows, and already has a Copy button — and being
  * copied is the entire point: "Flyway was not found" is a sentence nobody can
  * act on from outside the machine it happened on.
  *
- * The path is committed first, so testing what is in the box tests what you
- * just typed rather than what was saved before you typed it.
  */
-els.btnFlywayTest.onclick = () => {
+els.btnDiagnostics.onclick = () => {
   commit();
-  els.setFlywayNote.textContent = "Running Flyway\u2026";
-  els.btnFlywayTest.disabled = true;
+  els.setDiagnosticsNote.textContent = "Running Flyway\u2026";
+  els.btnDiagnostics.disabled = true;
   void api
-    .flywayDiagnose(settings.flywayPath)
+    .diagnostics(settings.flywayPath)
     .then((report) => {
-      els.setFlywayNote.textContent = "";
-      showValue("Flyway diagnostics", report);
+      els.setDiagnosticsNote.textContent = "";
+      showValue("Diagnostics", report);
     })
     .catch((err: unknown) => {
-      els.setFlywayNote.textContent = String(err);
+      els.setDiagnosticsNote.textContent = String(err);
     })
     .finally(() => {
-      els.btnFlywayTest.disabled = false;
+      els.btnDiagnostics.disabled = false;
     });
 };
 
@@ -2590,6 +2594,31 @@ void getCurrentWindow().onCloseRequested(async (event) => {
 
 // --- tab keybindings, at window level so they work even when the tab bar has
 // focus. Ctrl+W in particular must be intercepted or the webview may act on it.
+/**
+ * What the webview would otherwise swallow.
+ *
+ * **This is the gap the logbook exists to close.** In `mise dev` an uncaught
+ * error lands in the dev server's runtime log, which is where three of the
+ * bugs in `regressions.spec.ts` were found. In a packaged build there is no
+ * such log and no console anybody will open: the error simply vanishes, and
+ * the user reports "it did nothing".
+ *
+ * Both handlers only record. Neither swallows the event — `preventDefault` is
+ * never called — because a logbook that changes what the app does is no
+ * longer a logbook.
+ */
+window.addEventListener("error", (e) => {
+  const where = e.filename ? ` at ${e.filename}:${e.lineno}:${e.colno}` : "";
+  note("error", "ui", `uncaught ${String(e.message)}${where}`, true);
+});
+
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason as unknown;
+  const text =
+    reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
+  note("error", "ui", `unhandled rejection: ${text}`, true);
+});
+
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   // Any open dialog owns the keyboard. Ctrl+T inside the connection form should

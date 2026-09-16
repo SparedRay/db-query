@@ -57,6 +57,10 @@ function tsv(args: Record<string, unknown>): string {
 
 /** Commands every boot needs, so a test only declares what it cares about. */
 export const baseBackend: Backend = {
+  // Every command the frontend sends is logged, so every test sends these.
+  // Stubbed here rather than in each spec, and `calls()` filters them out so a
+  // test asking "what did the UI invoke" is not answered with its own logging.
+  log_notes: () => null,
   clipboard_text: (args) => tsv(args),
   app_defaults: () => ({ browseLimit: 1000, maxRows: 5000, mcpPort: 49731 }),
   // Every boot asks, and the answer is "off" unless a test says otherwise. The
@@ -216,11 +220,34 @@ export async function installBackend(page: Page, backend: Backend = {}) {
   );
 }
 
-/** Commands the UI invoked, in order. */
+/**
+ * Commands the UI invoked, in order.
+ *
+ * `log_notes` is filtered out. Every command the frontend sends is logged, so
+ * leaving it in would answer "what did the UI do" with the UI's own account of
+ * what it did — and would put a `log_notes` between every pair of commands a
+ * test is actually asking about. A test that wants to check the logging itself
+ * uses `logNotes` below.
+ */
 export async function calls(page: Page): Promise<Array<{ cmd: string; args: Record<string, unknown> }>> {
-  return page.evaluate(
+  const all = await page.evaluate(
     () => (window as unknown as { __CALLS__: Array<{ cmd: string; args: Record<string, unknown> }> }).__CALLS__,
   );
+  return all.filter((c) => c.cmd !== "log_notes");
+}
+
+/** Every log entry the frontend has sent to Rust, flattened out of its batches. */
+export async function logNotes(
+  page: Page,
+): Promise<Array<{ level: string; area: string; message: string }>> {
+  const all = await page.evaluate(
+    () => (window as unknown as { __CALLS__: Array<{ cmd: string; args: Record<string, unknown> }> }).__CALLS__,
+  );
+  return all
+    .filter((c) => c.cmd === "log_notes")
+    .flatMap(
+      (c) => (c.args.entries ?? []) as Array<{ level: string; area: string; message: string }>,
+    );
 }
 
 /** A result set shaped the way `run_script` returns one. */

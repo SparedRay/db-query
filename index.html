@@ -241,13 +241,9 @@
               <input type="text" id="set-flyway-path" placeholder="flyway"
                      autocomplete="off" spellcheck="false" />
             </label>
-            <p class="hint">
-              <button id="btn-flyway-test" class="mini" type="button">Test Flyway</button>
-              Runs it and reports what happened — which command, where it was
-              looked for, and what Flyway itself said. Copy that report if you
-              need to show somebody why it will not start.
-            </p>
             <p class="hint" id="set-flyway-note"></p>
+            <p class="hint">If it will not start, <strong>About → Diagnostics</strong>
+              shows every path that was searched and what Flyway said when it ran.</p>
           </section>
 
           <section class="pane" id="set-pane-updates" role="tabpanel"
@@ -264,6 +260,19 @@
             <p class="hint">db-query is MIT licensed. It is built on open-source
               libraries whose licences require their notices to be shipped with it.</p>
             <button type="button" id="set-licences" class="mini">Third-party licences</button>
+
+            <h3>Diagnostics</h3>
+            <p class="hint">What this build is, what happens when Flyway is run
+              right now, and what the app has been doing. Copy it somewhere
+              somebody can read it when something will not work.</p>
+            <p class="hint"><strong>It holds no passwords.</strong> The log
+              records what each command was and how long it took, never what was
+              passed to it, and an entry that looks like it carries a credential
+              is dropped rather than written down. It does hold file paths.</p>
+            <p class="hint">
+              <button id="btn-diagnostics" class="mini" type="button">Diagnostics…</button>
+            </p>
+            <p class="hint" id="set-diagnostics-note"></p>
           </section>
         </div>
       </div>
