@@ -212,7 +212,7 @@ body {
   padding: 7px;
   gap: 0;
   grid-template-columns:
-    48px var(--sidebar-w, 260px) 7px minmax(0, 1fr)
+    48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr)
     var(--mig-gap, 0px) var(--mig-w, 0px);
   /* The row must be pinned, not implicit. An implicit row is `auto`, which
      sizes to its tallest child — so a schema with more tables than fit made the
@@ -245,22 +245,46 @@ body {
 }
 /* The rail sits flush against the sidebar; one seam between them, not two. */
 .railbar { border-right: none; border-radius: 9px 0 0 9px; }
+/* With the schema collapsed there is nothing to be flush against. */
+#app.schema-closed .railbar { border-right: 1px solid var(--border); border-radius: 9px; }
 #sidebar { border-left: none; border-radius: 0 9px 9px 0; }
 
 /* Open: the splitter's 7px and the pane's own width become real tracks. */
 #app.migrations-open { --mig-gap: 7px; --mig-w: var(--mig-pane-w, 340px); }
+
+/* Collapsed: the schema's track and its splitter go to nothing, and the width
+   the user dragged is left alone in `--sidebar-w` so reopening restores it
+   rather than resetting it. The pane is `hidden` as well as zero-width —
+   a zero-width track still holds a focusable tree. */
+#app.schema-closed { --tree-w: 0px; --tree-gap: 0px; }
+
+/* Every panel is pinned to its own column.
+   Auto-placement counts only the items that are *displayed*, so hiding the
+   schema and its splitter slid `#main` two columns left — into the 0px track
+   the schema had just vacated — and the editor disappeared along with the
+   tree. Named columns cannot slide. */
+#app > .railbar { grid-column: 1; }
+#app > #sidebar { grid-column: 2; }
+#app > #vsplit { grid-column: 3; }
+#app > #main { grid-column: 4; }
+#app > #msplit { grid-column: 5; }
+#app > #migrations-pane { grid-column: 6; }
 
 #migrations-pane {
   display: flex; flex-direction: column;
   min-width: 0; min-height: 0;
   background: var(--bg-raised);
 }
-.pane-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 9px; border-bottom: 1px solid var(--border);
-  font-weight: 600; font-size: 12px; color: var(--fg-strong);
+/* The head reuses `.pane-head`, which the sidebar and the editor toolbar also
+   wear. Its own wants — a section label's weight, and a title that takes the
+   slack so Refresh sits hard right — are therefore scoped to this pane. Once
+   they were not, and `.pane-head > :first-child { flex: 1 }` reached the
+   sidebar's colour dot and the editor's Run button and stretched both. */
+#migrations-pane .pane-head { font-weight: 600; color: var(--fg-strong); }
+#mig-title {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.pane-head > :first-child { flex: 1; min-width: 0; }
 /* Which environment this is, said permanently rather than only at import —
    §3.5's second half: a guard can only compare what differs, so the cases it
    cannot catch are answered by never letting the environment out of sight. */
@@ -384,6 +408,9 @@ input.num {
 }
 .rail-cog {
   flex: 0 0 auto; margin: 4px auto 8px; width: 30px; height: 30px;
+  /* The `.on` marker hangs outside the button, so it needs something to hang
+     from. Without this it positions against the page. */
+  position: relative;
   display: flex; align-items: center; justify-content: center;
   border-radius: 8px; border: 1px solid var(--border);
   background: transparent; color: var(--fg-dim);
@@ -391,6 +418,15 @@ input.num {
 }
 .rail-cog:hover { color: var(--fg); background: var(--btn-bg); }
 .rail-cog svg { width: 16px; height: 16px; display: block; }
+/* A pane toggle that is showing its pane. The class was set from the first
+   toggle onwards and styled by nothing, so both buttons looked identical
+   whether their pane was open or shut. */
+.rail-cog.on { color: var(--fg); background: var(--btn-bg); }
+.rail-cog.on::after {
+  content: ""; position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 16px; border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
 .rail::-webkit-scrollbar { display: none; }
 
 .rail-item {

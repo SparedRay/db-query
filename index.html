@@ -14,6 +14,8 @@
              place rather than being duplicated as markup here. -->
         <button id="btn-assistant" class="rail-cog" type="button" title="Ask the assistant (Ctrl+K)"></button>
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
+        <button id="btn-schema" class="rail-cog" type="button"
+                title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
         <button id="btn-migrations" class="rail-cog" type="button"
                 title="Migrations" aria-pressed="false" hidden></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
@@ -239,6 +241,12 @@
               <input type="text" id="set-flyway-path" placeholder="flyway"
                      autocomplete="off" spellcheck="false" />
             </label>
+            <p class="hint">
+              <button id="btn-flyway-test" class="mini" type="button">Test Flyway</button>
+              Runs it and reports what happened — which command, where it was
+              looked for, and what Flyway itself said. Copy that report if you
+              need to show somebody why it will not start.
+            </p>
             <p class="hint" id="set-flyway-note"></p>
           </section>
 

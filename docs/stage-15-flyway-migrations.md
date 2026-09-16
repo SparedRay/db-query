@@ -377,3 +377,166 @@ harness has nothing equivalent, and this is the second time that gap has cost a
 confusing failure.
 
 **626 UI tests on both engines, 324 Rust unit, 4 live Flyway.**
+
+## 13. What the first real user found — 2026-09-16
+
+Three reports, from the first hands-on pass against a real installation. Two
+were shipped defects; the third is the feature that pass asked for.
+
+### 13.1 A shared class, redefined
+
+> "theres an odd deformed color after the connection name"
+
+The colour dot beside the connection name was a **72px ellipse**, and the Run
+button was a bar across the whole toolbar. Both since §12, from one line:
+
+```css
+.pane-head { … font-weight: 600; font-size: 12px; … }
+.pane-head > :first-child { flex: 1; min-width: 0; }
+```
+
+The migrations pane's head wrote its wants against `.pane-head` — a class the
+sidebar head and the editor toolbar have worn since Stage 1. `.conn-dot` sets
+`flex: 0 0 auto`, but `.pane-head > :first-child` is the more specific
+selector, so the dot grew. The styles are now scoped to `#migrations-pane` and
+`#mig-title`.
+
+**Why no test caught it.** Every test here asks about behaviour — is it
+visible, does it say the right thing, does clicking it do the right thing —
+and none asks about *shape*. A 72px dot is visible, it is in the right place,
+and it says nothing. The regression test added measures the box: a round dot
+is square, and Run is narrower than half its bar.
+
+The general lesson is about **editing a class rather than a pane**. Nothing in
+`#migrations-pane .pane-head { … }` could have leaked; `.pane-head { … }` in a
+file section headed "the migrations pane" reads exactly the same and is not.
+
+### 13.2 Windows cannot find `flyway.cmd`
+
+> "the flyway from flyway desktop is not being recognized on windows (which
+> uses flyway.cmd file)"
+
+Not a configuration problem. `std::process::Command` on Windows searches the
+PATH by appending `.exe` **and only `.exe`** — from `resolve_exe` in `std`:
+
+```rust
+let has_extension = exe_path.as_encoded_bytes().contains(&b'.');
+let result = search_paths(parent_paths, child_paths, |mut path| {
+    path.push(exe_path);
+    if !has_extension {
+        path.set_extension(EXE_EXTENSION);
+    }
+    program_exists(&path)
+});
+```
+
+`PATHEXT` is never consulted. The Flyway distribution ships `flyway.cmd`, so
+`Command::new("flyway")` reports *program not found* for a Flyway sitting on
+the PATH in plain sight. The same rule is why `Command::new("npm")` fails on
+Windows and has surprised people for a decade.
+
+So `flywaycli::resolve` does the search: `.cmd`, `.bat`, `.exe`, then the bare
+name, every spelling within one directory before moving to the next. Handing
+the resolved `.cmd` back to `Command` is safe — `std` spots the extension and
+runs it through `cmd.exe` with batch-specific quoting, which is the fix for
+CVE-2024-24576 and the reason this does not build a command string of its own.
+
+`EXTENSIONS` is empty everywhere else, and `resolve` returns early: `execvp`
+already searches the PATH and there is nothing to guess, so Linux and macOS
+keep exactly the behaviour they had.
+
+**Tested on a machine that is not Windows.** `candidates` takes the PATH and
+the extension list as arguments, so the Windows rules are five ordinary unit
+tests here. The one that would have caught this in the first place:
+
+```rust
+let c = candidates("flyway", &dirs(&["C:\\tools"]), WIN);
+assert_eq!(c, dirs(&[
+    "C:\\tools/flyway.cmd", "C:\\tools/flyway.bat",
+    "C:\\tools/flyway.exe", "C:\\tools/flyway",
+]));
+```
+
+### 13.3 A report, because the message was unanswerable
+
+> "any way we could generate maybe a log with the error so we can share here
+> and debug from there?"
+
+Yes, and it should have existed from the start. "Flyway was not found" is a
+sentence nobody can act on from anywhere but the machine it happened on, and
+it is not even true in the case above.
+
+**Settings → Integrations → Test Flyway** produces text:
+
+```
+db-query — Flyway diagnostics
+(paths only, no passwords — redact if you like)
+
+app        0.4.2
+os         windows x86_64
+setting    (empty — using the default, "flyway")
+search     164 candidates, Windows appends only .exe so .cmd is tried here
+found      C:\Users\…\flyway\flyway.cmd
+running    "C:\Users\…\flyway\flyway.cmd" -v
+
+exit       0
+
+--- stdout ---
+Flyway Community Edition 13.5.0 by Redgate
+… and 31 more lines
+```
+
+Three decisions worth keeping:
+
+* **It runs the same code path it reports on.** `run` and `diagnose` share one
+  `spawn`, so a report saying the program was found cannot come from a
+  resolver the real path does not use.
+* **It carries no secret.** The project file, the JDBC URL and the connection
+  are not in it. It does carry file paths and, on Windows, effectively the
+  PATH — which is why the second line says so.
+* **It is capped.** `flyway -v` prints a forty-line plugin table for databases
+  nobody here uses. A report too long to paste answers nothing.
+
+The misses are only listed when nothing was found, which is the only time they
+are the answer.
+
+**And a test that proved nothing.** The first version of the UI test filled the
+path box and clicked the button, then asserted the backend was asked about the
+typed path. It passed with the handler's `commit()` deleted: Playwright's
+`fill` fires a `change` event, which is already wired to `commit`, so the
+setting was saved on the way past no matter what the button did. It now sets
+the value without dispatching `change`, and fails — `""` instead of the path —
+when the handler stops committing. Proving a new test can fail is the step
+that catches this, and it is worth doing every time.
+
+### 13.4 The schema pane collapses
+
+> "let's make the schema list collapsible as today we can setup the width but
+> maybe a button to collapse on a second vertical row similar to connections"
+
+A rail toggle beside the migrations one, and **Ctrl+B**. The width the
+splitter was dragged to is untouched: collapsing overrides the grid *track*,
+so reopening restores the width rather than resetting it.
+
+Not remembered across launches — nor are the splitter positions or the
+migrations pane. Starting with the schema hidden and no memory of having
+hidden it is a worse first second than reopening it.
+
+**The bug this grew.** The first version hid the pane with `hidden`, and every
+panel on the shell grid was auto-placed. Auto-placement counts only the items
+that are *displayed*, so removing two grid items slid `#main` two columns left
+— into the zero-width track the schema had just vacated. The pane collapsed
+and took the editor with it. Every panel now names its column.
+
+That is what the test asserts, and why it asserts the wrong-looking thing: not
+that the schema is hidden, but that **the editor got the width**.
+
+```ts
+const after = (await page.locator("#main").boundingBox())!.width;
+expect(after).toBeGreaterThan(before + 200);   // was 0
+```
+
+Also fixed in passing: `.rail-cog.on` was set by the migrations toggle from
+§12 onwards and styled by nothing, so a pane toggle looked identical whether
+its pane was open or shut. Both now carry the accent bar the rail already uses
+for the active connection.

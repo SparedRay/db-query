@@ -64,6 +64,7 @@ const els = {
   btnRun: $<HTMLButtonElement>("btn-run"),
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
+  btnSchema: $<HTMLButtonElement>("btn-schema"),
   btnMigrations: $<HTMLButtonElement>("btn-migrations"),
   msplit: $("msplit"),
   migrationsPane: $("migrations-pane"),
@@ -125,6 +126,7 @@ const els = {
   setMcpPort: $<HTMLInputElement>("set-mcp-port"),
   setFlywayPath: $<HTMLInputElement>("set-flyway-path"),
   setFlywayNote: $("set-flyway-note"),
+  btnFlywayTest: $<HTMLButtonElement>("btn-flyway-test"),
   setMcpStatus: $<HTMLElement>("set-mcp-status"),
   setMcpLive: $<HTMLElement>("set-mcp-live"),
   setMcpToken: $<HTMLInputElement>("set-mcp-token"),
@@ -219,6 +221,7 @@ let connected = false;
 // of this file: `syncConnLabel` runs while the module is still initialising,
 // and a `let` further down is in its temporal dead zone until then — which
 // threw on every boot before this moved.
+let schemaOpen = true;
 let migrationsOpen = false;
 let activeDb: string | null = null;
 
@@ -827,6 +830,7 @@ function refilterTree() {
 for (const [el, name] of [
   [els.btnAssistant, "assistant"],
   [els.btnHistory, "history"],
+  [els.btnSchema, "sidebar"],
   [els.btnMigrations, "migrations"],
   [els.btnSettings, "settings"],
 ] as const) {
@@ -2241,6 +2245,36 @@ for (const el of [
   el.onchange = commit;
 }
 els.setTheme.onchange = commit;
+
+/**
+ * Run Flyway and show what happened.
+ *
+ * The report goes through `showValue` because that dialog already scrolls,
+ * already escapes what it shows, and already has a Copy button — and being
+ * copied is the entire point: "Flyway was not found" is a sentence nobody can
+ * act on from outside the machine it happened on.
+ *
+ * The path is committed first, so testing what is in the box tests what you
+ * just typed rather than what was saved before you typed it.
+ */
+els.btnFlywayTest.onclick = () => {
+  commit();
+  els.setFlywayNote.textContent = "Running Flyway\u2026";
+  els.btnFlywayTest.disabled = true;
+  void api
+    .flywayDiagnose(settings.flywayPath)
+    .then((report) => {
+      els.setFlywayNote.textContent = "";
+      showValue("Flyway diagnostics", report);
+    })
+    .catch((err: unknown) => {
+      els.setFlywayNote.textContent = String(err);
+    })
+    .finally(() => {
+      els.btnFlywayTest.disabled = false;
+    });
+};
+
 els.btnSettings.onclick = () => openSettings();
 els.setClose.onclick = () => els.settingsDialog.close();
 
@@ -2572,8 +2606,14 @@ window.addEventListener("keydown", (e) => {
 
   if (e.key === "p" || e.key === "P") {
     e.preventDefault();
+    // Filtering a pane that is not on screen would do nothing visible, so the
+    // shortcut opens it. Asking to filter is asking to see.
+    if (!schemaOpen) toggleSchema(true);
     els.treeFilter.focus();
     els.treeFilter.select();
+  } else if (e.key === "b" || e.key === "B") {
+    e.preventDefault();
+    toggleSchema(!schemaOpen);
   } else if (e.key === "k" || e.key === "K") {
     e.preventDefault();
     void assistant.open();
@@ -2714,6 +2754,32 @@ function toggleMigrations(open: boolean) {
   els.btnMigrations.classList.toggle("on", open);
   if (open) void renderMigrations();
 }
+
+/**
+ * Show or hide the schema pane.
+ *
+ * The width the splitter was dragged to lives in `--sidebar-w` and is left
+ * alone; collapsing overrides the *track*, so reopening restores the width
+ * rather than resetting it to the default.
+ *
+ * Not remembered across launches, deliberately — nor are the splitter
+ * positions or the migrations pane. Starting with the schema hidden and no
+ * memory of having hidden it is a worse first second than reopening it.
+ */
+function toggleSchema(open: boolean) {
+  schemaOpen = open;
+  document.getElementById("app")!.classList.toggle("schema-closed", !open);
+  // Zero-width is not gone: a collapsed pane that still holds the filter box
+  // and the tree would still take Tab, and Ctrl+P would focus something
+  // nobody can see.
+  els.sidebar.hidden = !open;
+  els.vsplit.hidden = !open;
+  els.btnSchema.setAttribute("aria-pressed", String(open));
+  els.btnSchema.classList.toggle("on", open);
+}
+
+els.btnSchema.onclick = () => toggleSchema(!schemaOpen);
+els.btnSchema.classList.add("on");
 
 els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
 els.btnMigRefresh.onclick = () => void renderMigrations();

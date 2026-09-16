@@ -32,6 +32,11 @@ export type IconName =
   // The migrations pane's rail button: a stack of layers, which is what an
   // ordered set of migrations looks like.
   | "migrations"
+  // The schema pane's rail button: a panel with a column down its left, which
+  // is the shape of the thing being shown and hidden rather than of what is
+  // in it. A database cylinder here would say "connection", which is what the
+  // rail above it already means.
+  | "sidebar"
   // Not a tree icon: the rail's mark for a connection that refuses writes.
   // Drawn here anyway, because the reasons in this file's header — one grid,
   // one stroke width, `currentColor` — are exactly why it should not be an
@@ -133,6 +138,9 @@ const PATHS: Record<IconName, string> = {
   history: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.6V8l2.4 1.6"/>',
   assistant:
     '<path d="M8 2.2l1.5 3.6 3.6 1.5-3.6 1.5L8 12.4 6.5 8.8 2.9 7.3l3.6-1.5z"/>',
+  sidebar:
+    '<rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6"/>' +
+    '<path d="M6.4 3.2v9.6"/>',
   close: '<path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/>',
 };
 

@@ -113,3 +113,23 @@ async fn an_unknown_environment_comes_back_as_flyways_own_refusal() {
         c.message
     );
 }
+
+/// The diagnostic report, against a Flyway that is really there.
+///
+/// It exists to be pasted into a bug report, so the thing worth proving is
+/// that it contains the three answers somebody needs: which command, where it
+/// was found, and what Flyway itself said. The unit tests cover the shape when
+/// it is *not* there, which is the commoner case and the easier one to fake.
+#[tokio::test]
+#[ignore]
+async fn the_report_carries_flyways_own_version() {
+    let text = flywaycli::diagnose(&program()).await;
+    println!("{text}");
+
+    assert!(text.contains("exit       0"), "{text}");
+    assert!(text.contains("--- stdout ---"), "{text}");
+    assert!(
+        text.contains("Flyway") && text.contains("13.5.0"),
+        "the version is the point of it: {text}"
+    );
+}

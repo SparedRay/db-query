@@ -1187,6 +1187,17 @@ async fn flyway_info(
     flywaycli::migrations(&out.stdout)
 }
 
+/// A plain-text account of the search for Flyway and what it said when asked
+/// its version.
+///
+/// Exists because "Flyway was not found" is unanswerable from the outside. It
+/// is written to be copied out of the dialog and pasted where somebody can
+/// read it, which is why it is text rather than a structure.
+#[tauri::command]
+async fn flyway_diagnose(program: String) -> String {
+    flywaycli::diagnose(&program).await
+}
+
 /// Save over an existing file. `expect_mtime` is what we saw when the file was
 /// opened; a mismatch returns `Conflict` instead of overwriting someone's work.
 #[tauri::command]
@@ -1450,6 +1461,7 @@ pub fn run() {
             flyway_read_project,
             flyway_check,
             flyway_info,
+            flyway_diagnose,
             open_tab,
             close_tab,
             use_database,
