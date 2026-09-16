@@ -583,3 +583,34 @@ test("an absent needsSecret is treated as needing one", async ({ page }) => {
   await expect(page.locator("#conn-dialog")).toBeVisible();
   expect(await commandNames(page)).not.toContain("connect_saved");
 });
+
+// ----------------------------------------------------------------- Stage 15
+
+/**
+ * The migrations pane wrote its head styles against `.pane-head` — a class the
+ * sidebar head and the editor toolbar had worn since Stage 1. One line of it,
+ * `.pane-head > :first-child { flex: 1 }`, therefore stretched the sidebar's
+ * 9px colour dot into a 72px ellipse and blew the Run button across the whole
+ * toolbar. Both were visible on every connection; neither failed a test,
+ * because every test asked about behaviour and none about shape.
+ *
+ * So this one measures shape. A round dot is square, and Run is a button
+ * rather than a bar.
+ */
+test("the connection dot stays round and Run stays button-sized", async ({ page }) => {
+  await connect(page);
+
+  const box = async (id: string) => {
+    const b = await page.locator(id).boundingBox();
+    if (!b) throw new Error(`${id} has no box`);
+    return b;
+  };
+
+  const dot = await box("#conn-dot");
+  expect(dot.width).toBeCloseTo(dot.height, 0);
+
+  // Wide enough for "Run Ctrl+Enter", nowhere near the pane it sits in.
+  const run = await box("#btn-run");
+  const bar = await box("#editor-pane .pane-head");
+  expect(run.width).toBeLessThan(bar.width / 2);
+});

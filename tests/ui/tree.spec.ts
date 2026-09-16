@@ -389,3 +389,82 @@ test("the rail names the engine it is actually connected to", async ({ page }) =
   await connect(page, { connect: () => ({ ...CONN_INFO, capabilities: READ_ONLY_CAPS }) });
   await expect(page.locator(".rail-item")).toHaveAttribute("title", /elasticsearch 8\.4\.0/);
 });
+
+// ------------------------------------------------- collapsing the whole pane
+
+/**
+ * The schema pane can be dragged narrower but never got out of the way. These
+ * cover the rail toggle that hides it.
+ *
+ * The width test is the one that matters, and not for tidiness: the first
+ * attempt hid the pane with `hidden`, and because every panel was
+ * auto-placed, removing two grid items slid the editor two columns left into
+ * the zero-width track the schema had just vacated. The pane collapsed and
+ * took the editor with it. So what is asserted is where the *editor* ends up.
+ */
+test("the rail button collapses the schema and gives the width to the editor", async ({
+  page,
+}) => {
+  await connect(page);
+  await openDatabase(page);
+
+  const before = (await page.locator("#main").boundingBox())!.width;
+  await expect(page.locator("#sidebar")).toBeVisible();
+
+  await page.click("#btn-schema");
+
+  await expect(page.locator("#sidebar")).toBeHidden();
+  await expect(page.locator("#vsplit")).toBeHidden();
+  const after = (await page.locator("#main").boundingBox())!.width;
+  expect(after).toBeGreaterThan(before + 200);
+  // The rail itself stays: it is how you get the pane back.
+  await expect(page.locator("#btn-schema")).toBeVisible();
+  await expect(page.locator("#btn-schema")).toHaveAttribute("aria-pressed", "false");
+});
+
+/** Collapsing is not a reset: the width you dragged to is still yours. */
+test("reopening restores the width the splitter was dragged to", async ({ page }) => {
+  await connect(page);
+  await page.evaluate(() =>
+    document.documentElement.style.setProperty("--sidebar-w", "410px"),
+  );
+  const dragged = (await page.locator("#sidebar").boundingBox())!.width;
+  expect(Math.round(dragged)).toBe(410);
+
+  await page.click("#btn-schema");
+  await page.click("#btn-schema");
+
+  const back = (await page.locator("#sidebar").boundingBox())!.width;
+  expect(Math.round(back)).toBe(410);
+});
+
+/** The tree does not forget what was open while it was off screen. */
+test("the tree comes back as it was left", async ({ page }) => {
+  await connect(page);
+  await openDatabase(page);
+  await openGroup(page, "Views");
+  await expect(page.locator('.node.table:has-text("user_totals")')).toBeVisible();
+
+  await page.click("#btn-schema");
+  await page.click("#btn-schema");
+
+  // Views is not open by default, so seeing it open is the tree's own state
+  // surviving rather than the tree having been rebuilt from scratch.
+  await expect(page.locator('.node.table:has-text("user_totals")')).toBeVisible();
+});
+
+test("Ctrl+B toggles the pane, and Ctrl+P opens it to filter in", async ({ page }) => {
+  await connect(page);
+
+  await page.keyboard.press("Control+b");
+  await expect(page.locator("#sidebar")).toBeHidden();
+
+  // Asking to filter is asking to see: focusing a box inside a hidden pane
+  // would swallow every keystroke that followed.
+  await page.keyboard.press("Control+p");
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await expect(page.locator("#tree-filter")).toBeFocused();
+
+  await page.keyboard.press("Control+b");
+  await expect(page.locator("#sidebar")).toBeHidden();
+});

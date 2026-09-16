@@ -596,6 +596,9 @@ export const api = {
   flywayInfo: (connectionId: string, program: string) =>
     invoke<FlywayMigration[]>("flyway_info", { connectionId, program }),
 
+  /** The diagnostic report, as text meant to be pasted into a bug report. */
+  flywayDiagnose: (program: string) => invoke<string>("flyway_diagnose", { program }),
+
   // --- connections. Several can be live at once; every call names one.
   listRoutines: (connectionId: string, db: string) =>
     invoke<RoutineRef[]>("list_routines", { connectionId, db }),

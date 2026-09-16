@@ -239,3 +239,61 @@ test("settings reopen on the section last used", async ({ page }) => {
   await expect(page.locator("#set-pane-updates")).toBeVisible();
   await expect(page.locator("#set-pane-appearance")).toBeHidden();
 });
+
+/**
+ * "Flyway was not found" is unanswerable from anywhere but the machine it
+ * happened on — which on Windows is where Rust's `Command` appends `.exe` and
+ * only `.exe`, so the `flyway.cmd` the distribution ships is invisible to it.
+ *
+ * The report is the answer: what was asked for, where it was looked for, and
+ * what Flyway itself said. It is built in Rust and tested there; what this
+ * owns is that the button reaches it with **what is in the box right now**,
+ * and that the report lands somewhere it can be copied from.
+ */
+test("Test Flyway reports on the path currently typed, not the one last saved", async ({
+  page,
+}) => {
+  await connect(page, {
+    ...schemaBackend,
+    flyway_diagnose: (a) => `db-query — Flyway diagnostics\nsetting ${String(a.program)}\n`,
+  });
+  await open(page);
+  await settingsSection(page, "integrations");
+
+  // Set without dispatching `change`. Filling it fires one, which commits the
+  // setting on the way past and makes the test pass whether or not the button
+  // reads the box — the first version of this did exactly that and proved
+  // nothing. This way the only thing that can carry the path to the backend
+  // is the handler committing it itself.
+  await page.locator("#set-flyway-path").evaluate((el) => {
+    (el as HTMLInputElement).value = "C:\\tools\\flyway.cmd";
+  });
+  await page.click("#btn-flyway-test");
+
+  const asked = (await calls(page)).filter((c) => c.cmd === "flyway_diagnose");
+  expect(asked).toHaveLength(1);
+  expect(asked[0].args.program).toBe("C:\\tools\\flyway.cmd");
+
+  // And it is on screen, in the viewer that has a Copy button.
+  const viewer = page.locator("dialog.viewer");
+  await expect(viewer).toBeVisible();
+  await expect(viewer.locator(".viewer-body")).toContainText("C:\\tools\\flyway.cmd");
+  await expect(viewer.locator("menu button", { hasText: "Copy" })).toBeVisible();
+});
+
+/** A backend that refuses must not leave the button dead for the next try. */
+test("a failed diagnostic says so and leaves the button usable", async ({ page }) => {
+  await connect(page, {
+    ...schemaBackend,
+    flyway_diagnose: () => {
+      throw new Error("the command panicked");
+    },
+  });
+  await open(page);
+  await settingsSection(page, "integrations");
+
+  await page.click("#btn-flyway-test");
+  await expect(page.locator("#set-flyway-note")).toContainText("panicked");
+  await expect(page.locator("#btn-flyway-test")).toBeEnabled();
+  await expect(page.locator("dialog.viewer")).toHaveCount(0);
+});
