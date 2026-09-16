@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
-import { CONN_INFO, MYSQL_CAPS, calls, connect, installBackend, schemaBackend } from "./harness";
+import {
+  CONN_INFO,
+  MYSQL_CAPS,
+  calls,
+  commandNames,
+  connect,
+  installBackend,
+  schemaBackend,
+} from "./harness";
 
 /**
  * The migrations pane.
@@ -36,17 +44,17 @@ const MIGRATIONS = [
   {
     version: "1", description: "create widgets", state: "Success", category: "Versioned",
     kind: "SQL", filepath: "/p/V1__create_widgets.sql",
-    installedOnUtc: "2026-09-10T23:39:43Z", installedBy: "root", executionTimeMs: 12,
+    installedOnUtc: "2026-09-10T23:39:43Z", installedBy: "root", executionTimeMs: 12, group: "done",
   },
   {
     version: "2", description: "add colour", state: "Pending", category: "Versioned",
     kind: "SQL", filepath: "/p/V2__add_colour.sql",
-    installedOnUtc: null, installedBy: null, executionTimeMs: null,
+    installedOnUtc: null, installedBy: null, executionTimeMs: null, group: "pending",
   },
   {
     version: "3", description: "deliberately broken", state: "Failed", category: "Versioned",
     kind: "SQL", filepath: "/p/V3__broken.sql",
-    installedOnUtc: "2026-09-10T23:39:43Z", installedBy: "root", executionTimeMs: 7,
+    installedOnUtc: "2026-09-10T23:39:43Z", installedBy: "root", executionTimeMs: 7, group: "failed",
   },
 ];
 
@@ -63,8 +71,18 @@ function attached(extra: Record<string, unknown> = {}) {
     flyway_read_project: () => PROJECT,
     flyway_pick_project: () => "/p/flyway.toml",
     flyway_check: () => [],
+    flyway_migrate: () => ({ executed: 1, target: "2" }),
     ...extra,
   };
+}
+
+/** Attach the project through the real dialogs, and land on the list. */
+async function attach(page: Page, extra: Record<string, unknown> = {}) {
+  await connect(page, attached(extra));
+  await openPane(page);
+  await page.click(".mig-empty button");
+  await page.locator('dialog.ask button:has-text("UAT database")').click();
+  await page.locator(".mig").first().waitFor();
 }
 
 /** Every `save_profile` that actually attached a project. */
@@ -170,6 +188,13 @@ test("the list shows Flyway's own states, and which environment it is", async ({
   await expect(page.locator(".mig")).toHaveCount(3);
   await expect(page.locator('.mig[data-state="failed"] .d')).toHaveText("deliberately broken");
   await expect(page.locator('.mig[data-state="pending"] .d')).toHaveText("add colour");
+  // Grouped by what an apply would do, not by what has happened.
+  await expect(page.locator('.mig-group[data-group="pending"] .mig-group-title')).toHaveText(
+    "Will run",
+  );
+  await expect(page.locator('.mig-group[data-group="done"] .mig-group-title')).toHaveText(
+    "Will not run",
+  );
   // §3.5's second half: the environment is never out of sight, because a guard
   // can only compare what differs.
   await expect(page.locator("#mig-env")).toContainText("uat");
@@ -215,4 +240,253 @@ test("Flyway's own refusal is what the pane shows", async ({ page }) => {
   await page.locator('dialog.ask button:has-text("UAT database")').click();
 
   await expect(page.locator(".mig-empty")).toContainText(/run repair to fix the schema history/);
+});
+
+// ------------------------------------------------- what a tab says it is
+
+/**
+ * A migration tab claimed to have been "Added by an MCP client", because the
+ * provenance mark was a boolean called `external` and MCP was the only thing
+ * that could set it. A fact with two possible answers does not fit in a flag.
+ */
+test("a migration opens as a migration, not as something an MCP client sent", async ({
+  page,
+}) => {
+  await attach(page, {
+    read_file: () => ({
+      name: "V2__add_colour.sql", path: "/p/V2__add_colour.sql",
+      contents: "ALTER TABLE widgets ADD colour VARCHAR(16);",
+      sizeBytes: 41, encoding: "utf-8", lineEnding: "lf", mtimeMs: 1, readOnly: false,
+    }),
+  });
+  await page.locator('.mig[data-state="pending"]').click();
+
+  const mark = page.locator("#script-tabs .stab.active .stab-origin");
+  await expect(mark).toHaveAttribute("data-origin", "migration");
+  await expect(mark).toHaveAttribute("title", /Flyway migration/);
+  await expect(mark).not.toHaveAttribute("title", /MCP/);
+  // It is an icon from the app's own set, not a stray arrow character.
+  await expect(mark.locator("svg")).toHaveCount(1);
+});
+
+// ------------------------------------------------------------- grouping
+
+test("groups collapse and expand without asking Flyway again", async ({ page }) => {
+  await attach(page);
+  const done = page.locator('.mig-group[data-group="done"]');
+  const runs = async () => (await calls(page)).filter((c) => c.cmd === "flyway_info").length;
+
+  // The long pile starts shut: a project with two hundred applied migrations
+  // should not need scrolling to find the one that is pending.
+  await expect(done).toHaveClass(/collapsed/);
+  await expect(done.locator(".mig-group-count")).toHaveText("1");
+
+  const before = await runs();
+  await done.locator(".mig-group-head").click();
+  await expect(done).not.toHaveClass(/collapsed/);
+  await expect(done.locator(".mig-group-head")).toHaveAttribute("aria-expanded", "true");
+  // Redrawn from what is already on screen: collapsing must not start a JVM.
+  expect(await runs()).toBe(before);
+
+  await done.locator(".mig-group-head").click();
+  await expect(done).toHaveClass(/collapsed/);
+});
+
+/**
+ * Out-of-order changes *which* migrations Flyway will run, so the question is
+ * asked again with the flag rather than reasoned about here. `Ignored` becomes
+ * `Pending` under it, and a confirmation built on a guess would name the wrong
+ * versions.
+ */
+test("out of order re-asks Flyway with the flag", async ({ page }) => {
+  await attach(page);
+  const flags = async () =>
+    (await calls(page)).filter((c) => c.cmd === "flyway_info").map((c) => c.args.outOfOrder);
+
+  expect(await flags()).toEqual([false]);
+
+  await page.locator("#mig-out-of-order").check();
+  await expect.poll(async () => (await flags()).length).toBe(2);
+  expect((await flags())[1]).toBe(true);
+});
+
+// -------------------------------------------- seeing and changing the project
+
+/** There was no way to see which file a connection was pointed at. */
+test("the pane says which project file and folder it is using", async ({ page }) => {
+  await attach(page);
+  await expect(page.locator(".mig-proj-name")).toHaveText("Flyway Connections");
+  await expect(page.locator(".mig-proj-where")).toContainText("flyway.toml");
+  await expect(page.locator(".mig-proj-where")).toContainText("/p");
+  await expect(page.locator(".mig-proj-name")).toHaveAttribute("title", "/p/flyway.toml");
+});
+
+test("the environment can be changed, and goes through the same guard", async ({ page }) => {
+  // Agrees at import, disagrees afterwards: the file moved on, which is what
+  // a branch switch does.
+  let asked = 0;
+  await attach(page, { flyway_check: () => (asked++ === 0 ? [] : ["host"]) });
+
+  await page.click(".mig-proj-top button");
+  await page.locator('dialog.ask button:has-text("Change environment")').click();
+  await page.locator('dialog.ask button:has-text("Development database")').click();
+
+  // The guard fires for a change exactly as it does for an import.
+  await expect(page.locator("dialog.ask")).toContainText("points somewhere else");
+  await page.locator('dialog.ask button:has-text("Cancel")').click();
+  expect(await attachments(page)).toHaveLength(1);
+  expect((await attachments(page))[0].env).toBe("uat");
+});
+
+test("detaching clears the project and offers the import again", async ({ page }) => {
+  await attach(page);
+  await page.click(".mig-proj-top button");
+  await page.locator('dialog.ask button:has-text("Detach")').click();
+
+  await expect(page.locator(".mig-empty")).toContainText("No Flyway project is attached");
+  const saved = (await calls(page))
+    .filter((c) => c.cmd === "save_profile")
+    .map((c) => c.args.profile as Record<string, unknown>);
+  const last = saved[saved.length - 1];
+  expect(last.flywayProject).toBeNull();
+  expect(last.flywayEnvironment).toBeNull();
+});
+
+/** A branch switch can take the file away while the connection still names it. */
+test("a project file that has gone says so and offers a way out", async ({ page }) => {
+  // Readable when it is attached, gone by the time the pane re-reads it —
+  // which is exactly what switching branch does to it.
+  let reads = 0;
+  await attach(page, {
+    flyway_read_project: () => {
+      if (reads++ < 2) return PROJECT;
+      throw new Error("Cannot read /p/flyway.toml: No such file or directory");
+    },
+  });
+  await page.click("#btn-mig-refresh");
+
+  await expect(page.locator(".mig-empty")).toContainText("could not be read");
+  await expect(page.locator(".mig-empty button")).toHaveText(/Change project/);
+});
+
+// ------------------------------------------------------------- applying
+
+test("Apply names the versions and runs nothing until it is confirmed", async ({ page }) => {
+  await attach(page, {
+    flyway_info: () => [
+      { version: "1", description: "create widgets", state: "Success", category: "Versioned",
+        kind: "SQL", filepath: "/p/V1.sql", installedOnUtc: "2026-09-10T23:39:43Z",
+        installedBy: "root", executionTimeMs: 12, group: "done" },
+      { version: "5", description: "add index", state: "Pending", category: "Versioned",
+        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
+        executionTimeMs: null, group: "pending" },
+    ],
+  });
+
+  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
+  await expect(page.locator("#btn-mig-apply")).toHaveText("Apply 1…");
+  await page.click("#btn-mig-apply");
+
+  // Versions, not a count: "Apply 3 migrations?" is a question about
+  // arithmetic; naming them is a question about which changes.
+  const ask = page.locator("dialog.ask");
+  await expect(ask).toContainText("V5");
+  await expect(ask).toContainText("add index");
+  await expect(ask).toContainText("uat");
+
+  await ask.locator('button:has-text("Cancel")').click();
+  expect(await commandNames(page)).not.toContain("flyway_migrate");
+});
+
+test("confirming applies, and says what Flyway did", async ({ page }) => {
+  await attach(page, {
+    flyway_info: () => [
+      { version: "5", description: "add index", state: "Pending", category: "Versioned",
+        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
+        executionTimeMs: null, group: "pending" },
+    ],
+    flyway_migrate: () => ({ executed: 1, target: "5" }),
+  });
+
+  await page.click("#btn-mig-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+
+  await expect.poll(async () => commandNames(page)).toContain("flyway_migrate");
+  const call = (await calls(page)).find((c) => c.cmd === "flyway_migrate")!;
+  expect(call.args.outOfOrder).toBe(false);
+  await expect(page.locator("#grid .empty")).toContainText("applied 1 migration");
+  await expect(page.locator("#grid .empty")).toContainText("now at 5");
+});
+
+/** F7. Refused in Rust too; this is the courtesy, not the guard. */
+test("a read-only connection is not offered an apply", async ({ page }) => {
+  await attach(page, {
+    save_profile: (a: Record<string, unknown>) => ({
+      profile: { ...(a.profile as object), readOnly: true, rememberPassword: false, needsSecret: false },
+      passwordWarning: null, passwordStored: false,
+    }),
+  });
+
+  await expect(page.locator("#btn-mig-apply")).toBeDisabled();
+  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /read-only/);
+});
+
+/** Flyway refuses while a failure sits in the history, so the button says so
+ *  rather than spending a confirmation to find out. */
+test("a failed migration blocks apply, and the button explains why", async ({ page }) => {
+  await attach(page);
+  await expect(page.locator("#btn-mig-apply")).toBeDisabled();
+  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /failed/);
+  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /repaired/);
+});
+
+/** Flyway's own words: it names the file, the line and the SQL error. */
+test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
+  const FLYWAY_SAID =
+    "Failed to execute script V4__deliberately_broken.sql against development environment\n" +
+    "Message    : (conn=13) Can't DROP 'weight'; check that column/key exists";
+  await attach(page, {
+    flyway_info: () => [
+      { version: "5", description: "add index", state: "Pending", category: "Versioned",
+        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
+        executionTimeMs: null, group: "pending" },
+    ],
+    flyway_migrate: () => {
+      throw new Error(FLYWAY_SAID);
+    },
+  });
+
+  await page.click("#btn-mig-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("Can't DROP 'weight'");
+  await expect(page.locator("#grid .empty")).toContainText("V4__deliberately_broken.sql");
+});
+
+/**
+ * Out-of-order decides what an apply will run, so it belongs to a connection
+ * rather than to the app. One shared flag would carry the choice made on a dev
+ * connection onto a UAT one the moment you clicked across — silently changing
+ * which migrations the next confirmation would name.
+ */
+test("out of order belongs to the connection, not to the window", async ({ page }) => {
+  await attach(page);
+  await page.locator("#mig-out-of-order").check();
+  await expect(page.locator("#mig-out-of-order")).toBeChecked();
+
+  // A second connection, its own project, its own default.
+  await page.click(".rail-add");
+  await page.locator("#conn-dialog").waitFor({ state: "visible" });
+  await page.fill("#conn-dialog input[name=name]", "second");
+  await page.click("#conn-ok");
+  await page.locator("#conn-dialog").waitFor({ state: "hidden" });
+  await page.click(".mig-empty button");
+  await page.locator('dialog.ask button:has-text("UAT database")').click();
+  await page.locator(".mig").first().waitFor();
+
+  await expect(page.locator("#mig-out-of-order")).not.toBeChecked();
+  const flags = (await calls(page))
+    .filter((c) => c.cmd === "flyway_info")
+    .map((c) => c.args.outOfOrder);
+  expect(flags[flags.length - 1]).toBe(false);
 });

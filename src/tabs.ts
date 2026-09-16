@@ -6,6 +6,7 @@ import type { EditorView } from "@codemirror/view";
 
 import type { ScriptResult, SourceTable } from "./api";
 import { createEditorState, STARTER_DOC } from "./editor";
+import { icon, type IconName } from "./icons";
 import { emptySelection, type GridSelection } from "./grid";
 
 export interface ScriptTab {
@@ -63,15 +64,45 @@ export interface ScriptTab {
   /** Set while the tab has never been saved, so the number can be reused. */
   untitledNumber: number | null;
   /**
-   * This tab arrived through the MCP server rather than being opened here.
+   * Where this tab came from, when it was not opened by the person at the
+   * keyboard.
    *
    * A tab that appears unbidden must not look like one you opened, so it is
    * marked in the strip and the mark survives a restart. It clears on Save:
    * once the buffer is a file you chose a name and a place for, the question
    * "where did this come from" has been answered.
+   *
+   * **This was a boolean called `external` and it should not have been.** The
+   * mark said "Added by an MCP client" because MCP was the only thing that
+   * could set it — so when Stage 15 opened migrations through the same door,
+   * every migration claimed to have come from an MCP client. A fact with two
+   * possible answers does not fit in a flag.
    */
-  external: boolean;
+  origin: TabOrigin;
 }
+
+/**
+ * Who opened a tab. `own` is the ordinary case: you did.
+ *
+ * A closed set rather than a free string, because each value owes the strip a
+ * mark and a sentence, and a value nobody wrote those for would show as
+ * nothing at all.
+ */
+export type TabOrigin = "own" | "mcp" | "migration";
+
+/** The mark each origin wears, and what it says on hover. */
+const ORIGIN_MARKS: Record<Exclude<TabOrigin, "own">, { icon: IconName; title: string }> = {
+  mcp: {
+    icon: "inbound",
+    title: "Added by an MCP client. It has not been run.",
+  },
+  migration: {
+    icon: "migrations",
+    title:
+      "Read from a Flyway migration. This tab is not bound to that file \u2014 " +
+      "saving will ask where to put it, and will not change the migration.",
+  },
+};
 
 /**
  * One tab as `restore` wants it: already resolved, with the file read and the
@@ -93,7 +124,7 @@ export interface RestoredTab {
   cursor: number;
   activeDb: string | null;
   untitledNumber: number | null;
-  external: boolean;
+  origin: TabOrigin;
 }
 
 export interface TabHooks {
@@ -260,7 +291,7 @@ export class TabManager {
     lineEnding?: string;
     mtimeMs?: number | null;
     /** Opened by something other than the person at the keyboard. */
-    external?: boolean;
+    origin?: TabOrigin;
   }): ScriptTab {
     const connectionId = opts?.connectionId ?? this.activeConnectionId;
     if (!connectionId) {
@@ -292,7 +323,7 @@ export class TabManager {
       activeDb: null,
       serverConnId: 0,
       untitledNumber,
-      external: opts?.external ?? false,
+      origin: opts?.origin ?? "own",
     };
 
     this.tabs.push(tab);
@@ -416,7 +447,7 @@ export class TabManager {
         activeDb: spec.activeDb,
         serverConnId: 0,
         untitledNumber: spec.untitledNumber,
-        external: spec.external,
+        origin: spec.origin,
       };
       this.tabs.push(tab);
       this.hooks.onCreated(tab);
@@ -490,7 +521,7 @@ export class TabManager {
     tab.untitledNumber = null;
     // Saved to a place you chose, under a name you chose: it is your file now,
     // and the provenance question has an answer that is no longer "unbidden".
-    tab.external = false;
+    tab.origin = "own";
     tab.mtimeMs = opts.mtimeMs;
     tab.baseline = opts.baseline;
     this.render();
@@ -510,17 +541,19 @@ export class TabManager {
         "stab" +
         (tab.id === this.activeId ? " active" : "") +
         (this.isDirty(tab) ? " dirty" : "") +
-        (tab.external ? " external" : "");
+        (tab.origin === "own" ? "" : " external");
       el.title = tab.filePath ?? tab.title;
 
-      if (tab.external) {
+      if (tab.origin !== "own") {
         // Before the label, so it reads as a prefix on the tab rather than as
         // decoration after the name. It is not a button: provenance is a fact,
         // not a control.
+        const { icon: name, title } = ORIGIN_MARKS[tab.origin];
         const mark = document.createElement("span");
-        mark.className = "stab-external";
-        mark.textContent = "\u2197"; // north-east arrow: it came from outside
-        mark.title = "Added by an MCP client. It has not been run.";
+        mark.className = "stab-origin";
+        mark.dataset.origin = tab.origin;
+        mark.title = title;
+        mark.append(icon(name));
         el.append(mark);
       }
 

@@ -90,7 +90,7 @@ export function createSessionPersistence(deps: {
         cursor: tabs.cursorOf(tab),
         activeDb: tab.activeDb,
         untitledNumber: tab.untitledNumber,
-        external: tab.external,
+        origin: tab.origin,
       });
     }
 
@@ -155,7 +155,10 @@ export function createSessionPersistence(deps: {
       untitledNumber: stored.untitledNumber,
       // Absent in files written before Stage 13, which is exactly the case
       // where the answer is "the user opened it".
-      external: stored.external ?? false,
+      // `external: true` is what a session written before Stage 17 says, when
+      // MCP was the only thing that could open a tab you did not. Read as the
+      // origin it meant.
+      origin: stored.origin ?? (stored.external ? "mcp" : "own"),
     };
 
     if (stored.filePath === null) return base;
