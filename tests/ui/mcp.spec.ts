@@ -118,11 +118,11 @@ test("M3 — a query from a client lands in a new tab, focused, and is not run",
   await expect(page.locator("#grid .empty")).not.toContainText("row");
 });
 
-test("the tab that arrives is marked as external, and says so on hover", async ({ page }) => {
+test("the tab that arrives is marked as coming from a client, and says so on hover", async ({ page }) => {
   await connected(page);
   await fireEvent(page, EVENT, { sql: SQL, connectionId: SAVED.id });
 
-  const mark = page.locator("#script-tabs .stab.active .stab-external");
+  const mark = page.locator("#script-tabs .stab.active .stab-origin");
   await expect(mark).toHaveCount(1);
   await expect(mark).toHaveAttribute("title", /MCP client/);
   await expect(mark).toHaveAttribute("title", /not been run/);
@@ -131,12 +131,12 @@ test("the tab that arrives is marked as external, and says so on hover", async (
 test("the tabs you opened yourself are not marked", async ({ page }) => {
   await connected(page);
   await expect(page.locator("#script-tabs .stab")).toHaveCount(1);
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(0);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(0);
 
   await fireEvent(page, EVENT, { sql: SQL, connectionId: SAVED.id });
   // Exactly one of the two, not both.
   await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(1);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(1);
 });
 
 test("the message names the tab and says nothing has run", async ({ page }) => {
@@ -156,13 +156,13 @@ test("the mark is written to the session file", async ({ page }) => {
   await expect
     .poll(async () => {
       const s = await saved(page);
-      return s?.connections[0]?.tabs.some((t) => t.external === true) ?? false;
+      return s?.connections[0]?.tabs.some((t) => t.origin === "mcp") ?? false;
     }, { timeout: 5000 })
     .toBe(true);
 
   // And the tab the user opened is written down as theirs.
   const s = await saved(page);
-  expect(s!.connections[0].tabs.filter((t) => t.external === true)).toHaveLength(1);
+  expect(s!.connections[0].tabs.filter((t) => t.origin === "mcp")).toHaveLength(1);
 });
 
 test("the mark comes back after a restart", async ({ page }) => {
@@ -170,14 +170,14 @@ test("the mark comes back after a restart", async ({ page }) => {
     load_session: () =>
       session([
         storedTab({ title: "mine" }),
-        storedTab({ title: "from-a-client", untitledNumber: 2, external: true }),
+        storedTab({ title: "from-a-client", untitledNumber: 2, origin: "mcp" }),
       ]),
   });
 
   await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(1);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(1);
   await expect(
-    page.locator("#script-tabs .stab:has(.stab-external) .stab-label"),
+    page.locator("#script-tabs .stab:has(.stab-origin) .stab-label"),
   ).toHaveText("from-a-client");
 });
 
@@ -192,7 +192,7 @@ test("tabs stored before the mark existed are not marked", async ({ page }) => {
   });
 
   await expect(page.locator("#script-tabs .stab")).toHaveCount(1);
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(0);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(0);
 });
 
 // ------------------------------------------------------------- the awkward cases
@@ -219,14 +219,14 @@ test("saving the tab clears the mark — it is your file now", async ({ page }) 
     }),
   });
   await fireEvent(page, EVENT, { sql: SQL, connectionId: SAVED.id });
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(1);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(1);
 
   await page.keyboard.press("Control+Shift+S");
 
   await expect(page.locator("#script-tabs .stab.active .stab-label")).toHaveText(
     "from-a-client.sql",
   );
-  await expect(page.locator("#script-tabs .stab-external")).toHaveCount(0);
+  await expect(page.locator("#script-tabs .stab-origin")).toHaveCount(0);
 });
 
 // ------------------------------------------------------- Settings > Integrations

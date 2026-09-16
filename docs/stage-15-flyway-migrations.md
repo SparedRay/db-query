@@ -152,12 +152,12 @@ works. We read the environment table, `[flyway] environment`, and
 - [x] **F3 — A migration opens.** Click one, read its SQL in a tab. Nothing runs.
 - [x] **F4 — The guard bites.** Attaching an environment whose URL does not
       match the connection is refused, and says which field disagreed.
-- [ ] **F5 — Apply works, and is deliberate.** Pending migrations apply through
+- [x] **F5 — Apply works, and is deliberate.** Pending migrations apply through
       `flyway migrate`; the confirmation names the versions; out-of-order is a
       choice made at apply time, defaulted from the file.
 - [ ] **F6 — Repair works on a genuinely failed migration**, and a failure
       shows Flyway's own words.
-- [ ] **F7 — Read-only refuses.** A connection marked read-only offers neither
+- [x] **F7 — Read-only refuses.** A connection marked read-only offers neither
       apply nor repair.
 
 ## 6. Task tracker
@@ -178,9 +178,9 @@ works. We read the environment table, `[flyway] environment`, and
 - [x] The import guard (§3.5)
 
 ### Phase 2 — Apply
-- [ ] `migrate`, behind a confirmation naming the versions
-- [ ] Out-of-order at apply time, defaulted from the file
-- [ ] Read-only refuses
+- [x] `migrate`, behind a confirmation naming the versions
+- [x] Out-of-order in the pane, defaulted from the file, re-asking Flyway
+- [x] Read-only refuses
 
 ### Phase 3 — Repair
 - [ ] `repair`, behind a stronger confirmation
@@ -540,3 +540,219 @@ Also fixed in passing: `.rail-cog.on` was set by the migrations toggle from
 §12 onwards and styled by nothing, so a pane toggle looked identical whether
 its pane was open or shut. Both now carry the accent bar the rail already uses
 for the active connection.
+
+## 14. Phase 2, and three things the second hands-on pass found — 2026-09-16
+
+The Windows fix held: Flyway resolution found the user's `flyway.cmd`. What
+came back with that confirmation was three pieces of feedback, and each one is
+the kind that only a real project produces.
+
+### 14.1 A tab that lied about where it came from
+
+> "Icon on tab when clicking a migration file says its a file from MCP which is
+> wrong (also icon is sort of weird looking is it an arrow?)"
+
+Both true, and the second explains the first. Provenance was a boolean:
+
+```ts
+/** This tab arrived through the MCP server rather than being opened here. */
+external: boolean;
+```
+
+MCP was the only thing that could set it, so the flag and the reason were the
+same fact and the mark could hard-code *"Added by an MCP client"*. Stage 15
+opened migrations through the same door, and every migration inherited a
+sentence about a protocol it had never touched. **A fact with two possible
+answers does not fit in a flag.**
+
+It is now `origin: "own" | "mcp" | "migration"`, a closed set, with each value
+owing the strip a mark and a sentence — so a value nobody wrote those for
+cannot be added silently. The `\u2197` is gone: MCP gets an arrow into a tray,
+a migration gets the layers glyph the rail already uses, both from the app's
+own icon set at the app's own stroke width.
+
+The session file keeps `external` as a **read-only legacy key**: the frontend
+maps `external: true` onto `origin: "mcp"` so upgrading does not erase the mark
+from tabs that were already open. An `origin` this build does not recognise is
+carried through a load and save rather than dropped, so running an older
+version once cannot quietly erase one.
+
+### 14.2 Grouped by what an apply would do
+
+> "a way to quickly collapse the migrated vs pending (Skipped or missing can be
+> considered as success ones in the sense that they will not be executted if we
+> go to an apply)"
+
+The parenthesis is the design. Flyway has a dozen states and most of them —
+`Ignored`, `Superseded`, `Above Baseline`, `Missing` — differ in *why* they
+will not run rather than in whether they will. Before an apply, the only
+question is **will this run**, so that is the axis:
+
+* **Failed** — blocks everything until repaired. Open.
+* **Will run** — what `migrate` will execute, in order. Open.
+* **Will not run** — applied, skipped, superseded, baselined. Collapsed, because
+  it is the long one and the least urgent.
+
+`Group` is computed in Rust from the state and travels with each migration, so
+the renderer never learns Flyway's vocabulary. **`Done` is the default for a
+state this build has never seen**, and the asymmetry is deliberate: claiming
+something will not run and being wrong shows up as an extra line in what Flyway
+reports it executed. Claiming something *will* run and being wrong is a
+confirmation dialog that lied about what it was asking permission for.
+
+`Ignored` lands in "will not run" — correctly, *while out-of-order is off*.
+Turn it on and Flyway reports the same migration as `Pending`. Which is why:
+
+### 14.3 Out of order belongs in the pane, not in the dialog
+
+The obvious design is a checkbox in the confirmation. It is wrong, because
+toggling it changes the list the confirmation is naming — a dialog that has to
+re-query itself while open.
+
+So it sits above the list, defaulted from the project file's `outOfOrder`, and
+toggling it **re-runs `info` with the same flag the apply will use**. The "will
+run" group visibly changes. Nothing is guessed: what the pane calls pending is
+what Flyway called pending under exactly these flags.
+
+### 14.4 No way to see or change what was attached
+
+> "there seems to be no way to change the settings we have imported into
+> current connection so if I ever want to se which folder this is targetting or
+> just change the toml I cannot."
+
+A connection could be pointed at a `flyway.toml` on some branch and the only
+evidence was the migrations it listed. The pane now shows the project's name,
+the file and its folder, and the environment — with **Change…** offering the
+three things that can be done: change environment, change project file, detach.
+
+Changing the environment goes through the **same guard** as an import, because
+it is the same risk. And the project file is now **re-read on every render**
+rather than remembered: it lives in a repository and changes with the branch,
+so its name, its environments and its out-of-order default are only true as of
+now. A file that has gone says so and offers a way out, instead of showing an
+empty list.
+
+### 14.5 Apply
+
+The one place this app runs SQL nobody typed. The user's own framing of why
+that is not a broken rule: *"even when query is auto executed User has full
+access for review the content of each before"* — and every migration named in
+the confirmation can be opened and read from this pane first.
+
+**The confirmation names the versions rather than counting them.** "Apply 3
+migrations?" is a question about arithmetic; `V5 add index` / `V6 add audit
+table` is a question about which changes.
+
+Three guards, in this order, in Rust rather than only in the UI:
+
+1. A read-only connection refuses (F7), in the connection's own terms — it is a
+   choice the user made and can unmake — and *first*, so somebody is not sent
+   to fix the wrong thing.
+2. **The environment guard runs again.** It ran at import, but the TOML lives in
+   a repository and changes with the branch, which is this feature's whole
+   workflow. The file that was checked is not necessarily the file about to be
+   used.
+3. The caller has confirmed, in front of the list.
+
+They are `flyway::apply_refusal`, extracted from the command so they are five
+ordinary unit tests rather than something reachable only through a Tauri
+handle.
+
+The button is hidden with no project, and **disabled with a reason** otherwise:
+nothing pending, connection read-only, or a failure blocking everything. A
+button that is simply missing makes people wonder whether the feature exists;
+one that is enabled and then refuses wastes a confirmation.
+
+### 14.6 Measured against a real database
+
+`live_flyway.rs` applies to the fixture for real. One run covers both halves,
+because the fixture's fourth migration is broken on purpose: three apply, the
+fourth fails, and the assertions are on Flyway's own words.
+
+```rust
+assert_eq!(c.code.as_deref(), Some("FAILED_VERSIONED_MIGRATION"));
+assert!(c.message.contains("Can't DROP 'weight'"));
+assert_eq!(v["migrationsExecuted"], 3);
+```
+
+A second apply is then refused outright with `VALIDATE_ERROR` and *"run repair
+to fix the schema history"* — and that output **has no `migrations` key at
+all**, which is why `complaint()` is read before the success shape. Phase 3 is
+what that instruction is asking for.
+
+### 14.7 Two bugs the new tests found before the user did
+
+**The pane kept showing the previous connection's migrations.** Switching
+connection ran `refreshMigrationsButton`, which hid or showed the rail toggle
+and nothing else — so the list stayed, under the new connection's name, beside
+the new connection's schema. Every row in it was an invitation to apply
+something to a database it did not belong to. Found by the test for §14.3,
+which switches connections to check that out-of-order does not travel with the
+window; it could not get past the stale pane.
+
+**Out-of-order was one variable for the whole app.** It is now keyed by
+connection. A single flag would have carried the choice made on a dev
+connection onto a UAT one the moment somebody clicked across, silently changing
+which migrations the next confirmation would name.
+
+**And a temporal dead zone, for the second time.** `migrationsShowing` went in
+beside the migrations code at the foot of `main.ts`, exactly where
+`migrationsOpen` went in Stage 15 (§12), and broke every boot the same way:
+`refreshMigrationsButton` runs from `syncConnLabel` while the module is still
+initialising. Twice is a pattern rather than a slip — anything
+`refreshMigrationsButton` or `syncConnLabel` touches must be declared at the
+top of the file with `connected`, and both declarations now say so.
+
+### 14.8 A flake that cost fifteen other tests
+
+The first full run after Phase 2 came back with **sixteen WebKit failures**, and
+fifteen of them had no error message at all — only a trace artifact that could
+not be written. That shape is the tell: one test hung, its worker died, and
+Playwright reported everything queued behind it as failed.
+
+The one that hung was mine. Three of the new logbook tests clicked `#conn-ok`
+without waiting for the dialog, where every other test in the suite goes
+through a helper that waits both ways. It passed alone and hung under a full
+parallel run.
+
+Worth recording because the failure list was actively misleading: the
+`tree.spec` and `regressions.spec` names in it had nothing wrong with them, and
+chasing any of those would have been an afternoon. **Sixteen failures with one
+error message between them is one failure.**
+
+**And then it happened again, with a different cause.** The next full run came
+back with eight WebKit failures in a different file cluster, all passing in
+isolation, and this time with *no* error message anywhere in the log — a
+crashed worker rather than a hung one. The variable was the fixtures: the live
+Flyway tests need MySQL and a JVM running in podman, and eight WebKit workers
+on a 13 GB machine do not have room alongside them. Stopping the containers and
+re-running: **680 passed, none failed.**
+
+Worth knowing before a run is believed. `mise run test-ui-all` and
+`mise run test-flyway` are cheap separately and expensive at the same time, and
+the failure they produce together looks like a product defect in whichever
+files the dead worker happened to be holding.
+
+### 14.9 Left undone, deliberately
+
+**The schema tree is not refreshed after an apply.** A migration usually
+changes the schema, so the tree beside it goes stale, and the success message
+says so rather than pretending otherwise.
+
+Refreshing it automatically needs to know *which* database was changed. The
+only honest source for that is the environment's JDBC URL, which this side does
+not have — and the refresh itself is bound to a per-database node in the tree
+rather than existing as a function anything can call. Inferring the database
+here would be a guess, and a refresh of the wrong one is worse than no refresh:
+it looks like it worked. Left as a note rather than half-built.
+
+### 14.10 Found on the way
+
+`setMessage(html: string)` took a parameter called `html` and set
+`textContent`. Safe, and a standing invitation to somebody "fixing" it with
+`innerHTML` — on a path that now carries Flyway's error text. Renamed, and the
+message is `pre-wrap` so Flyway's layout survives: it puts the file on one
+line, the SQL state on the next and the database error after that, and
+collapsing that into a paragraph loses the shape that makes it readable.
+
+**680 UI tests on both engines, 376 Rust, 8 live Flyway.**

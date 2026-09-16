@@ -22,6 +22,9 @@ import {
   type Capabilities,
   type EngineKind,
   type HttpAuth,
+  type FlywayGroup,
+  type FlywayProject,
+  type FlywayMigration,
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
@@ -73,6 +76,7 @@ const els = {
   migEnv: $("mig-env"),
   migList: $("mig-list"),
   btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
+  btnMigApply: $<HTMLButtonElement>("btn-mig-apply"),
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
@@ -225,6 +229,17 @@ let connected = false;
 // threw on every boot before this moved.
 let schemaOpen = true;
 let migrationsOpen = false;
+/**
+ * Which connection the migrations pane is showing, so a switch can be noticed.
+ *
+ * Declared **here**, with the other pane state, and not beside the migrations
+ * code at the foot of this file. `refreshMigrationsButton` runs from
+ * `syncConnLabel` while this module is still initialising, so a `let` down
+ * there is in its temporal dead zone and every boot throws before a single
+ * test runs. That is exactly how `migrationsOpen` broke in Stage 15, and this
+ * is the second time — see the note in the tracker.
+ */
+let migrationsShowing: string | null = null;
 let activeDb: string | null = null;
 
 /**
@@ -2725,7 +2740,7 @@ void listen<McpPutQuery>(MCP_PUT_QUERY_EVENT, (event) => {
     return;
   }
 
-  const tab = tabs.create({ connectionId, contents: sql, external: true });
+  const tab = tabs.create({ connectionId, contents: sql, origin: "mcp" });
   const visible = tabs.activeConnection() === connectionId;
   if (visible) {
     view.focus();
@@ -2772,6 +2787,19 @@ function refreshMigrationsButton() {
   if (!show && migrationsOpen) toggleMigrations(false);
   els.btnMigrations.setAttribute("aria-pressed", String(migrationsOpen));
   els.btnMigrations.classList.toggle("on", migrationsOpen);
+
+  // **A switch has to redraw the pane.** This runs on every connection change,
+  // and without it the pane kept showing the previous connection's migrations
+  // — under the new connection's name, beside the new connection's schema.
+  // Every one of those rows was an invitation to apply something to a database
+  // it did not belong to.
+  const id = conns?.active()?.profile.id ?? null;
+  if (migrationsOpen && id !== migrationsShowing) {
+    migrationsShowing = id;
+    void renderMigrations();
+  } else if (!migrationsOpen) {
+    migrationsShowing = null;
+  }
 }
 
 function toggleMigrations(open: boolean) {
@@ -2781,7 +2809,10 @@ function toggleMigrations(open: boolean) {
   els.msplit.hidden = !open;
   els.btnMigrations.setAttribute("aria-pressed", String(open));
   els.btnMigrations.classList.toggle("on", open);
-  if (open) void renderMigrations();
+  if (open) {
+    migrationsShowing = conns?.active()?.profile.id ?? null;
+    void renderMigrations();
+  }
 }
 
 /**
@@ -2812,6 +2843,7 @@ els.btnSchema.classList.add("on");
 
 els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
 els.btnMigRefresh.onclick = () => void renderMigrations();
+els.btnMigApply.onclick = () => void applyMigrations();
 
 /** An empty pane that says what to do next, rather than an empty pane. */
 function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
@@ -2824,36 +2856,94 @@ function migrationsMessage(text: string, action?: { label: string; run: () => vo
   els.migList.replaceChildren(box);
 }
 
+/**
+ * Which groups are collapsed. Not persisted — like the pane itself and the
+ * splitters — but it does survive a refresh, which is the case that matters:
+ * collapsing the done pile and then losing it on every Refresh would make the
+ * button unusable.
+ *
+ * `done` starts collapsed because it is the long one and the least urgent: a
+ * project with two hundred applied migrations should not need scrolling to
+ * find the one that is pending.
+ */
+const migrationsCollapsed = new Set<FlywayGroup>(["done"]);
+
+/**
+ * Out-of-order, per connection, for this session. Defaulted from each
+ * project file.
+ *
+ * **Keyed by connection and not a single flag**, because it decides what an
+ * apply will run. One variable would carry the choice made on a dev connection
+ * onto a UAT one the moment you clicked across — silently changing which
+ * migrations the next confirmation would name.
+ */
+const migrationsOutOfOrder = new Map<string, boolean>();
+
+/** What each group is called, and why it is a group. */
+const GROUP_LABELS: Record<FlywayGroup, { title: string; hint: string }> = {
+  pending: { title: "Will run", hint: "Flyway will apply these, in this order." },
+  failed: {
+    title: "Failed",
+    hint: "This blocks every other migration until it is repaired.",
+  },
+  done: {
+    title: "Will not run",
+    hint:
+      "Applied, skipped, superseded or baselined \u2014 whatever the reason, an " +
+      "apply will not touch these.",
+  },
+};
+
 async function renderMigrations() {
   const active = conns?.active();
   if (!active) return migrationsMessage("Connect to a database to see its migrations.");
 
   const { flywayProject, flywayEnvironment } = active.profile;
   els.migEnv.hidden = !flywayProject;
+  els.btnMigApply.hidden = true;
   if (!flywayProject || !flywayEnvironment) {
     els.migTitle.textContent = "Migrations";
     return migrationsMessage(
       "No Flyway project is attached to this connection. Import the flyway.toml " +
         "you open with Flyway Desktop, and this connection will show what it has " +
         "applied and what is pending.",
-      { label: "Import a project…", run: () => void importFlywayProject() },
+      { label: "Import a project\u2026", run: () => void importFlywayProject() },
     );
   }
 
   els.migTitle.textContent = "Migrations";
-  els.migEnv.innerHTML = "";
-  els.migEnv.append(
-    document.createTextNode("Environment "),
-    Object.assign(document.createElement("b"), { textContent: flywayEnvironment }),
-  );
 
-  migrationsMessage("Asking Flyway…");
+  // Re-read the project file every time rather than remembering it. It lives
+  // in a repository and changes with the branch — which is the whole workflow
+  // this was built for — so its name, its environments and its out-of-order
+  // default are only true as of now.
+  let project: FlywayProject | null = null;
   try {
-    const list = await api.flywayInfo(active.profile.id, settings.flywayPath);
+    project = await api.flywayReadProject(flywayProject);
+  } catch (err) {
+    showFlywayProject(active.profile.id, flywayProject, flywayEnvironment, null);
+    return migrationsMessage(
+      `This connection's project file could not be read.\n${String(err)}`,
+      { label: "Change project\u2026", run: () => void importFlywayProject() },
+    );
+  }
+  if (!migrationsOutOfOrder.has(active.profile.id)) {
+    migrationsOutOfOrder.set(active.profile.id, project.outOfOrder);
+  }
+  showFlywayProject(active.profile.id, flywayProject, flywayEnvironment, project);
+
+  migrationsMessage("Asking Flyway\u2026");
+  try {
+    const list = await api.flywayInfo(
+      active.profile.id,
+      settings.flywayPath,
+      outOfOrderFor(active.profile.id),
+    );
     if (!list.length) {
       return migrationsMessage("This project has no migrations.");
     }
-    els.migList.replaceChildren(...list.map(migrationRow));
+    renderMigrationGroups(list);
+    syncApplyButton(active.profile.readOnly ?? false, list);
   } catch (err) {
     // Flyway's own words. It explains itself well, and paraphrasing would
     // replace an instruction with a summary.
@@ -2861,20 +2951,278 @@ async function renderMigrations() {
   }
 }
 
-function migrationRow(m: import("./api").FlywayMigration): HTMLElement {
+/**
+ * The project line: which file, which environment, and the way to change
+ * either.
+ *
+ * It exists because there was no way to see any of it. A connection could be
+ * pointed at a `flyway.toml` on some branch and the only evidence was the
+ * migrations it listed.
+ */
+function outOfOrderFor(connectionId: string): boolean {
+  return migrationsOutOfOrder.get(connectionId) ?? false;
+}
+
+function showFlywayProject(
+  connectionId: string,
+  path: string,
+  environment: string,
+  project: FlywayProject | null,
+) {
+  const file = path.split(/[\\/]/).pop() ?? path;
+  const folder = path.slice(0, path.length - file.length - 1);
+
+  const name = elem("span", "mig-proj-name", project?.name || file);
+  name.title = path;
+
+  const change = elem("button", "mini", "Change\u2026") as HTMLButtonElement;
+  change.title = "Change the project file or the environment, or detach it";
+  change.onclick = () => void changeFlywayProject(project);
+
+  const where = elem("div", "mig-proj-where", `${file} in ${folder || "\u2014"}`);
+  where.title = path;
+
+  const env = elem("div", "mig-proj-env");
+  env.append(
+    document.createTextNode("Environment "),
+    Object.assign(document.createElement("b"), { textContent: environment }),
+  );
+
+  const top = elem("div", "mig-proj-top");
+  top.append(name, change);
+
+  els.migEnv.replaceChildren(top, where, env);
+
+  // Out-of-order changes which migrations Flyway will run, so it belongs where
+  // the list is — toggling it re-asks and the answer visibly changes, rather
+  // than being a checkbox buried in a confirmation whose list it would alter.
+  if (project) {
+    const label = document.createElement("label");
+    label.className = "mig-ooo";
+    label.title =
+      "Apply a migration whose version is lower than one already applied. " +
+      "The default comes from the project file.";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = "mig-out-of-order";
+    box.checked = migrationsOutOfOrder.get(connectionId) ?? project.outOfOrder;
+    box.onchange = () => {
+      migrationsOutOfOrder.set(connectionId, box.checked);
+      void renderMigrations();
+    };
+    label.append(box, document.createTextNode("Out of order"));
+    els.migEnv.append(label);
+  }
+}
+
+/** Offer the three things that can be done to an attached project. */
+async function changeFlywayProject(project: FlywayProject | null) {
+  const active = conns?.active();
+  if (!active) return;
+  const what = await choose(
+    "This connection's Flyway project",
+    active.profile.flywayProject ?? "",
+    [
+      { value: "environment", label: "Change environment\u2026", primary: !!project },
+      { value: "project", label: "Change project file\u2026" },
+      { value: "detach", label: "Detach", danger: true },
+    ],
+  );
+  if (what === "project") return void importFlywayProject();
+  if (what === "environment") return void changeFlywayEnvironment(project);
+  if (what === "detach") {
+    const profile = { ...active.profile, flywayProject: null, flywayEnvironment: null };
+    const outcome = await api.saveProfile(profile, null);
+    active.profile = { ...profile, ...outcome.profile };
+    conns.upsert(active);
+    // Nothing is attached any more, so the next project's own default should
+    // win rather than this one's leftover choice.
+    migrationsOutOfOrder.delete(active.profile.id);
+    await renderMigrations();
+  }
+}
+
+/**
+ * Pick a different environment in the project already attached.
+ *
+ * Goes through the same guard as an import, because it is the same risk: the
+ * environment decides which database Flyway connects to, and picking the wrong
+ * one means watching this connection while changing another.
+ */
+async function changeFlywayEnvironment(project: FlywayProject | null) {
+  const active = conns?.active();
+  if (!active || !project || !active.profile.flywayProject) return;
+  const path = active.profile.flywayProject;
+  try {
+    const chosen = await choose(
+      project.name ? `Environment in "${project.name}"` : "Which environment?",
+      "A Flyway environment is a database. This connection is one of them, and " +
+        "that is what migrations will be applied to.",
+      project.environments.map((e) => ({
+        value: e.id,
+        label: e.displayName ? `${e.displayName} (${e.id})` : e.id,
+        primary: e.id === active.profile.flywayEnvironment,
+      })),
+    );
+    if (!chosen || chosen === active.profile.flywayEnvironment) return;
+    if (!(await agreedOrOverridden(active.profile.id, path, chosen))) return;
+
+    const profile = { ...active.profile, flywayProject: path, flywayEnvironment: chosen };
+    const outcome = await api.saveProfile(profile, null);
+    active.profile = { ...profile, ...outcome.profile };
+    conns.upsert(active);
+    await renderMigrations();
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
+
+/** Draw the three groups, each collapsible, each counted. */
+function renderMigrationGroups(list: FlywayMigration[]) {
+  const order: FlywayGroup[] = ["failed", "pending", "done"];
+  const boxes = order
+    .map((g) => [g, list.filter((m) => m.group === g)] as const)
+    .filter(([, rows]) => rows.length > 0)
+    .map(([g, rows]) => migrationGroup(g, rows));
+  els.migList.replaceChildren(...boxes);
+}
+
+function migrationGroup(group: FlywayGroup, rows: FlywayMigration[]): HTMLElement {
+  const box = elem("div", "mig-group");
+  box.dataset.group = group;
+
+  const open = !migrationsCollapsed.has(group);
+  const head = elem("button", "mig-group-head") as HTMLButtonElement;
+  head.setAttribute("aria-expanded", String(open));
+  head.title = GROUP_LABELS[group].hint;
+  head.append(
+    icon("chevron"),
+    elem("span", "mig-group-title", GROUP_LABELS[group].title),
+    elem("span", "mig-group-count", String(rows.length)),
+  );
+  head.onclick = () => {
+    if (migrationsCollapsed.has(group)) migrationsCollapsed.delete(group);
+    else migrationsCollapsed.add(group);
+    // Redrawn from what is already on screen: collapsing a group must not
+    // start a JVM.
+    box.classList.toggle("collapsed", migrationsCollapsed.has(group));
+    head.setAttribute("aria-expanded", String(!migrationsCollapsed.has(group)));
+  };
+
+  const body = elem("div", "mig-group-body");
+  body.append(...rows.map(migrationRow));
+
+  box.classList.toggle("collapsed", !open);
+  box.append(head, body);
+  return box;
+}
+
+function migrationRow(m: FlywayMigration): HTMLElement {
   const row = elem("button", "mig") as HTMLButtonElement;
   row.dataset.state = m.state.toLowerCase();
+  row.dataset.group = m.group;
   row.append(
-    elem("span", "v", m.version ?? "—"),
+    elem("span", "v", m.version ?? "\u2014"),
     elem("span", "d", m.description),
     elem("span", "s", m.state),
   );
-  const when = m.installedOnUtc ? ` · applied ${m.installedOnUtc}` : "";
-  row.title = `${m.version ?? "repeatable"} — ${m.description}\n${m.state}${when}\n${
+  const when = m.installedOnUtc ? ` \u00b7 applied ${m.installedOnUtc}` : "";
+  row.title = `${m.version ?? "repeatable"} \u2014 ${m.description}\n${m.state}${when}\n${
     m.filepath ?? "(no file)"
   }`;
   row.onclick = () => void openMigration(m);
   return row;
+}
+
+/**
+ * Offer Apply, or say why not.
+ *
+ * **Three states, and the difference between them is the point.** Hidden when
+ * there is no project. Disabled with a reason when there is nothing to run,
+ * when the connection is read-only, or when a failure is blocking everything:
+ * a button that is simply missing makes people wonder whether the feature
+ * exists, and one that is enabled and then refuses wastes a confirmation.
+ *
+ * The refusal is repeated in Rust, which is where it counts \u2014 this is the
+ * courtesy, not the guard.
+ */
+function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
+  const pending = list.filter((m) => m.group === "pending");
+  const failed = list.filter((m) => m.group === "failed");
+
+  els.btnMigApply.hidden = false;
+  els.btnMigApply.textContent = pending.length
+    ? `Apply ${pending.length}\u2026`
+    : "Apply\u2026";
+
+  const reason = readOnly
+    ? "This connection is marked read-only. Edit it and clear \u201cRead-only\u201d to allow writes."
+    : failed.length
+      ? `Version ${failed[0].version ?? "?"} failed, and Flyway will not apply anything until it is repaired.`
+      : pending.length === 0
+        ? "Nothing is pending."
+        : "";
+
+  els.btnMigApply.disabled = reason !== "";
+  els.btnMigApply.title = reason || `Apply ${pending.map((m) => m.version ?? "?").join(", ")}`;
+}
+
+/**
+ * Apply the pending migrations, once the user has said so in front of the list.
+ *
+ * **This is the one place the app runs SQL nobody typed**, and the rule it
+ * does not break is the one the user set: *"even when a query is auto executed
+ * the user has full access to review the content of each before."* Every
+ * migration named here can be opened and read, from this pane, before this
+ * button is pressed.
+ *
+ * The confirmation names the versions rather than counting them. "Apply 3
+ * migrations?" is a question about arithmetic; "V5, V6, V7" is a question
+ * about which changes.
+ */
+async function applyMigrations() {
+  const active = conns?.active();
+  if (!active) return;
+  const outOfOrder = outOfOrderFor(active.profile.id);
+  const list = await api
+    .flywayInfo(active.profile.id, settings.flywayPath, outOfOrder)
+    .catch(() => null);
+  if (!list) return void renderMigrations();
+
+  const pending = list.filter((m) => m.group === "pending");
+  if (!pending.length) return void renderMigrations();
+
+  const named = pending
+    .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
+    .join("\n");
+  const go = await choose(
+    `Apply ${pending.length} migration${pending.length === 1 ? "" : "s"}?`,
+    `Flyway will run these against "${active.profile.flywayEnvironment}" ` +
+      `(${active.profile.name}), in this order:\n\n${named}\n\n` +
+      (outOfOrder ? "Out of order is on.\n\n" : "") +
+      "This changes the database. It cannot be undone from here.",
+    [
+      { value: "cancel", label: "Cancel", primary: true },
+      { value: "go", label: `Apply to ${active.profile.flywayEnvironment}`, danger: true },
+    ],
+  );
+  if (go !== "go") return;
+
+  els.btnMigApply.disabled = true;
+  migrationsMessage("Flyway is applying\u2026");
+  try {
+    const out = await api.flywayMigrate(active.profile.id, settings.flywayPath, outOfOrder);
+    results.setMessage(
+      `Flyway applied ${out.executed} migration${out.executed === 1 ? "" : "s"}` +
+        (out.target ? ` \u00b7 now at ${out.target}` : "") +
+        ". The schema tree may need a refresh.",
+    );
+  } catch (err) {
+    // Flyway's own words, verbatim. It names the file, the line and the SQL
+    // error, and a paraphrase would throw all three away.
+    results.setMessage(String(err));
+  }
+  await renderMigrations();
 }
 
 /**
@@ -2895,12 +3243,44 @@ async function openMigration(m: import("./api").FlywayMigration) {
     const tab = tabs.create({
       contents: f.contents,
       title: `${m.version ? `V${m.version}` : ""} ${m.description}`.trim(),
-      external: true,
+      origin: "migration",
     });
     tabs.activate(tab.id);
   } catch (err) {
     results.setMessage(String(err));
   }
+}
+
+/**
+ * Does this environment agree with the connection \u2014 and if not, does the
+ * user insist?
+ *
+ * Shared by importing a project and by changing the environment on one already
+ * attached, because they carry exactly the same risk: the environment decides
+ * which database Flyway connects to, and `migrate` uses the project's own URL
+ * rather than this connection's.
+ */
+async function agreedOrOverridden(
+  connectionId: string,
+  path: string,
+  environment: string,
+): Promise<boolean> {
+  const disagree = await api.flywayCheck(connectionId, path, environment);
+  if (!disagree.length) return true;
+
+  const fields = disagree.join(", ");
+  const go = await choose(
+    "This environment points somewhere else",
+    `"${environment}" and this connection disagree about the ${fields}. Flyway ` +
+      `connects using the project's own settings, so migrations would be ` +
+      `applied to the environment's ${fields}, not to this connection's. ` +
+      `Attach it anyway only if you know the two are the same database.`,
+    [
+      { value: "cancel", label: "Cancel", primary: true },
+      { value: "go", label: "Attach anyway", danger: true },
+    ],
+  );
+  return go === "go";
 }
 
 /**
@@ -2933,22 +3313,7 @@ async function importFlywayProject() {
     );
     if (!chosen) return;
 
-    const disagree = await api.flywayCheck(active.profile.id, path, chosen);
-    if (disagree.length) {
-      const fields = disagree.join(", ");
-      const go = await choose(
-        "This environment points somewhere else",
-        `"${chosen}" and this connection disagree about the ${fields}. Flyway ` +
-          `connects using the project's own settings, so migrations would be ` +
-          `applied to the environment's ${fields}, not to this connection's. ` +
-          `Attach it anyway only if you know the two are the same database.`,
-        [
-          { value: "cancel", label: "Cancel", primary: true },
-          { value: "go", label: "Attach anyway", danger: true },
-        ],
-      );
-      if (go !== "go") return;
-    }
+    if (!(await agreedOrOverridden(active.profile.id, path, chosen))) return;
 
     const profile = { ...active.profile, flywayProject: path, flywayEnvironment: chosen };
     const outcome = await api.saveProfile(profile, null);

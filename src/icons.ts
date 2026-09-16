@@ -37,6 +37,10 @@ export type IconName =
   // in it. A database cylinder here would say "connection", which is what the
   // rail above it already means.
   | "sidebar"
+  // A tab that arrived from an MCP client: an arrow coming down into a tray.
+  // It replaced a bare `\u2197`, which was read as decoration rather than as
+  // a direction, and which said nothing about *where* from.
+  | "inbound"
   // Not a tree icon: the rail's mark for a connection that refuses writes.
   // Drawn here anyway, because the reasons in this file's header — one grid,
   // one stroke width, `currentColor` — are exactly why it should not be an
@@ -141,6 +145,9 @@ const PATHS: Record<IconName, string> = {
   sidebar:
     '<rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6"/>' +
     '<path d="M6.4 3.2v9.6"/>',
+  inbound:
+    '<path d="M3 9.9v2.3a1.3 1.3 0 0 0 1.3 1.3h7.4a1.3 1.3 0 0 0 1.3-1.3V9.9"/>' +
+    '<path d="M8 2.4v6.8"/><path d="M5.3 6.6L8 9.3l2.7-2.7"/>',
   close: '<path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/>',
 };
 

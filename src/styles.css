@@ -295,6 +295,46 @@ body {
 .mig-env b { color: var(--fg); font-weight: 600; }
 .mig-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
 
+/* The project line. It exists because there was no way to see any of this:
+   a connection could point at a flyway.toml on some branch and the only
+   evidence was the migrations it listed. */
+.mig-proj-top { display: flex; align-items: center; gap: 8px; }
+.mig-proj-name {
+  flex: 1; min-width: 0; font-weight: 600; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mig-proj-where, .mig-proj-env {
+  margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mig-proj-where { font-family: var(--mono); font-size: 10.5px; }
+.mig-ooo {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; cursor: pointer; user-select: none;
+}
+
+/* Groups, collapsible like the schema tree's. The chevron rotates rather than
+   swapping glyph, so open and shut cannot drift apart. */
+.mig-group-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 5px 9px; border: none; background: none; cursor: pointer;
+  color: var(--fg-dim); font: 600 10.5px/1.4 system-ui, sans-serif;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.mig-group-head:hover { background: var(--bg-hover); color: var(--fg); }
+.mig-group-head svg {
+  width: 12px; height: 12px; flex: 0 0 auto;
+  transform: rotate(90deg); transition: transform .12s ease;
+}
+.mig-group.collapsed .mig-group-head svg { transform: rotate(0deg); }
+.mig-group.collapsed .mig-group-body { display: none; }
+.mig-group-title { flex: 1; text-align: left; }
+.mig-group-count {
+  font-variant-numeric: tabular-nums; letter-spacing: 0;
+  padding: 1px 6px; border-radius: 8px; background: var(--btn-bg);
+}
+.mig-group[data-group="failed"] .mig-group-head { color: var(--danger-fg); }
+.mig-group[data-group="pending"] .mig-group-head { color: var(--warn-fg); }
+
 .mig {
   display: grid; grid-template-columns: auto 1fr auto; gap: 8px;
   align-items: baseline;
@@ -651,10 +691,15 @@ input.num {
    not a warning to dismiss — but with a left edge strong enough that a tab
    appearing while you look elsewhere is visibly not one of yours. */
 .stab.external { border-left: 2px solid var(--accent); padding-left: 9px; }
-.stab-external {
-  font-size: 10px; line-height: 1; color: var(--accent);
-  flex: 0 0 auto; opacity: 0.85;
+.stab-origin {
+  display: flex; align-items: center; flex: 0 0 auto;
+  color: var(--accent); opacity: .85;
 }
+.stab-origin svg { width: 12px; height: 12px; display: block; }
+/* A migration is read from a repository rather than pushed in by a client, so
+   it is marked as provenance without the "something arrived" urgency. */
+.stab-origin[data-origin="migration"] { color: var(--fg-dim); opacity: 1; }
+.stab:has(.stab-origin[data-origin="migration"]) { border-left-color: var(--border); }
 
 .stab-add {
   background: none; border: none; color: var(--fg-dim);
@@ -810,7 +855,11 @@ table.rs tr td.sel, table.rs tr:hover td.sel { background: var(--sel-cell-bg); }
 .chip.err { border-color: var(--danger); color: var(--danger-fg); }
 
 .err-box { padding: 14px; color: var(--danger-fg); font: 12px var(--mono); white-space: pre-wrap; }
-.empty { padding: 14px; color: var(--fg-dim); }
+/* `pre-wrap`, because a message here can be Flyway's, and Flyway lays its
+   errors out in lines: the file on one, the SQL state on the next, the actual
+   database error on the one after. Collapsing those into a paragraph loses the
+   shape that makes it readable. */
+.empty { padding: 14px; color: var(--fg-dim); white-space: pre-wrap; }
 .error { color: var(--danger-fg); font-size: 12px; }
 
 /* --- ask dialogs (unsaved changes, on-disk conflict) --- */

@@ -1106,6 +1106,16 @@ fn flyway_read_project(path: String) -> Result<flyway::Project, String> {
     flyway::parse(&text)
 }
 
+/// The configured Flyway command, or the default. Empty means "whatever is on
+/// the PATH", which is what most people have.
+fn program_or_default(program: String) -> String {
+    if program.trim().is_empty() {
+        flywaycli::DEFAULT_PROGRAM.to_string()
+    } else {
+        program
+    }
+}
+
 /// Which fields of a connection an environment disagrees with, before it is
 /// attached. Empty means they agree.
 ///
@@ -1143,6 +1153,7 @@ async fn flyway_info(
     app: tauri::AppHandle,
     connection_id: String,
     program: String,
+    out_of_order: bool,
 ) -> Result<Vec<flywaycli::Migration>, String> {
     let dir = config_dir(&app)?;
     let profile = profiles::load(&dir)
@@ -1158,17 +1169,17 @@ async fn flyway_info(
         .flyway_environment
         .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
 
-    let program = if program.trim().is_empty() {
-        flywaycli::DEFAULT_PROGRAM.to_string()
-    } else {
-        program
-    };
+    let program = program_or_default(program);
+    // Asked with the same flag the apply will use, so what the pane reports as
+    // pending is what Flyway would actually run. `Ignored` becomes `Pending`
+    // under out-of-order, and guessing at that here rather than asking would
+    // make the confirmation dialog a description of something else.
     let out = flywaycli::run(
         &program,
         std::path::Path::new(&path),
         &environment,
         "info",
-        vec![],
+        out_of_order_flag(out_of_order),
     )
     .await?;
 
@@ -1186,6 +1197,123 @@ async fn flyway_info(
         ));
     }
     flywaycli::migrations(&out.stdout)
+}
+
+/// The `-outOfOrder` flag, or nothing.
+///
+/// Passed only when true. Flyway's own default lives in the project file, and
+/// sending `-outOfOrder=false` would silently override a project that had set
+/// it — which is the opposite of reading the setting from the file.
+fn out_of_order_flag(on: bool) -> Vec<String> {
+    if on {
+        vec!["-outOfOrder=true".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// What an apply did.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Applied {
+    /// How many Flyway says it ran. **Flyway's own count**, not the length of
+    /// the list the UI showed before asking — the two differ exactly when
+    /// something was wrong, which is when it matters.
+    pub executed: u32,
+    /// The schema version afterwards, when Flyway reports one.
+    pub target: Option<String>,
+}
+
+/// Apply this connection's pending migrations.
+///
+/// **The one command in this app that changes a database without a statement
+/// the user typed.** Three things guard it, in this order:
+///
+///   1. A read-only connection refuses, here rather than only in the UI.
+///   2. The environment guard runs **again**. It ran at import, but the TOML
+///      lives in a repository and changes with the branch — which is the
+///      user's actual workflow — so the file that was checked is not
+///      necessarily the file about to be used.
+///   3. The caller has already confirmed, naming the versions.
+///
+/// Flyway's own refusal is returned verbatim. It explains itself well, and a
+/// paraphrase would replace an instruction with a summary.
+#[tauri::command]
+async fn flyway_migrate(
+    app: tauri::AppHandle,
+    connection_id: String,
+    program: String,
+    out_of_order: bool,
+) -> Result<Applied, String> {
+    let dir = config_dir(&app)?;
+    let profile = profiles::load(&dir)
+        .profiles
+        .into_iter()
+        .find(|p| p.id == connection_id)
+        .ok_or_else(|| "No saved connection with that id.".to_string())?;
+
+    let path = profile
+        .flyway_project
+        .clone()
+        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
+    let environment = profile
+        .flyway_environment
+        .clone()
+        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
+
+    // Re-read rather than remembered: the file is in a repository and the
+    // branch may have moved since it was attached.
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let project = flyway::parse(&text)?;
+    if let Some(reason) = flyway::apply_refusal(&project, &profile, &environment) {
+        logbook::warn("flyway", "apply refused before it started");
+        return Err(reason);
+    }
+
+    logbook::info(
+        "flyway",
+        format!("applying {environment}, out-of-order {out_of_order}"),
+    );
+    let out = flywaycli::run(
+        &program_or_default(program),
+        std::path::Path::new(&path),
+        &environment,
+        "migrate",
+        out_of_order_flag(out_of_order),
+    )
+    .await?;
+
+    // Before the success shape, always: a refused migrate is an object with
+    // an `error` and nothing else in it.
+    if let Some(c) = flywaycli::complaint(&out.stdout) {
+        logbook::warn(
+            "flyway",
+            format!("migrate refused: {}", c.code.unwrap_or_default()),
+        );
+        return Err(c.message);
+    }
+    let v: serde_json::Value = serde_json::from_str(&out.stdout)
+        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))?;
+    let executed = v
+        .get("migrationsExecuted")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    if !out.ok() {
+        return Err(format!(
+            "Flyway exited with {}. {}",
+            out.code
+                .map(|c| c.to_string())
+                .unwrap_or("no status".into()),
+            out.stderr.trim()
+        ));
+    }
+    Ok(Applied {
+        executed,
+        target: v
+            .get("targetSchemaVersion")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+    })
 }
 
 // ------------------------------------------------------------- the logbook
@@ -1506,6 +1634,7 @@ pub fn run() {
             flyway_read_project,
             flyway_check,
             flyway_info,
+            flyway_migrate,
             open_tab,
             close_tab,
             use_database,

@@ -225,6 +225,57 @@ impl Disagreement {
     }
 }
 
+/// Why an apply must not go ahead, or `None`.
+///
+/// **Extracted from the command so the guards are testable without a running
+/// app.** Each of these is the difference between changing the database you
+/// are looking at and changing a different one, and none of them should be
+/// reachable only through a Tauri handle.
+///
+/// The order matters. Read-only is a decision the user made and can unmake, so
+/// it is said first and on its own terms; a disagreement is a fact about two
+/// files that drifted apart, and it names the fields.
+pub fn apply_refusal(
+    project: &Project,
+    profile: &crate::session::ConnProfile,
+    environment: &str,
+) -> Option<String> {
+    if profile.read_only {
+        return Some(
+            r#"This connection is marked read-only, so it will not apply migrations. Edit the connection and clear "Read-only" to allow writes."#
+                .into(),
+        );
+    }
+
+    let Some(env) = project.environment(environment) else {
+        return Some(format!(
+            "This project no longer has an environment called \"{environment}\".              It may have been renamed or removed since it was attached."
+        ));
+    };
+
+    // Checked **again**, not only at import. The TOML lives in a repository
+    // and changes with the branch — which is the actual workflow this was
+    // built for — so the file that was checked is not necessarily the file
+    // about to be used.
+    let disagreements = disagreements(env, profile);
+    if disagreements.is_empty() {
+        return None;
+    }
+    let fields: Vec<&str> = disagreements.iter().map(|d| d.field()).collect();
+    let verb = if fields.len() == 1 {
+        "differs"
+    } else {
+        "differ"
+    };
+    let fields = fields.join(" and ");
+    Some(format!(
+        // "user differs" for one and "host and user differ" for two: a
+        // guard that cannot manage a plural reads as machine output, and
+        // this one is asking somebody to stop and check something.
+        r#""{environment}" no longer matches this connection: {fields} {verb}. The project file may have changed since it was attached. Re-attach it from the migrations pane before applying."#
+    ))
+}
+
 /// Compare an environment with the connection it is about to be attached to.
 ///
 /// **Why this exists.** `flyway migrate -environment=uat` connects to the URL
@@ -533,5 +584,82 @@ ignoreNewlinesInTextObjects = "off"
         };
         let conn = profile("127.0.0.1", 3306, Some("flyway_dev"), "root");
         assert_eq!(disagreements(&env, &conn), vec![]);
+    }
+
+    // ------------------------------------------------- refusing to apply
+
+    /// The environment the real file's `development` points at.
+    fn agreeing() -> crate::session::ConnProfile {
+        profile("dev.example.com", 3306, Some("flyway"), "cftconn_dev_app")
+    }
+
+    #[test]
+    fn an_agreeing_environment_is_not_refused() {
+        let p = parse(REAL).unwrap();
+        assert_eq!(apply_refusal(&p, &agreeing(), "development"), None);
+    }
+
+    /// F7. Said in the connection's own terms — it is a choice the user made
+    /// and can unmake — and *before* anything else, because it is true
+    /// whatever the project file says.
+    #[test]
+    fn a_read_only_connection_refuses_to_apply() {
+        let p = parse(REAL).unwrap();
+        let mut ro = agreeing();
+        ro.read_only = true;
+
+        let reason = apply_refusal(&p, &ro, "development").expect("refused");
+        assert!(reason.contains("read-only"), "{reason}");
+        assert!(
+            reason.contains("Edit the connection"),
+            "it says how to undo it"
+        );
+
+        // And it refuses even when the environment would *also* have been
+        // wrong, so the user is not sent to fix the wrong thing first.
+        let mut wrong = ro.clone();
+        wrong.host = "somewhere.else".into();
+        assert!(apply_refusal(&p, &wrong, "development")
+            .unwrap()
+            .contains("read-only"));
+    }
+
+    /// **The case this guard exists for.** The TOML is in a repository and
+    /// changes with the branch, so an environment that matched at import can
+    /// stop matching without anybody touching the connection.
+    #[test]
+    fn an_environment_that_has_drifted_since_import_refuses_and_names_the_fields() {
+        let p = parse(REAL).unwrap();
+        let moved = profile("dev.example.com", 3306, Some("flyway"), "someone_else");
+
+        let reason = apply_refusal(&p, &moved, "development").expect("refused");
+        assert!(
+            reason.contains("user differs"),
+            "it names what differs: {reason}"
+        );
+        assert!(!reason.contains("host"), "and not what does not: {reason}");
+        assert!(reason.contains("Re-attach"), "{reason}");
+    }
+
+    #[test]
+    fn two_fields_that_differ_are_both_named() {
+        let p = parse(REAL).unwrap();
+        // A connection pointed at dev, checked against the qa environment:
+        // both the server and the account are somebody else's.
+        let elsewhere = profile("dev.example.com", 3306, Some("flyway"), "cftconn_dev_app");
+
+        let reason = apply_refusal(&p, &elsewhere, "qa").expect("refused");
+        assert!(reason.contains("host and user differ"), "{reason}");
+    }
+
+    /// An environment renamed out from under the connection is not a
+    /// disagreement — there is nothing to compare — and saying "host differs"
+    /// would send somebody looking at the wrong thing.
+    #[test]
+    fn an_environment_that_no_longer_exists_says_so() {
+        let p = parse(REAL).unwrap();
+        let reason = apply_refusal(&p, &agreeing(), "staging").expect("refused");
+        assert!(reason.contains("staging"), "{reason}");
+        assert!(reason.contains("renamed or removed"), "{reason}");
     }
 }

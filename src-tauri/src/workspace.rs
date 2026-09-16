@@ -60,15 +60,25 @@ pub struct StoredTab {
     pub active_db: Option<String>,
     #[serde(default)]
     pub untitled_number: Option<u32>,
-    /// This tab arrived through the MCP server rather than being opened by the
-    /// person at the keyboard.
+    /// Where this tab came from, when it was not opened by the person at the
+    /// keyboard: `mcp`, `migration`, or absent for "mine".
     ///
     /// Stored, so the mark survives a restart. Provenance that lasts only until
     /// the app is closed is provenance you cannot rely on, and the whole reason
     /// the mark exists is that a tab which appeared unbidden must not look like
-    /// one you opened. `#[serde(default)]` so every session file written before
-    /// Stage 13 loads unchanged and means "mine".
-    #[serde(default)]
+    /// one you opened.
+    ///
+    /// **Not validated here.** This module's job is to carry the session file
+    /// intact; an origin this build does not recognise belongs to a build that
+    /// does, and losing it on one launch of an older version would be worse
+    /// than showing no mark for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// What `origin` was before Stage 17, when MCP was the only thing that
+    /// could open a tab you had not. Read, never written: the frontend maps a
+    /// `true` here onto `origin: "mcp"`. Kept so upgrading does not silently
+    /// drop the mark from tabs that were already open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
 }
 
@@ -305,10 +315,10 @@ mod tests {
         assert_eq!(out.session.connections[0].tabs[0].title, "a");
     }
 
-    /// A session file written before Stage 13 has no `external` key at all,
-    /// and the answer for every tab in it is "the user opened this". Getting
-    /// this wrong would put a provenance mark on everyone's existing tabs the
-    /// first time they ran a new build.
+    /// A session file written before Stage 13 has neither key, and the answer
+    /// for every tab in it is "the user opened this". Getting this wrong would
+    /// put a provenance mark on everyone's existing tabs the first time they
+    /// ran a new build.
     #[test]
     fn a_session_from_before_provenance_existed_means_the_tabs_are_yours() {
         let dir = tmp();
@@ -321,13 +331,54 @@ mod tests {
         let out = load(&dir);
         assert!(out.warning.is_none());
         assert!(!out.session.connections[0].tabs[0].external);
+        assert_eq!(out.session.connections[0].tabs[0].origin, None);
+    }
+
+    /// The old key still loads, because a session written by the build somebody
+    /// is upgrading *from* is the one they will open first.
+    #[test]
+    fn the_boolean_that_preceded_origin_still_loads() {
+        let dir = tmp();
+        fs::write(
+            path_in(&dir),
+            br#"{"version":1,"connections":[{"connectionId":"c1","tabs":[{"title":"a","text":"","external":true}],"activeIndex":0}]}"#,
+        )
+        .unwrap();
+
+        let t = &load(&dir).session.connections[0].tabs[0];
+        assert!(t.external, "the frontend reads this as origin mcp");
+        assert_eq!(t.origin, None);
+    }
+
+    /// An origin from a *newer* build survives a load and save here. Dropping
+    /// it would mean running an older version once silently erased a mark.
+    #[test]
+    fn an_origin_this_build_does_not_know_is_carried_rather_than_dropped() {
+        let dir = tmp();
+        fs::write(
+            path_in(&dir),
+            br#"{"version":1,"connections":[{"connectionId":"c1","tabs":[{"title":"a","text":"","origin":"something-later"}],"activeIndex":0}]}"#,
+        )
+        .unwrap();
+
+        let back = load(&dir);
+        assert_eq!(
+            back.session.connections[0].tabs[0].origin.as_deref(),
+            Some("something-later")
+        );
+        save(&dir, &back.session).unwrap();
+        let again = load(&dir);
+        assert_eq!(
+            again.session.connections[0].tabs[0].origin.as_deref(),
+            Some("something-later")
+        );
     }
 
     #[test]
     fn an_external_tab_stays_external_across_a_save_and_load() {
         let dir = tmp();
         let mut marked = tab("from-a-client");
-        marked.external = true;
+        marked.origin = Some("mcp".into());
         save(
             &dir,
             &SessionStore {
@@ -343,8 +394,12 @@ mod tests {
 
         let back = load(&dir);
         let tabs = &back.session.connections[0].tabs;
-        assert!(!tabs[0].external, "an ordinary tab was marked");
-        assert!(tabs[1].external, "the mark did not survive the round trip");
+        assert_eq!(tabs[0].origin, None, "an ordinary tab was marked");
+        assert_eq!(
+            tabs[1].origin.as_deref(),
+            Some("mcp"),
+            "the mark did not survive the round trip"
+        );
     }
 
     #[cfg(unix)]

@@ -106,14 +106,21 @@ export class ResultView {
     this.gridEl.addEventListener("scroll", this.onScroll, { passive: true });
   }
 
-  setMessage(html: string) {
+  /**
+   * Replace the results with a sentence.
+   *
+   * **Text, not markup** — this once took a parameter called `html`, which was
+   * a standing invitation to "fix" it with `innerHTML`. What arrives here is
+   * a server's error message, and Flyway's carries the SQL that failed.
+   */
+  setMessage(text: string) {
     this.result = null;
     this.onSelect = () => {};
     this.onScrolled = () => {};
     this.onCloseStatement = () => {};
     this.selection = emptySelection();
     this.tabsEl.replaceChildren();
-    this.gridEl.replaceChildren(el("div", "empty", html));
+    this.gridEl.replaceChildren(el("div", "empty", text));
     this.statusEl.replaceChildren();
     this.onChanged();
   }

@@ -404,14 +404,60 @@ pub struct Migration {
     pub installed_on_utc: Option<String>,
     pub installed_by: Option<String>,
     pub execution_time_ms: Option<u64>,
+    /// Derived from `state`, and sent so the renderer never has to know what
+    /// Flyway's words mean. Set by `migrations()`.
+    pub group: Group,
+}
+
+/// What the next `migrate` would do with a migration.
+///
+/// **The axis the pane groups on**, and the one that matters before applying:
+/// not "has this run" but "will this run". Flyway has a dozen states and most
+/// of them — `Ignored`, `Superseded`, `Above Baseline`, `Missing` — differ in
+/// why they will not run rather than in whether they will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Group {
+    /// Flyway will run it.
+    Pending,
+    /// It failed, and it blocks every other migration until it is repaired.
+    Failed,
+    /// Applied, skipped, superseded, baselined. `migrate` will not touch it.
+    Done,
 }
 
 impl Migration {
     pub fn is_pending(&self) -> bool {
         self.state.eq_ignore_ascii_case("pending")
     }
+
+    /// `Failed`, but also `Failed (Missing)` and `Failed (Future)`, which are
+    /// the same problem wearing a qualifier.
     pub fn is_failed(&self) -> bool {
-        self.state.eq_ignore_ascii_case("failed")
+        self.state.to_ascii_lowercase().contains("failed")
+    }
+
+    /// Which group this belongs to.
+    ///
+    /// **`Done` is the default, including for a state this build has never
+    /// seen.** Under-promising is the safe direction: claiming something will
+    /// not run and being wrong shows up as an extra line in what Flyway
+    /// reports it executed, which is visible. Claiming something *will* run
+    /// and being wrong is a confirmation dialog that lied about what it was
+    /// asking permission for.
+    ///
+    /// Note that `Ignored` lands in `Done` — correctly, because it is only
+    /// ignored while out-of-order is off. Turn it on and Flyway reports the
+    /// same migration as `Pending`, which is why the pane re-asks rather than
+    /// reasoning about it here.
+    pub fn group(&self) -> Group {
+        if self.is_failed() {
+            Group::Failed
+        } else if self.is_pending() {
+            Group::Pending
+        } else {
+            Group::Done
+        }
     }
 }
 
@@ -472,7 +518,14 @@ pub fn migrations(stdout: &str) -> Result<Vec<Migration>, String> {
                 installed_on_utc: text("installedOnUTC").map(str::to_string),
                 installed_by: text("installedBy").map(str::to_string),
                 execution_time_ms: m.get("executionTime").and_then(|x| x.as_u64()),
+                // Overwritten immediately below; `group()` needs the state,
+                // which is not set until the struct exists.
+                group: Group::Done,
             }
+        })
+        .map(|m| Migration {
+            group: m.group(),
+            ..m
         })
         .collect())
 }
@@ -595,6 +648,47 @@ mod tests {
         );
         assert_eq!(m[1].kind.as_deref(), Some("SQL"));
         assert_eq!(m[1].execution_time_ms, Some(7));
+    }
+
+    /// The grouping the pane hangs on, and the one the apply dialog counts.
+    #[test]
+    fn a_migration_is_grouped_by_what_apply_would_do_with_it() {
+        let m = migrations(INFO).unwrap();
+        assert_eq!(m[0].group(), Group::Pending, "Pending runs");
+        assert_eq!(m[1].group(), Group::Failed, "Failed blocks everything");
+
+        let state = |s: &str| Migration {
+            state: s.to_string(),
+            ..m[0].clone()
+        };
+        // Whatever the reason, none of these will be executed.
+        for done in [
+            "Success",
+            "Ignored",
+            "Superseded",
+            "Above Baseline",
+            "Baseline",
+            "Missing",
+            "Out of Order",
+            "Undone",
+        ] {
+            assert_eq!(state(done).group(), Group::Done, "{done}");
+        }
+        // A qualifier does not stop a failure being one.
+        assert_eq!(state("Failed (Missing)").group(), Group::Failed);
+        assert_eq!(state("Failed (Future)").group(), Group::Failed);
+        // And a state from a later Flyway is Done: under-promising is the only
+        // safe direction for a dialog that asks permission to run things.
+        assert_eq!(state("Something Flyway Adds In 2027").group(), Group::Done);
+    }
+
+    /// The group travels with the migration, so the renderer never has to
+    /// learn Flyway's vocabulary to bucket a row.
+    #[test]
+    fn the_group_is_set_when_the_list_is_parsed() {
+        let m = migrations(INFO).unwrap();
+        assert_eq!(m[0].group, Group::Pending);
+        assert_eq!(m[1].group, Group::Failed);
     }
 
     /// The state is Flyway's word, kept. An unknown one must reach the user as

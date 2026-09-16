@@ -365,6 +365,24 @@ export interface FlywayMigration {
   installedOnUtc: string | null;
   installedBy: string | null;
   executionTimeMs: number | null;
+  /** What the next apply would do with it. Derived in Rust from `state`, so
+   *  the renderer never has to know what Flyway's dozen words mean. */
+  group: FlywayGroup;
+}
+
+/**
+ * The axis the pane groups on: not "has this run" but **"will this run"**.
+ *
+ * Most of Flyway's states — `Ignored`, `Superseded`, `Above Baseline`,
+ * `Missing` — differ in *why* they will not run rather than in whether they
+ * will, which is the only thing that matters before applying.
+ */
+export type FlywayGroup = "pending" | "failed" | "done";
+
+/** What an apply did. `executed` is Flyway's own count. */
+export interface FlywayApplied {
+  executed: number;
+  target: string | null;
 }
 
 export interface ProfileList {
@@ -562,6 +580,10 @@ export interface StoredTab {
   /** Arrived through the MCP server rather than being opened by the user.
    *  Stored, because provenance that lasts only until you quit is provenance
    *  you cannot rely on. Absent in files written before Stage 13. */
+  /** Where the tab came from. Absent in a session written before Stage 17,
+   *  which had only `external` and meant MCP by it. */
+  origin?: "own" | "mcp" | "migration";
+  /** @deprecated Read for sessions written before Stage 17; never written. */
   external?: boolean;
 }
 
@@ -673,8 +695,15 @@ export const api = {
     invoke<FlywayDisagreement[]>("flyway_check", { connectionId, path, environment }),
   /** What Flyway says about this connection's project. `program` empty means
    *  whatever is on the PATH. */
-  flywayInfo: (connectionId: string, program: string) =>
-    invoke<FlywayMigration[]>("flyway_info", { connectionId, program }),
+  /** `outOfOrder` is asked with the same flag an apply would use, so what is
+   *  reported as pending is what Flyway would actually run. */
+  flywayInfo: (connectionId: string, program: string, outOfOrder: boolean) =>
+    invoke<FlywayMigration[]>("flyway_info", { connectionId, program, outOfOrder }),
+
+  /** Apply the pending migrations. Refuses a read-only connection, and
+   *  re-checks the environment guard before anything runs. */
+  flywayMigrate: (connectionId: string, program: string, outOfOrder: boolean) =>
+    invoke<FlywayApplied>("flyway_migrate", { connectionId, program, outOfOrder }),
 
   /** The whole diagnostic report — build, Flyway probe, log tail — as text
    *  meant to be pasted where somebody can read it. */

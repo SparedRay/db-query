@@ -157,3 +157,92 @@ async fn the_whole_report_reads_as_one_document() {
     );
     assert!(!text.contains("hunter2"), "and the secret does not");
 }
+
+// -------------------------------------------------------------- applying
+
+/// Reset one fixture environment to empty, so an apply test starts from
+/// nothing rather than from whatever the last run left.
+fn reset(db: &str) {
+    let out = std::process::Command::new("podman")
+        .args([
+            "exec",
+            "-i",
+            "db-query-mysql",
+            "mysql",
+            "-uroot",
+            "-pdevpassword",
+            "-e",
+        ])
+        .arg(format!(
+            "DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db};"
+        ))
+        .output()
+        .expect("podman exec");
+    assert!(out.status.success(), "could not reset {db}");
+}
+
+/// **Phase 2's whole claim, against a real database.**
+///
+/// The fixture's fourth migration is broken on purpose, so one run covers both
+/// halves: three apply, the fourth fails, and Flyway's own words say which one
+/// and why.
+#[tokio::test]
+#[ignore]
+async fn applying_runs_the_pending_migrations_and_stops_at_the_broken_one() {
+    reset("flyway_qa");
+
+    let out = flywaycli::run(&program(), &project(), "qa", "migrate", vec![])
+        .await
+        .expect("flyway ran");
+
+    // It failed, and it failed on V4 rather than somewhere vague.
+    assert!(!out.ok(), "the fixture's V4 is broken on purpose");
+    let c = flywaycli::complaint(&out.stdout).expect("Flyway complained");
+    assert_eq!(c.code.as_deref(), Some("FAILED_VERSIONED_MIGRATION"));
+    assert!(
+        c.message.contains("V4__deliberately_broken.sql"),
+        "{}",
+        c.message
+    );
+    // Flyway's own words, kept: the line a user acts on is the SQL error.
+    assert!(c.message.contains("Can't DROP 'weight'"), "{}", c.message);
+
+    // Three ran before it did, and Flyway says so in the field the command reads.
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["migrationsExecuted"], 3);
+
+    // And the state afterwards is what the pane will show: three done, one
+    // failed and blocking.
+    let after = flywaycli::migrations(&info("qa").await.stdout).unwrap();
+    let group = |v: &str| {
+        after
+            .iter()
+            .find(|m| m.version.as_deref() == Some(v))
+            .unwrap()
+            .group
+    };
+    assert_eq!(group("1"), flywaycli::Group::Done);
+    assert_eq!(group("3"), flywaycli::Group::Done);
+    assert_eq!(group("4"), flywaycli::Group::Failed);
+}
+
+/// A second apply is refused outright while a failure sits in the history —
+/// which is why `complaint` is read before the success shape, and why Phase 3
+/// exists.
+#[tokio::test]
+#[ignore]
+async fn a_failed_migration_blocks_the_next_apply_with_an_instruction() {
+    reset("flyway_qa");
+    let _ = flywaycli::run(&program(), &project(), "qa", "migrate", vec![]).await;
+
+    let again = flywaycli::run(&program(), &project(), "qa", "migrate", vec![])
+        .await
+        .expect("flyway ran");
+
+    let c = flywaycli::complaint(&again.stdout).expect("refused");
+    assert_eq!(c.code.as_deref(), Some("VALIDATE_ERROR"));
+    assert!(c.message.contains("run repair"), "{}", c.message);
+    // The refusal carries nothing else at all, which is the trap this ordering
+    // avoids: reading the success shape first would report an empty run.
+    assert!(flywaycli::migrations(&again.stdout).is_err());
+}
