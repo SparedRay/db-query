@@ -888,6 +888,48 @@ dialog.ask p {
 dialog.ask menu button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 dialog.ask menu button.danger { border-color: var(--danger); color: var(--danger-fg); }
 
+/* A dialog whose body is a document rather than a sentence — currently only
+   the update offer, which draws release notes. `pre-line` is deliberately not
+   inherited here: rendered Markdown does its own line breaking, and honouring
+   the source's newlines on top of that produces a ragged column. */
+dialog.ask .ask-body { font-size: 12.5px; color: var(--fg-dim); line-height: 1.55; }
+dialog.ask .ask-body p { margin: 0 0 8px; white-space: normal; }
+dialog.ask .ask-body > p:last-child { margin-bottom: 0; }
+
+/* The notes themselves, set apart because they are *theirs*: this text comes
+   from the update endpoint, and the app's own sentences sit outside the box so
+   nothing the endpoint sends can be read as something the app is telling you —
+   the warning about unsaved work above all. Scrolls rather than growing: a
+   release with long notes must not push the buttons off the screen. */
+.ask-notes {
+  max-height: 340px; overflow: auto;
+  margin: 0 0 10px; padding: 8px 10px;
+  border-left: 2px solid var(--border);
+  border-radius: 0 4px 4px 0;
+  background: var(--bg-hover);
+}
+.ask-notes > :first-child { margin-top: 0; }
+.ask-notes > :last-child { margin-bottom: 0; }
+.ask-notes h3, .ask-notes h4 {
+  margin: 12px 0 4px; font-weight: 600; color: var(--fg);
+}
+/* Two sizes, because a release body uses both levels and rendering them
+   identically throws away the structure the author put there. */
+.ask-notes h3 { font-size: 13.5px; }
+.ask-notes h4 { font-size: 12.5px; }
+.ask-notes p { margin: 0 0 8px; }
+.ask-notes ul, .ask-notes ol { margin: 0 0 8px; padding-left: 18px; }
+.ask-notes li { margin: 2px 0; }
+.ask-notes code {
+  font-family: var(--mono); font-size: 11px;
+  padding: 1px 4px; border-radius: 3px; background: var(--btn-bg);
+}
+.ask-notes pre {
+  margin: 0 0 8px; padding: 8px; overflow-x: auto;
+  border-radius: 4px; background: var(--btn-bg);
+}
+.ask-notes pre code { padding: 0; background: none; }
+
 /* --- connection dialog --- */
 dialog {
   background: var(--bg-raised); color: var(--fg);

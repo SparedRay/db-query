@@ -29,6 +29,7 @@ import {
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
+import { renderMarkdown } from "./markdown";
 import { createTheme, type ThemePref } from "./theme";
 import {
   AI_PRESETS, EDITOR_THEMES, FONTS, applyAppearance, load as loadSettings,
@@ -2571,21 +2572,52 @@ async function checkForUpdate() {
   els.btnUpdate.onclick = () => void offerUpdate(status);
 }
 
-/** Ask, then install only on a yes. Declining leaves the button where it was. */
+/**
+ * Ask, then install only on a yes. Declining leaves the button where it was.
+ *
+ * **The release notes are a document, so they are drawn as one.** They are a
+ * GitHub release body — Markdown — and were being shown as the characters
+ * they are typed with: `## Install`, `**Windows**`, stray backticks. That reads
+ * as the app failing to draw something rather than as a document.
+ *
+ * `renderMarkdown` builds nodes and never parses HTML, which matters here more
+ * than anywhere else in the app: this text arrives from the network, and only
+ * the *installer bytes* are signature-checked. Nothing verifies the notes.
+ *
+ * The app's own sentences stay separate paragraphs above and below, so nothing
+ * the endpoint sends can be mistaken for something the app is telling you —
+ * particularly the warning about unsaved work, which has to be ours.
+ */
 async function offerUpdate(status: Extract<UpdateStatus, { type: "available" }>) {
   const notes = status.notes?.trim();
-  const answer = await choose(
-    `Update to ${status.version}?`,
-    `You are running ${status.current}.` +
-      (status.date ? ` ${status.version} was released ${status.date.slice(0, 10)}.` : "") +
-      (notes ? `\n\n${notes}` : "") +
-      "\n\nThe app will close while it installs, then reopen. " +
-      "Unsaved scripts are not saved for you.",
-    [
-      { value: "install", label: "Download and install", primary: true },
-      { value: "later", label: "Not now" },
-    ],
+
+  const body = document.createDocumentFragment();
+  body.append(
+    elem(
+      "p",
+      "",
+      `You are running ${status.current}.` +
+        (status.date ? ` ${status.version} was released ${status.date.slice(0, 10)}.` : ""),
+    ),
   );
+  if (notes) {
+    const box = elem("div", "ask-notes");
+    box.append(renderMarkdown(notes));
+    body.append(box);
+  }
+  body.append(
+    elem(
+      "p",
+      "",
+      "The app will close while it installs, then reopen. " +
+        "Unsaved scripts are not saved for you.",
+    ),
+  );
+
+  const answer = await choose(`Update to ${status.version}?`, body, [
+    { value: "install", label: "Download and install", primary: true },
+    { value: "later", label: "Not now" },
+  ]);
   if (answer !== "install") return;
 
   els.btnUpdate.disabled = true;

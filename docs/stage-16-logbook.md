@@ -397,3 +397,78 @@ of the app that has no pixels; this was the other half, and it took a
 screenshot-shaped bug report and a test to find.
 
 **710 UI tests on both engines, 382 Rust.**
+
+## 10. The update dialog was showing its notes as source — 2026-09-17
+
+Recorded here because [Stage 6](stage-6-updates-and-attribution.md) is frozen.
+
+> *"the changelog modal that we show on an update does not render the markdown.
+> is it intentional?"*
+
+Half intentional, which is the interesting part. The notes were never *meant*
+to be Markdown-shaped; they were meant to be safe. `choose()` sets its message
+with `textContent` and says why, at the line that does it:
+
+```ts
+// textContent, not innerHTML: these messages carry file names, connection
+// names and server errors, none of which we control.
+```
+
+That rule is right and is not being relaxed. But release notes are a GitHub
+release body — the one the workflow itself writes, full of `##`, `**` and
+fenced code — and a correct refusal to parse HTML had turned into showing a
+document as its own punctuation.
+
+### 10.1 Why a renderer and not a library
+
+`src/markdown.ts`, about 150 lines, no dependency. Two reasons, and the second
+is the one that decided it.
+
+A Markdown library would be far more capable, and would bring a licence to
+audit, a supply chain to trust, and — every one of them — an **HTML pipeline**:
+they emit a string of markup, which then has to be sanitised before it can be
+shown. That is the wrong shape for this input.
+
+**The notes come off the network, and nothing verifies them.** They are read
+out of `latest.json`, and the updater's signature covers the *installer bytes*,
+not the manifest's prose. So the renderer never produces a string of markup at
+all: every node is `createElement`, every piece of source text lands in a
+`Text` node. There is no sanitiser because there is nothing to sanitise, which
+is a much easier property to keep true.
+
+The test that matters sends `<img src=x onerror="document.title='pwned'">` and
+asserts no `<img>` exists, the characters are on screen, and the title did not
+change. It fails the moment any paragraph is built with `innerHTML`.
+
+### 10.2 What it draws, and what it refuses to
+
+Headings (`h3`/`h4` — never outranking the dialog's own `h2`), bullet and
+numbered lists, fenced code, code spans, bold, italic. Anything unrecognised
+comes out verbatim: an unclosed `**`, a table, a blockquote. Showing a
+construct as text is a far smaller failure than swallowing it.
+
+**Links render as text**, `label (url)`. A real anchor inside a Tauri webview
+navigates the app window away from the app — there is no tab to land in — and
+the address is still readable and copyable this way.
+
+Wrapped lines are joined rather than kept as breaks, which differs from GitHub
+deliberately: the wrapping in a release body is an artefact of the file it was
+typed into, at a width this dialog does not have. Structure is preserved
+exactly; line endings inside a paragraph are not.
+
+### 10.3 The notes are theirs, and look it
+
+The app's own sentences stay outside the rendered block — the running version
+above, the warning about unsaved work below — and the notes sit in their own
+panel. A test asserts the warning is *not* inside it. Text from the endpoint
+must not be able to occupy the place where the app speaks; that is the same
+separation the logbook keeps between what the app did and what a server said.
+
+`choose()` now takes `string | Node`, and a `Node` message is wrapped in a
+`div` rather than the usual `p`: a paragraph cannot legally contain a heading
+or a `<pre>`, and the `white-space: pre-line` that makes multi-line messages
+readable would fight the renderer's own line breaking.
+
+**718 UI tests on both engines.** Both new properties were falsified first:
+bypassing the renderer fails the rendering test, and building one paragraph
+with `innerHTML` fails the injection test.

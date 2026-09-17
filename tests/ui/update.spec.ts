@@ -75,24 +75,114 @@ test("the offer shows the version, the notes and what will happen", async ({ pag
   const dlg = page.locator("dialog.ask");
   await expect(dlg).toBeVisible();
   await expect(dlg.locator("h2")).toHaveText("Update to 0.1.1?");
-  await expect(dlg.locator("p")).toContainText("Fixes the result-tab switch.");
-  await expect(dlg.locator("p")).toContainText("0.1.0");
+  const body = dlg.locator(".ask-body");
+  await expect(body).toContainText("Fixes the result-tab switch.");
+  await expect(body).toContainText("0.1.0");
   // The consequence has to be stated: the app closes, and nothing is saved.
-  await expect(dlg.locator("p")).toContainText(/close/i);
-  await expect(dlg.locator("p")).toContainText(/[Uu]nsaved/);
+  await expect(body).toContainText(/close/i);
+  await expect(body).toContainText(/[Uu]nsaved/);
 });
 
 /**
- * The notes and the warning are separate paragraphs and must render that way.
- * They are set as `textContent` — never `innerHTML`, because release notes come
- * from the server — so the CSS has to honour the newlines or the two run
- * together into one wall of text.
+ * The notes and the app's own sentences are separate blocks and must render
+ * that way, or the whole thing reads as one wall of text.
  */
 test("the offer's paragraphs are not run together", async ({ page }) => {
   await boot(page, { update_check: () => AVAILABLE });
   await page.click(btn);
-  const text = await page.locator("dialog.ask p").innerText();
+  const text = await page.locator("dialog.ask .ask-body").innerText();
   expect(text.split("\n").filter((l) => l.trim()).length).toBeGreaterThanOrEqual(3);
+});
+
+// ------------------------------------------------------- the notes as a document
+
+/** Shaped like a real release body: this is what our own workflow writes. */
+const MARKDOWN_NOTES = [
+  "## Install",
+  "",
+  "**Windows** — download `db-query_x64-setup.exe` and run it.",
+  "Installs for the current user, so there is no Administrator prompt.",
+  "",
+  "```",
+  "sudo apt install ./db-query_amd64.deb",
+  "```",
+  "",
+  "### Updates",
+  "",
+  "- Windows installs check on launch",
+  "- Linux `.deb` installs do not self-update",
+].join("\n");
+
+const RICH = { ...AVAILABLE, notes: MARKDOWN_NOTES };
+
+/**
+ * **The notes are a document, so they are drawn as one.** They are a GitHub
+ * release body, and were being shown as the characters they are typed with
+ * — `## Install`, `**Windows**`, stray backticks — which reads as the app
+ * failing to draw something rather than as a document.
+ */
+test("release notes render as Markdown, not as their own source", async ({ page }) => {
+  await boot(page, { update_check: () => RICH });
+  await page.click(btn);
+  const notes = page.locator("dialog.ask .ask-notes");
+
+  await expect(notes.locator("h3")).toHaveText("Install");
+  await expect(notes.locator("h4")).toHaveText("Updates");
+  await expect(notes.locator("strong").first()).toHaveText("Windows");
+  await expect(notes.locator("pre code")).toHaveText("sudo apt install ./db-query_amd64.deb");
+  await expect(notes.locator("ul li")).toHaveCount(2);
+  await expect(notes.locator("li code").first()).toHaveText(".deb");
+
+  // And none of the punctuation survives as punctuation.
+  const text = await notes.innerText();
+  expect(text).not.toContain("##");
+  expect(text).not.toContain("**");
+  expect(text).not.toContain("`");
+});
+
+/**
+ * **The one that matters.** These notes come off the network: they are read
+ * from `latest.json`, and only the *installer bytes* are signature-checked.
+ * Nothing verifies this text. So it is rendered by building nodes — never by
+ * handing a remote string to anything that can parse markup.
+ */
+test("HTML in release notes is shown, never interpreted", async ({ page }) => {
+  await boot(page, {
+    update_check: () => ({
+      ...AVAILABLE,
+      notes: 'Before <img src=x onerror="document.title=\'pwned\'"> after\n\n<b>not bold</b>',
+    }),
+  });
+  await page.click(btn);
+  const notes = page.locator("dialog.ask .ask-notes");
+
+  await expect(notes.locator("img")).toHaveCount(0);
+  await expect(notes.locator("b")).toHaveCount(0);
+  // The characters arrive as characters.
+  await expect(notes).toContainText("<img src=x");
+  await expect(notes).toContainText("<b>not bold</b>");
+  expect(await page.title()).not.toBe("pwned");
+});
+
+/**
+ * The app's own sentences stay outside the notes box. The warning about
+ * unsaved work has to be ours, and unmistakably so — a release body that
+ * said the opposite must not be able to sit where it would be read as ours.
+ */
+test("the app's own warning is not inside the notes", async ({ page }) => {
+  await boot(page, { update_check: () => RICH });
+  await page.click(btn);
+  await expect(page.locator("dialog.ask .ask-notes")).not.toContainText(/[Uu]nsaved/);
+  await expect(page.locator("dialog.ask .ask-body > p").last()).toContainText(/[Uu]nsaved/);
+});
+
+/** No notes, no box — rather than an empty panel with a border round it. */
+test("an offer with no notes shows no notes box", async ({ page }) => {
+  await boot(page, { update_check: () => ({ ...AVAILABLE, notes: null }) });
+  await page.click(btn);
+  await expect(page.locator("dialog.ask")).toBeVisible();
+  await expect(page.locator("dialog.ask .ask-notes")).toHaveCount(0);
+  await expect(page.locator("dialog.ask .ask-body")).toContainText(/[Uu]nsaved/);
 });
 
 test("declining installs nothing and keeps the offer", async ({ page }) => {
