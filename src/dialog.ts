@@ -17,10 +17,16 @@ export interface Choice<T extends string> {
 /**
  * Ask a question. Resolves to the chosen value, or `null` if dismissed —
  * Escape and backdrop dismissal both mean "cancel", never "go ahead".
+ *
+ * `message` is a string for almost every caller. A `Node` is accepted for the
+ * one that has a *document* to show rather than a sentence — the update
+ * offer, whose release notes are Markdown. **That is not a way in for HTML**:
+ * the caller builds the nodes itself (see `markdown.ts`, which only ever calls
+ * `createElement`), and nothing here parses a string into markup.
  */
 export function choose<T extends string>(
   title: string,
-  message: string,
+  message: string | Node,
   choices: Choice<T>[],
 ): Promise<T | null> {
   return new Promise((resolve) => {
@@ -29,10 +35,19 @@ export function choose<T extends string>(
 
     const h = document.createElement("h2");
     h.textContent = title;
-    const p = document.createElement("p");
-    // textContent, not innerHTML: these messages carry file names, connection
-    // names and server errors, none of which we control.
-    p.textContent = message;
+    // A `<p>` for a sentence; a `<div>` for a document. Not cosmetic: a
+    // paragraph cannot legally hold a heading, a list or a `<pre>`, and the
+    // `white-space: pre-line` that makes multi-line messages readable would be
+    // inherited by rendered Markdown and undo its own line breaking.
+    const body = document.createElement(typeof message === "string" ? "p" : "div");
+    if (typeof message === "string") {
+      // textContent, not innerHTML: these messages carry file names, connection
+      // names and server errors, none of which we control.
+      body.textContent = message;
+    } else {
+      body.className = "ask-body";
+      body.append(message);
+    }
     const menu = document.createElement("menu");
 
     let settled = false;
@@ -54,7 +69,7 @@ export function choose<T extends string>(
       menu.append(b);
     }
 
-    dlg.append(h, p, menu);
+    dlg.append(h, body, menu);
     dlg.addEventListener("cancel", (e) => {
       e.preventDefault();
       done(null);
