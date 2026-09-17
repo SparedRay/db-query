@@ -348,6 +348,15 @@ pub fn report(probe: &str) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
+    // **Whether this build updates itself at all**, which is the first thing to
+    // rule out when somebody reports that a release did not reach them. It is
+    // a property of the package, not of the network, and it is invisible from
+    // the outside: a `.deb` simply never shows an update button.
+    out.push_str(if crate::update::supported() {
+        "updates    this build can update itself\n"
+    } else {
+        "updates    NOT this build \u{2014} install the newer .deb by hand\n"
+    });
     // Named so a longer history than the ring holds can be attached rather
     // than copied — the file keeps far more than the 2000 lines below.
     out.push_str(&match file() {
@@ -600,6 +609,17 @@ mod tests {
         // Where the longer history is, so it can be attached rather than
         // copied — the ring is 2000 lines and the file holds far more.
         assert!(text.contains("log        "), "{text}");
+
+        // And whether this build updates itself at all. A `.deb` never shows
+        // an update button, which from the outside is indistinguishable from
+        // a release that never went out — the first thing to rule out, so it
+        // is stated rather than inferred.
+        assert!(text.contains("updates    "), "{text}");
+        assert_eq!(
+            text.contains("NOT this build"),
+            !crate::update::supported(),
+            "the report must not disagree with the build it came from: {text}"
+        );
     }
 
     /// First run: nothing has written to the config directory yet, so it does
