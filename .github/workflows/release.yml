@@ -234,6 +234,26 @@ jobs:
             for every release is in this repository, and the workflow that built
             it is `.github/workflows/release.yml`.
 
+      # A publish that fails throws the installers away with the runner, which
+      # is how v0.4.7 and v0.4.8 came to be released with no Linux download at
+      # all: the `.deb` was built, signed, and then existed nowhere.
+      #
+      # `if: failure()` so it costs nothing on a good run. The `.sig` files come
+      # too — an installer without its signature cannot be attached to a release
+      # the updater will accept.
+      - name: Keep the installers when publishing failed
+        if: failure() && steps.mode.outputs.publish == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: rescued-${{ matrix.platform }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.deb.sig
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+
       # --- dry run: build the same installers, publish nothing ---
       - name: Build installers (dry run)
         if: steps.mode.outputs.publish != 'true'
@@ -248,3 +268,60 @@ jobs:
           path: |
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/nsis/*-setup.exe
+
+  # Did the release actually end up with everything on it?
+  #
+  # **Because twice it did not, and nothing said so.** One matrix job failing
+  # leaves a draft holding the other platform's installer, its signature and a
+  # `latest.json` naming only that platform. It looks like a release. v0.4.7 and
+  # v0.4.8 were both published in that state and neither offers a Linux download.
+  #
+  # The red X on the build job is the existing signal and it was not enough: it
+  # says a job failed, not that the release is unusable. This says which file is
+  # missing, which is the sentence somebody needs before pressing Publish.
+  #
+  # `if: always()` so it reports on exactly the runs that need it — the ones
+  # where a job failed.
+  verify:
+    name: The release carries both installers
+    needs: build
+    if: always() && (github.event_name == 'push' || github.event.inputs.tag != '')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every expected asset is on the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ github.event.inputs.tag }}'
+          [ -n "$tag" ] || tag='${{ github.ref_name }}'
+
+          # The release is still a draft at this point, so `gh release view`
+          # by tag is the wrong tool — it does not list drafts. Ask the API.
+          assets=$(gh api "repos/${{ github.repository }}/releases?per_page=30" \
+            --jq ".[] | select(.tag_name==\"$tag\") | .assets[].name")
+
+          if [ -z "$assets" ]; then
+            echo "::error::No release for $tag carries any asset at all."
+            exit 1
+          fi
+          echo "On the release for $tag:"
+          echo "$assets" | sed 's/^/  /'
+
+          # Anchored, so the `.deb` pattern is not satisfied by `.deb.sig`
+          # alone — an installer without its signature is not a release.
+          missing=""
+          for want in '_amd64\.deb$' '_amd64\.deb\.sig$' '_x64-setup\.exe$' \
+                      '_x64-setup\.exe\.sig$' '^latest\.json$'; do
+            if ! echo "$assets" | grep -qE -- "$want"; then
+              missing="$missing $(echo "$want" | tr -d '^$\\')"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::The release for $tag is missing:$missing"
+            echo "::error::Do not publish it. Re-run the failed job, or attach the"
+            echo "::error::files from this run's rescued-* artefact by hand."
+            exit 1
+          fi
+          echo "Complete."

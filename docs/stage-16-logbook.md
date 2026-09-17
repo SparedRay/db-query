@@ -621,3 +621,60 @@ tests prove the budget's edge: every table is named even when nothing is
 detailed. Both halves of the frontend change were falsified — disabling
 `columnsInScope` fails three tests, and dropping the database adoption fails
 eight.
+
+## 13. Two releases shipped with no Linux download — 2026-09-17
+
+> *"linux build step keeps failing to upload the .deb"*
+
+**The cause is still unknown**, and this section does not pretend otherwise.
+What is known, all of it read from the public API rather than from the log,
+which needs admin rights this machine does not have (`403 Must have admin
+rights to Repository`):
+
+```
+v0.4.6  success   15:33   deb + deb.sig + exe + exe.sig + latest.json (3462 B)
+v0.4.7  FAILURE   20:40   exe + exe.sig + latest.json (2324 B)   ← published
+v0.4.8  FAILURE   22:12   exe + exe.sig + latest.json (2324 B)   ← published
+```
+
+In both failures the Linux `tauri-action` step ran for 6m15s and 6m16s, of
+which the build itself is 5m27s — so it spends about 45 seconds uploading and
+then fails. Windows succeeded both times. Nothing packaging-related changed
+between v0.4.6 and v0.4.7: the diff is `docs/`, `src/main.ts`, a test and the
+version bump.
+
+One hypothesis was checked and is **dead**: `tauri-apps/tauri-action@v0` did not
+move under us. Its `v0` tag was last written on 2026-03-14, six months ago.
+
+### 13.1 The part that did not need a diagnosis
+
+Both failed releases were **published anyway**, and neither offers a Linux
+download. The smaller `latest.json` is the tell: 2324 bytes against 3462,
+because it names only the Windows platforms.
+
+That is the failure worth fixing first, and it is fixable without knowing why
+the upload dies. The release workflow already refuses to build without a
+signing key, on the stated grounds that *"the Linux job succeeds and the draft
+looks almost right"* — the mirror image of this. It had no check on the way
+out.
+
+* **`rescued-*` artefacts.** A failed publish threw the installers away with the
+  runner: the `.deb` was built, signed, and then existed nowhere. They are now
+  kept for 14 days on failure, signatures included, so the release can be
+  completed by hand.
+* **A `verify` job.** After both builds, whatever they did, it lists the
+  release's assets and fails naming any that are missing. The red X on a build
+  job says *a job failed*; this says *the release has no `.deb`*, which is the
+  sentence somebody needs before pressing Publish.
+
+Its patterns are anchored, so `_amd64.deb` is not satisfied by `_amd64.deb.sig`
+alone. Checked against the real releases before committing: v0.4.6 passes,
+v0.4.7 reports `_amd64.deb _amd64.deb.sig`, and a synthetic sig-only release
+reports just `_amd64.deb`.
+
+### 13.2 What is still needed
+
+The ~15 lines after `Uploading db-query_0.4.7_amd64.deb...` in the failed Linux
+job. Until then the shape of the fix is unknown: an HTTP 5xx means retry a
+transient, `already_exists` means the two matrix jobs are racing, and
+`Resource not accessible` means a permissions problem that will recur forever.
