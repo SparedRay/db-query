@@ -328,3 +328,72 @@ through a module that deliberately has no handle on the app. If an endpoint
 ever turns out to be wrong in the field, that is the line to add.
 
 **708 UI tests on both engines, 382 Rust.**
+
+## 9. A Stage 3 bug, found by using it — 2026-09-17
+
+Recorded here because [Stage 3](stage-3-explore-and-export.md) is frozen.
+
+> *"Exporting seems to be failing. After we do first export seems like stuck on
+> Exporting..."*
+
+Reproduced on the first try, and the failing test named it exactly:
+
+```
+locator resolved to <button disabled type="submit" id="export-ok">Exporting…</button>
+```
+
+The export itself was fine. The **button** was disabled before the dialog had
+even been reopened, so the second export was unpressable and looked like the
+first one had never finished.
+
+### 9.1 The shape of it
+
+Three paths leave an export — it worked, the save dialog was cancelled, the
+backend refused — and the button was restored by hand at each one. Two of the
+three did it. The successful path did not:
+
+```ts
+if (outcome) {
+  showNote(describeExport(outcome, all));
+  els.exportDialog.close();          // ← and nothing put the button back
+} else {
+  els.exportOk.disabled = false;     // cancelled: restored
+  ...
+} catch {
+  els.exportOk.disabled = false;     // refused: restored
+```
+
+**Invisible at the time**, because the dialog closes over it. It waits for the
+next export and presents as a stuck one. And the exit that was forgotten is the
+one where nothing went wrong, which is the usual place to forget.
+
+The fix is a `finally` and one `exportBusy(busy: boolean)` holding the two
+states — which is how the connect dialog has done it since Stage 2, in the same
+file, fourteen hundred lines up. This was not a missing idea; it was a hand-
+rolled instance of an idea already present.
+
+Every other busy button was checked: connect and the two update buttons use
+`finally`, and `updateInstall` deliberately leaves *"Downloading…"* standing
+because on Windows the installer takes over and the process may never return.
+Export was the only one.
+
+### 9.2 What the two tests had in common
+
+Both existing exit-path tests were about *something going wrong*:
+`cancelling the save dialog leaves the export dialog usable`, and
+`a backend refusal is shown in the dialog, which stays open`. The third exit —
+success — was tested for what it *wrote*, never for what it left behind.
+
+The new test asserts the button is enabled and reads "Export", and then
+presses it and asserts a second `export_csv` reached the backend. A button that
+looks right and does nothing is the same bug wearing a different face.
+
+### 9.3 And the logbook did not help
+
+Worth saying plainly, in this tracker of all places. Nothing failed: no command
+errored, no exception was thrown, and `export_csv ok in 31ms` is exactly what
+the log said — twice, correctly, both times. §7.6 claims a log is for the half
+of the app that has no pixels; this was the other half, and it took a
+screenshot-shaped bug report and a test to find.
+
+**710 UI tests on both engines, 382 Rust.**

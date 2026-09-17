@@ -1381,6 +1381,25 @@ function insertOptionsFromForm(): InsertOptions {
   };
 }
 
+/**
+ * The Export button's two states, in one place.
+ *
+ * **Restoring it at each exit is what broke it.** Three paths leave an export
+ * — it worked, the save dialog was cancelled, the backend refused — and two
+ * of them put the button back. The successful one did not, which is invisible
+ * at the time because the dialog closes over it, and waits until the next
+ * export: a permanently disabled button still reading "Exporting…".
+ *
+ * So the restore is in a `finally` and the two states live here, the way the
+ * connect dialog has done it since Stage 2. A button restored by hand is one
+ * exit path away from being wrong, and the exit easiest to forget is the one
+ * where nothing went wrong.
+ */
+function exportBusy(busy: boolean) {
+  els.exportOk.disabled = busy;
+  els.exportOk.textContent = busy ? "Exporting…" : "Export";
+}
+
 els.exportForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const data = results.selectedData();
@@ -1392,8 +1411,7 @@ els.exportForm.addEventListener("submit", async (e) => {
   const inserts = insertOptionsFromForm();
   const name = `${inserts.table}.${format === "csv" ? "csv" : "sql"}`;
 
-  els.exportOk.disabled = true;
-  els.exportOk.textContent = "Exporting…";
+  exportBusy(true);
   try {
     const outcome = all
       ? await api.exportRerun(
@@ -1421,17 +1439,14 @@ els.exportForm.addEventListener("submit", async (e) => {
     if (outcome) {
       showNote(describeExport(outcome, all));
       els.exportDialog.close();
-    } else {
-      els.exportOk.disabled = false;
-      els.exportOk.textContent = "Export";
     }
   } catch (err) {
     // Keeps the dialog open with its values, so a refusal can be corrected
     // rather than re-entered.
     els.exportError.textContent = String(err);
     els.exportError.hidden = false;
-    els.exportOk.disabled = false;
-    els.exportOk.textContent = "Export";
+  } finally {
+    exportBusy(false);
   }
 });
 

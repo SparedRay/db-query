@@ -202,6 +202,33 @@ test("only the selected rows are exported", async ({ page }) => {
 // ----------------------------------------------------------- dialog behaviour
 
 /** Cancelling the native save dialog returns null. That is not a failure. */
+/**
+ * **Three ways out of an export, and the one that worked was the one that
+ * forgot to put the button back.**
+ *
+ * Invisible at the time, because the dialog closes over it. It waited for the
+ * *next* export and presented as "stuck on Exporting…" — the button was
+ * disabled before the dialog had even been opened again. The cancelled and
+ * refused exits both had tests; this one did not, which is why the restore
+ * now lives in a `finally` rather than at each exit.
+ */
+test("a successful export leaves the button ready for the next one", async ({ page }) => {
+  await withRows(page, TWO_ROWS);
+  await page.click("#btn-export");
+  await page.click("#export-ok");
+  await expect(page.locator("#export-dialog")).toBeHidden();
+
+  await page.click("#btn-export");
+  await expect(page.locator("#export-ok")).toBeEnabled();
+  await expect(page.locator("#export-ok")).toHaveText("Export");
+
+  // Not merely enabled: pressing it exports again. A button that looks right
+  // and does nothing is the same bug wearing a different face.
+  await page.click("#export-ok");
+  await expect(page.locator("#export-dialog")).toBeHidden();
+  expect((await calls(page)).filter((c) => c.cmd === "export_csv")).toHaveLength(2);
+});
+
 test("cancelling the save dialog leaves the export dialog usable", async ({ page }) => {
   await withRows(page, TWO_ROWS, { export_csv: () => null });
   await page.click("#btn-export");
