@@ -521,3 +521,103 @@ logbooks: an export button (§9), a changelog dialog (§10) and this. The rule
 says corrections go in the current stage's tracker, and stage 16 is it — but
 its scope closed at §7, and what is accumulating here is post-release polish
 rather than a coherent slice. A Stage 17 for it would be the honest shape.
+
+## 12. Autocomplete knew nothing — 2026-09-17
+
+> *"something we can do to improve intellisense. Today seems not to be picking
+> anything for autocomplete beside MySQL things which are not useful when
+> requiring tables and columns"*
+
+Three separate causes, each of which alone was enough to produce that.
+
+### 12.1 The schema was fed by clicking
+
+`schemaMap` was filled from the tree and nowhere else: table names when a
+database was expanded, column names when a *table* was. So a freshly connected
+editor offered nothing but the dialect's keywords — pages of
+`HOUR_MICROSECOND` and `IGNORE_SERVER_IDS` — and after some browsing it offered
+whichever subset had been opened. The second state is worse than the first: a
+list that is silently partial reads as a complete one, so a missing table looks
+like a table that does not exist.
+
+**The mechanism already existed.** `warm_for_assistant` was built in Stage 10
+for the identical problem one layer over — the model was handed "columns not
+loaded" for every table nobody had clicked, and invented the rest. Completion
+needed the same thing and never asked for it. So it is now `schema::warm`, with
+`TABLE_DETAIL_BUDGET` in place of `ASSISTANT_TABLE_BUDGET`, and a `names`
+reader on top of it.
+
+A table whose columns are not cached comes back with an **empty list rather
+than being left out** — omitting it would make autocomplete deny the existence
+of a table the tree is showing.
+
+### 12.2 Nothing read the database the connection was already on
+
+Even in bulk, there was nothing to load: `tab.activeDb` was `null` until
+somebody clicked a database, so there was no database to describe.
+
+`connect` has returned `currentDatabase` since Stage 2 and **nothing ever read
+it**. A tab's exec connection is opened with `profile.database` on it — read
+from `session.rs`'s `options()` on 2026-09-17 — so a new tab is genuinely on
+that schema from its first statement. Saying it had none was not caution; it
+was a wrong answer about something already decided.
+
+Fixed in both halves, because the frontend fix alone would have been undone by
+the backend:
+
+* `ConnectionEntry.currentDatabase`, adopted by every tab as it is created
+  (`??=`, so a restored tab keeps the database it was left on).
+* `TabSession::new` starts `current_db` from the profile rather than at `None`.
+  Without this, `tab_status` reported `null` after the first run and the
+  frontend dutifully set the tab's database back to nothing — completion would
+  have worked until you ran a query, and then stopped.
+
+Two consequences worth stating. `markActiveDb` is now the single funnel for
+"the database changed", and the tree's click handler goes through it instead of
+repainting the highlight itself — it was the most common way of changing
+database and would have been the one place that missed this. And clicking the
+database you are already on no longer issues a `USE`, because you are already
+there; the spinner test now clicks a *different* database, which is the only
+case that still costs two round trips.
+
+### 12.3 `lang-sql` does not complete bare columns
+
+With the schema loaded, `FROM ord` completed `orders` and `orders.` completed
+its columns — but `SELECT * FROM orders WHERE us` offered the *tables* `users`
+and `user_totals` and never `orders`' own `user_id`, which is the position
+people actually type a column in.
+
+Read from the source rather than guessed at
+(`node_modules/@codemirror/lang-sql/dist/index.js`, `completeFromSchema`,
+2026-09-17): it resolves `table.` and aliases, and offers bare columns only for
+a single configured `defaultTableName`. There is no "columns of the tables this
+query mentions".
+
+So `columnsInScope`, registered **beside** the dialect's source rather than as
+an `override` — keywords, tables and dotted columns all still come from
+`lang-sql`. It reads the statement around the cursor, pulls the names after
+`FROM`/`JOIN`/`UPDATE`/`INTO`, and offers those tables' columns, each labelled
+with the table it came from.
+
+A regex over text, not a walk of the syntax tree, and the comment says why: it
+only ever *adds* suggestions, so being wrong costs an irrelevant row in a list
+rather than a wrong answer or a missing one. The Rust splitter remains the only
+thing that decides where a statement really begins.
+
+Measured against the fixture, with nothing expanded:
+
+```
+SELECT * FROM ord                                  → orders, ORDER, ORDINALITY…
+SELECT * FROM orders WHERE us                      → user_id (orders), user_totals, users…
+SELECT * FROM `poc`.`orders` o JOIN users u … dis  → display_name (users)
+UPDATE orders SET tot                              → total (orders)
+SELECT * FROM orders; SELECT * FROM users WHERE em → email (users), and no `total`
+```
+
+### 12.4 Counts
+
+**738 UI tests on both engines, 382 Rust, 73 live MySQL.** The two new live
+tests prove the budget's edge: every table is named even when nothing is
+detailed. Both halves of the frontend change were falsified — disabling
+`columnsInScope` fails three tests, and dropping the database adoption fails
+eight.

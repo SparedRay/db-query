@@ -377,11 +377,23 @@ pub struct TabSession {
 
 impl TabSession {
     fn new(server: Arc<ServerConn>) -> Self {
+        // **A new tab starts on the profile's database, so it says so.**
+        //
+        // `options()` puts `profile.database` on every exec connection this tab
+        // will open, which means the session really is on that schema from its
+        // first statement. `None` here was not "we do not know" but a wrong
+        // answer about something already decided — and `tab_status` hands it
+        // to the frontend, which sets the tab's database from it after every
+        // run. So a tab that knew its schema before running anything forgot it
+        // the moment it ran something.
+        //
+        // `USE` overwrites this, as it always did.
+        let current_db = server.profile.database.clone().filter(|d| !d.is_empty());
         Self {
             server,
             exec: Mutex::new(None),
             conn_id: AtomicU64::new(0),
-            current_db: Mutex::new(None),
+            current_db: Mutex::new(current_db),
             running: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
         }

@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
-import { connect, installBackend, openDatabase, schemaBackend } from "./harness";
+import {
+  CONN_INFO, commandNames, connect, installBackend, openDatabase, schemaBackend,
+} from "./harness";
 
 /**
  * Anything slower than an eyeblink has to say so.
@@ -153,22 +155,44 @@ test("expanding a database spins until its contents arrive", async ({ page }) =>
 /**
  * Clicking a database is *two* round trips — USE, then the listing. The first
  * used to be invisible work the user was still waiting through.
+ *
+ * Clicks a database the tab is **not** already on, which is now the only case
+ * that issues a `USE` at all: a tab starts on the connection's own database
+ * (`currentDatabase`, which `connect` has always reported), so clicking that
+ * one is a listing and nothing else.
  */
 test("the database spinner covers the USE round trip too", async ({ page }) => {
   const g = gate();
   await connect(page, {
     ...schemaBackend,
+    connect: () => ({ ...CONN_INFO, databases: ["poc", "warehouse"] }),
     use_database: async () => {
       await g.p;
       return null;
     },
   });
 
-  await page.locator('.node.db:has-text("poc")').click();
+  await page.locator('.node.db:has-text("warehouse")').click();
   await expect(page.locator(".node.db.loading")).toHaveCount(1);
 
   g.open();
   await expect(page.locator(".node.db.loading")).toHaveCount(0);
+});
+
+/**
+ * And the database it is already on costs no round trip at all.
+ *
+ * A tab's exec connection is opened with `profile.database` on it — read from
+ * `session.rs`'s `options()` — so it is genuinely on that schema before
+ * anything is clicked. Issuing `USE poc` to reach the schema you are already
+ * in is a round trip with nothing on the other end of it.
+ */
+test("clicking the database you are already on issues no USE", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await page.locator('.node.db:has-text("poc")').click();
+  await page.locator('.node.group:has-text("Tables")').waitFor();
+
+  expect(await commandNames(page)).not.toContain("use_database");
 });
 
 test("expanding a table spins until its columns arrive", async ({ page }) => {

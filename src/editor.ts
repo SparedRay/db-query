@@ -12,6 +12,7 @@ import {
 } from "@codemirror/commands";
 import {
   autocompletion, acceptCompletion, completionKeymap, closeBrackets,
+  type Completion, type CompletionContext, type CompletionResult,
 } from "@codemirror/autocomplete";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import {
@@ -25,6 +26,82 @@ import {
 import { Compartment } from "@codemirror/state";
 
 const schemaCompartment = new Compartment();
+
+/**
+ * Table to column names, as last given to [`setSchema`].
+ *
+ * Kept flat and separately from `sqlConfig.schema` because
+ * [`columnsInScope`] reads it on every keystroke and wants a plain lookup, not
+ * a walk of CodeMirror's nested namespace shape.
+ */
+let tableColumns: Record<string, string[]> = {};
+
+/** Statement-ish boundary. Crude on purpose — see [`columnsInScope`]. */
+const STATEMENT_BREAK = ";";
+
+/**
+ * Tables named in the statement around the cursor, with any alias.
+ *
+ * A regex over text, not a walk of the syntax tree. The tree would be more
+ * correct and is not worth it here: this only ever *adds* suggestions, so
+ * being wrong costs an irrelevant option in a list, never a wrong answer or a
+ * missing one. The Rust splitter remains the only thing that decides where a
+ * statement really begins — this is a completion heuristic and says so.
+ */
+const TABLE_REF =
+  /\b(?:from|join|update|into)\s+([`"\w.$]+)(?:\s+(?:as\s+)?([a-z_]\w*))?/gi;
+
+/** `` `db`.`orders` `` and `db.orders` both name the table `orders`. */
+function bareName(raw: string): string {
+  const last = raw.split(".").pop() ?? raw;
+  return last.replace(/[`"]/g, "");
+}
+
+/**
+ * Complete column names of the tables this statement mentions.
+ *
+ * **What `@codemirror/lang-sql` does not do.** Read from its source
+ * (`node_modules/@codemirror/lang-sql/dist/index.js`, `completeFromSchema`, on
+ * 2026-09-17): it offers columns after `table.` or an alias, and bare columns
+ * only for a single configured `defaultTableName`. So `SELECT * FROM orders
+ * WHERE us` offered the *tables* `users` and `user_totals` and never `orders`
+ * own `user_id`, which is the position people actually type a column in.
+ *
+ * Scoped to the statement around the cursor, so a script that touches twenty
+ * tables does not offer every column in the database on every word.
+ */
+function columnsInScope(context: CompletionContext): CompletionResult | null {
+  const word = context.matchBefore(/[\w$]+/);
+  if (!word && !context.explicit) return null;
+  const from = word ? word.from : context.pos;
+
+  // After a dot, lang-sql already answers with exactly the right columns, and
+  // a second source would add every other table's as well.
+  if (from > 0 && context.state.sliceDoc(from - 1, from) === ".") return null;
+
+  const doc = context.state.doc.toString();
+  const start = doc.lastIndexOf(STATEMENT_BREAK, context.pos - 1) + 1;
+  const end = doc.indexOf(STATEMENT_BREAK, context.pos);
+  const statement = doc.slice(start, end === -1 ? doc.length : end);
+
+  const options: Completion[] = [];
+  const seen = new Set<string>();
+  TABLE_REF.lastIndex = 0;
+  for (let m = TABLE_REF.exec(statement); m; m = TABLE_REF.exec(statement)) {
+    const table = bareName(m[1]);
+    const columns = tableColumns[table];
+    if (!columns) continue;
+    for (const column of columns) {
+      // One entry per name. Two tables with an `id` each would otherwise
+      // produce two identical rows, and the list is read, not parsed.
+      if (seen.has(column)) continue;
+      seen.add(column);
+      options.push({ label: column, type: "property", detail: table });
+    }
+  }
+  if (!options.length) return null;
+  return { from, options, validFor: /^[\w$]*$/ };
+}
 
 /**
  * The SQL configuration currently in force, remembered because the two things
@@ -223,6 +300,11 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     closeBrackets(),
     highlightActiveLine(),
     autocompletion({ defaultKeymap: false }),
+    // An extra completion source beside the dialect's own, rather than an
+    // `override` that would replace it: keywords, tables and dotted columns
+    // all still come from `@codemirror/lang-sql`, and this adds only the bare
+    // column names it does not offer.
+    EditorState.languageData.of(() => [{ autocomplete: columnsInScope }]),
     syntaxHighlighting(appHighlightStyle, { fallback: true }),
 
     // The rest of what a text editor is expected to be. These were missing, and
@@ -304,6 +386,15 @@ export function refreshLint(view: EditorView) {
 /** Feed the schema cache into autocomplete as tables load in the sidebar. */
 export function setSchema(view: EditorView, schema: SQLNamespace, defaultTable?: string) {
   sqlConfig = { ...sqlConfig, schema, defaultTable };
+  // The same names in the shape `columnsInScope` needs. Tables whose columns
+  // have not been loaded are present with an empty list, and simply contribute
+  // nothing.
+  tableColumns = Object.fromEntries(
+    Object.entries(schema as Record<string, unknown>).map(([table, cols]) => [
+      table,
+      Array.isArray(cols) ? (cols as string[]).filter((c) => typeof c === "string") : [],
+    ]),
+  );
   applySqlConfig(view);
 }
 

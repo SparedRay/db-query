@@ -13,7 +13,7 @@
 //! connection: expanding the tree must not block behind a running query, and it
 //! must not contend with cancellation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
@@ -94,8 +94,8 @@ pub struct DbSchema {
     pub routines: Option<Vec<RoutineRef>>,
 }
 
-/// How many tables get their columns loaded when describing a database to the
-/// assistant.
+/// How many tables get their columns loaded when a database's shape is needed
+/// in bulk — by the assistant, and by autocomplete.
 ///
 /// A cap rather than "all of them" because columns are fetched per table: a
 /// 500-table warehouse would be 500 round trips before the first word of an
@@ -103,7 +103,13 @@ pub struct DbSchema {
 /// tokens — enough that the model stops guessing, small enough that the wait is
 /// not noticed. Table *names* are never capped; they cost one query for all of
 /// them, and knowing a table exists is most of the value.
-pub const ASSISTANT_TABLE_BUDGET: usize = 60;
+///
+/// **That last sentence is why autocomplete shares this.** A completion list
+/// that knows every table and the columns of the sixty most likely is a
+/// different tool from one that knows neither; the sixty-first table still
+/// completes by name, and opening it in the tree fills in its columns exactly
+/// as it always did.
+pub const TABLE_DETAIL_BUDGET: usize = 60;
 
 /// What [`warm_for_assistant`] managed to load.
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,7 +120,7 @@ pub struct Warmed {
     pub detailed: usize,
 }
 
-/// Load enough of a database's shape to describe it to the assistant.
+/// Load enough of a database's shape to describe it in bulk.
 ///
 /// # Why this is not "running queries automatically"
 ///
@@ -129,8 +135,8 @@ pub struct Warmed {
 /// mode that makes a SQL assistant worse than no assistant.
 ///
 /// Results land in the ordinary schema cache, so this is paid once per database
-/// per connection, and the tree gets the benefit too.
-pub async fn warm_for_assistant(
+/// per connection, and the tree and autocomplete get the benefit too.
+pub async fn warm(
     state: &AppState,
     connection_id: &str,
     db: &str,
@@ -155,6 +161,65 @@ pub async fn warm_for_assistant(
         }
     }
     Ok(warmed)
+}
+
+/// Every table in `db`, each with the column names already cached for it.
+///
+/// **For autocomplete, which had nothing to complete with.** The editor's
+/// schema was fed only by clicks in the tree: table names when a database was
+/// expanded, column names when a *table* was expanded. So a freshly connected
+/// editor offered nothing but the dialect\'s own keywords, and after some
+/// browsing it offered whichever subset had been opened — which is worse,
+/// because a completion list that is silently partial reads as a complete one.
+///
+/// This runs the same introspection the tree runs, through the same cache: no
+/// user SQL, nothing executed that anybody typed, nothing recorded as history.
+/// See [`warm`] for the longer form of that argument.
+///
+/// A table whose columns are not cached comes back with an **empty list rather
+/// than being left out**. Knowing the table exists is most of the value, and
+/// omitting it would make autocomplete deny the existence of a table the tree
+/// is showing.
+pub async fn names(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    warm(state, connection_id, db, TABLE_DETAIL_BUDGET).await?;
+    names_from_cache(state, connection_id, db).await
+}
+
+/// The same reading, without loading anything first.
+///
+/// Split out so the budget's effect is testable: warm with a budget of zero
+/// and every table should still be *named*, with an empty column list. That is
+/// the shape of a database with more tables than the budget allows, and the
+/// property worth pinning — the alternative, leaving those tables out, makes
+/// autocomplete deny the existence of tables the tree is showing.
+pub async fn names_from_cache(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let server = server(state, connection_id).await?;
+    let cache = server.schema_cache.lock().await;
+    let Some(schema) = cache.get(db) else {
+        return Ok(BTreeMap::new());
+    };
+
+    Ok(schema
+        .tables
+        .iter()
+        .flatten()
+        .map(|t| {
+            let cols = schema
+                .columns
+                .get(&t.name)
+                .map(|cols| cols.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            (t.name.clone(), cols)
+        })
+        .collect())
 }
 
 /// Drop any cached introspection for `db`, so the next expand refetches.
