@@ -722,3 +722,79 @@ and tested the same commit before a tag is cut, so that is the rare case.
   that fails" does not separate them.
 * **Anything in the repository.** The diff between the release that worked and
   the first that did not is `docs/`, `src/main.ts`, one test and the version.
+
+## 14. Autocomplete, second pass — 2026-09-17
+
+> *"Still failing, is not suggesting columns properly and priorizing MySQL
+> native methods"*
+
+§12 loaded the schema and every test passed. The tests were the problem: they
+asked questions the fixture answered well and nobody had asked what the popup
+does when SQL is typed the way SQL is typed. So this pass began by printing the
+list for eleven realistic inputs rather than by writing another test:
+
+```
+"SELECT e"                       → EACH, EDIT, EGO, ELSE, ELSEIF, ENABLE
+"SELECT * FROM Users WHERE em"   → REMOVE, SCHEMA, SYSTEM, SCHEMAS, TEMPORARY
+"SELECT * FROM users WHERE e"    → email (users), EACH, EDIT, EGO
+```
+
+Three separate bugs, and the first two produce exactly the reported symptom:
+no columns at all, so the list is nothing but keywords.
+
+### 14.1 SQL is typed in the wrong order for this
+
+`SELECT` comes before `FROM`. While writing a fresh query there is no table in
+scope, and §12's source required one — so it offered nothing in the position
+where columns are most often typed.
+
+With no table named, every column in the database is offered instead, once
+something has been typed or Ctrl+Space has been pressed. What stays excluded is
+the popup that opens *by itself* on an empty word, where nine hundred column
+names would be noise nobody asked for.
+
+### 14.2 `FROM Users` is `users`
+
+The lookup was case-sensitive. MySQL folds table names to lower case on Windows
+and macOS, and people capitalise however they like everywhere; this alone made
+the feature look broken for anyone who types `Users`. The map is keyed by
+lower-case name now and carries the server's own spelling for display.
+
+### 14.3 Ranking, in both directions
+
+`lang-sql` ranks its keywords at `boost: -1` — read from its source — and
+nothing ranked the schema above them, so a column and a keyword that matched
+equally well were sorted by name. Columns now carry `boost: 2` when the
+statement names their table and `1` when they are merely somewhere in the
+database, which puts them above tables (0) and keywords (-1).
+
+**And the other direction.** Right after `FROM`, `JOIN`, `INTO` or `UPDATE` the
+thing being typed is a *table*, so the source says nothing there — otherwise a
+boosted `user_id` would sit above `users` in `FROM us`. A suggestion ranked
+above the thing you are actually typing is worse than no suggestion.
+
+A column that exists in several tables appears **once**, and says `2 tables`
+rather than naming whichever came first: `id — big` is a confident answer to a
+question nobody asked.
+
+### 14.4 After
+
+```
+"SELECT e"                       → email (users), EACH, EDIT, EGO
+"SELECT * FROM Users WHERE em"   → email (users), REMOVE, SCHEMA, SYSTEM
+"SELECT * FROM users WHERE "     → display_name, email, id, then the tables
+"SELECT * FROM us"               → users, user_totals   (no user_id)
+"SELECT "                        → display_name, email, id (2 tables), total…
+```
+
+**748 UI tests on both engines.** Each of the five behaviours was reverted on
+its own and fails its own test: the schema-wide fallback, the case-insensitive
+lookup, the table-position guard, the boost, and the shared-column rollup.
+
+### 14.5 The lesson, which is about the tests
+
+§12's tests were green while the feature was unusable, because they only ever
+asked what the author already believed. Eleven lines of printed output found in
+one run what a dozen assertions had not. **When the complaint is "it feels
+wrong", print what it does before writing another test about what it should
+do.**
