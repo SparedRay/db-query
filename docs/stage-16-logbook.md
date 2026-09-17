@@ -672,9 +672,53 @@ alone. Checked against the real releases before committing: v0.4.6 passes,
 v0.4.7 reports `_amd64.deb _amd64.deb.sig`, and a synthetic sig-only release
 reports just `_amd64.deb`.
 
-### 13.2 What is still needed
+### 13.2 The log, and the two words in it
 
-The ~15 lines after `Uploading db-query_0.4.7_amd64.deb...` in the failed Linux
-job. Until then the shape of the fix is unknown: an HTTP 5xx means retry a
-transient, `already_exists` means the two matrix jobs are racing, and
-`Resource not accessible` means a permissions problem that will recur forever.
+It arrived. The whole of it:
+
+```
+2026-09-17T22:18:54.7859887Z Uploading db-query_0.4.8_amd64.deb...
+2026-09-17T22:19:01.1806755Z ##[error]Error uploading
+```
+
+Six and a half seconds, and **no status code, no body, no cause**. `index.ts`
+ends in `core.setFailed(error.message)`, so that string is the entire thrown
+error. It is not even tauri-action's own wording — it appears nowhere in its
+`src/`, so it comes from a dependency, and the bundle is too large to fetch
+here to find out which.
+
+So the diagnosis everybody wanted is not available, and this section will not
+invent one. What the source does say, read at commit `84b9d35` — the one `v0`
+has pointed at since 2026-03-14:
+
+```ts
+const retryAttempts = parseInt(core.getInput('retryAttempts') || '0', 10)
+...
+await retry(() => github.rest.repos.uploadReleaseAsset({ ... }), retryAttempts + 1)
+```
+
+**Unset means one attempt.** `retry` logs *"Attempt N failed, retrying..."* and
+no such line is in the log, which confirms it from the other end. So every
+release so far has uploaded its `.deb` exactly once, and two of them lost the
+coin toss.
+
+`retryAttempts: 3` now. It does not diagnose anything — nothing can, while the
+message is swallowed — but a transient upload stops costing a release, and if
+the failure is *not* transient the log will now say so three times over, which
+is more than it has ever said.
+
+The cost, stated because it is real: `retryAttempts` also re-tries the
+*build*, so a genuinely broken one compiles four times. CI has already built
+and tested the same commit before a tag is cut, so that is the rare case.
+
+### 13.3 What was ruled out, and how
+
+* **The action changing under us.** `tauri-action`'s `v0` tag was last written
+  2026-03-14. Not it.
+* **Size.** The `.deb` is 5.68 MB, within a few kilobytes of v0.4.5's and
+  v0.4.6's.
+* **Which job creates the release.** Linux finished first in all three runs,
+  the successful one included, so "the job that creates the release is the one
+  that fails" does not separate them.
+* **Anything in the repository.** The diff between the release that worked and
+  the first that did not is `docs/`, `src/main.ts`, one test and the version.

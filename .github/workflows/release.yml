@@ -193,6 +193,35 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # **The upload gets more than one go at it.**
+          #
+          # v0.4.7 and v0.4.8 both failed here, on Linux, 6 seconds into
+          # uploading the `.deb`, and the entire error was two words:
+          #
+          #     ##[error]Error uploading
+          #
+          # `index.ts` ends in `core.setFailed(error.message)`, so that string
+          # is the whole of what was thrown — no status code, no body, nothing
+          # to act on. And read from the action at the commit `v0` points to
+          # (84b9d35, unchanged since 2026-03-14):
+          #
+          #     const retryAttempts = parseInt(core.getInput('retryAttempts') || '0', 10)
+          #     ...
+          #     await retry(() => github.rest.repos.uploadReleaseAsset({...}), retryAttempts + 1)
+          #
+          # Unset means **one attempt**. The log confirms it: `retry` prints
+          # "Attempt N failed, retrying..." and no such line appears.
+          #
+          # This does not diagnose the failure — nothing here can, while the
+          # message is swallowed. It does two useful things: a transient upload
+          # stops costing a release, and if it is *not* transient the log now
+          # says so out loud, three times, which is more than it has ever said.
+          #
+          # The cost, stated because it is real: this also re-tries the
+          # *build*, so a genuinely broken one compiles four times. CI has
+          # already built and tested the same commit before a tag is cut, so a
+          # build that fails here is the rare case, not the ordinary one.
+          retryAttempts: 3
           # Writes latest.json — the manifest the updater reads — alongside the
           # installers, signed with TAURI_SIGNING_PRIVATE_KEY.
           includeUpdaterJson: true
