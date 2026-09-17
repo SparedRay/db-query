@@ -45,6 +45,33 @@ pub fn supported() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// What a completed check writes to the logbook.
+///
+/// **The lesson of 2026-09-17**: a release went out, the update never
+/// appeared, and nothing anywhere recorded why. The boot check is silent on
+/// purpose — it must not interrupt — but silent to the *user* and silent in
+/// the *log* are different promises, and only the first was intended.
+///
+/// The wording lives here rather than inline in the command for two reasons:
+/// most of it is behind `#[cfg(target_os = "windows")]`, which no machine but
+/// CI compiles; and the whole value of these lines is that the outcomes are
+/// *distinguishable*, which is a property of the words that nothing else was
+/// checking.
+pub fn checked(current: &str, offered: Option<&str>) -> String {
+    match offered {
+        Some(v) => format!("running {current}; the endpoint offers {v}"),
+        None => format!("running {current}; the endpoint has nothing newer"),
+    }
+}
+
+/// The same line for a build that was never going to update itself.
+///
+/// Separate from "nothing newer", because they call for opposite replies:
+/// one means wait, the other means go and download a `.deb`.
+pub fn cannot_update(current: &str) -> String {
+    format!("running {current}; this build does not self-update")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +88,30 @@ mod tests {
         // an explanation.
         assert!(UNSUPPORTED_REASON.contains(".deb"));
         assert!(UNSUPPORTED_REASON.contains("releases"));
+    }
+
+    /// The four outcomes have to be told apart in a log somebody is reading
+    /// because an update did not appear. Before this they were one absence.
+    #[test]
+    fn a_check_says_which_of_the_outcomes_it_was() {
+        let offers = checked("0.4.4", Some("0.4.5"));
+        let nothing = checked("0.4.5", None);
+        let never = cannot_update("0.4.5");
+
+        // Each names the version actually running, which is the first thing
+        // anybody asks and the thing screenshots never show.
+        assert!(offers.contains("0.4.4"), "{offers}");
+        assert!(nothing.contains("0.4.5"), "{nothing}");
+        assert!(never.contains("0.4.5"), "{never}");
+
+        // And the one that found something says what it found.
+        assert!(offers.contains("0.4.5"), "{offers}");
+
+        // Distinguishable from each other, not merely different in tone. A
+        // reader scanning for "why is there no update" must land on one.
+        assert_ne!(offers, nothing);
+        assert_ne!(nothing, never);
+        assert_ne!(offers, never);
     }
 
     #[test]

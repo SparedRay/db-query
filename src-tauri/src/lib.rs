@@ -1588,10 +1588,24 @@ fn third_party_licenses(app: tauri::AppHandle) -> Result<String, String> {
 /// Errors are *returned*, never thrown away: a check that fails silently is
 /// indistinguishable from a check that found nothing, and the difference
 /// matters when someone is waiting for a fix.
+///
+/// **And every outcome is written to the logbook**, which is the lesson of
+/// 2026-09-17: a release went out, the update did not appear, and nothing
+/// anywhere recorded why. The boot check is silent on purpose — it must not
+/// interrupt — but silent to the *user* and silent in the *log* are different
+/// promises, and only the first one was intended. The `api.ts` funnel records
+/// that the command ran and how long it took; this is the one command where
+/// the answer is the diagnostic, so the answer is what gets written.
+///
+/// Four distinguishable lines, because they need four different replies: this
+/// build cannot update at all; the endpoint has nothing newer; the endpoint is
+/// offering something; the check never completed. Before this they were one
+/// absence.
 #[tauri::command]
 async fn update_check(app: tauri::AppHandle) -> Result<update::UpdateStatus, String> {
     let current = app.package_info().version.to_string();
     if !update::supported() {
+        logbook::info("update", update::cannot_update(&current));
         return Ok(update::UpdateStatus::Unsupported {
             reason: update::UNSUPPORTED_REASON.into(),
         });
@@ -1599,15 +1613,33 @@ async fn update_check(app: tauri::AppHandle) -> Result<update::UpdateStatus, Str
     #[cfg(target_os = "windows")]
     {
         use tauri_plugin_updater::UpdaterExt;
-        let updater = app.updater().map_err(|e| e.to_string())?;
-        return match updater.check().await.map_err(|e| e.to_string())? {
-            Some(u) => Ok(update::UpdateStatus::Available {
-                current,
-                version: u.version.clone(),
-                notes: u.body.clone(),
-                date: u.date.map(|d| d.to_string()),
-            }),
-            None => Ok(update::UpdateStatus::UpToDate { current }),
+        let updater = app.updater().map_err(|e| {
+            logbook::error("update", format!("no updater in this build: {e}"));
+            e.to_string()
+        })?;
+        return match updater.check().await {
+            Ok(Some(u)) => {
+                logbook::info("update", update::checked(&current, Some(&u.version)));
+                Ok(update::UpdateStatus::Available {
+                    current,
+                    version: u.version.clone(),
+                    notes: u.body.clone(),
+                    date: u.date.map(|d| d.to_string()),
+                })
+            }
+            Ok(None) => {
+                logbook::info("update", update::checked(&current, None));
+                Ok(update::UpdateStatus::UpToDate { current })
+            }
+            // Offline is ordinary and the frontend stays quiet about it, which
+            // is right. A line here is what makes "quiet" recoverable: a
+            // proxy, a DNS failure or an unreachable endpoint all look
+            // identical from the outside, and identical to nothing being
+            // released.
+            Err(e) => {
+                logbook::warn("update", format!("the check did not complete: {e}"));
+                Err(e.to_string())
+            }
         };
     }
     #[cfg(not(target_os = "windows"))]

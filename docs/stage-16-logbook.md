@@ -251,3 +251,80 @@ pass found, this answers **one**. A log is for the half of the app that has no
 pixels.
 
 **654 UI tests on both engines, 367 Rust.**
+
+## 8. The first thing the log could not answer — 2026-09-17
+
+> *"we have something odd as I have deployed new version and make the release
+> tag yet the updater is not showing the update is available"*
+
+The release was fine. `v0.4.5` was published, not a draft, and the endpoint
+served the right document with every signature in place:
+
+```
+GET https://github.com/SparedRay/db-query/releases/latest/download/latest.json
+200 — {"version":"0.4.5", … 4 platform entries}
+GitHub API: tag v0.4.5, draft false, prerelease false, published 15:04:35Z
+```
+
+Published five minutes before it was reported missing. The boot check runs
+**once, at launch** (§5 of stage 5: nothing interrupts), so an app started
+before 15:04 would never have seen it, and Settings → Check for updates was the
+whole answer.
+
+### 8.1 But nothing anywhere said so
+
+That is the part worth fixing. Four different situations were producing the
+same observable — *no update button* — and none of them wrote a line anywhere:
+
+| what happened | what the user sees |
+|---|---|
+| this build cannot self-update at all (a `.deb`) | no button |
+| the endpoint has nothing newer | no button |
+| the check never completed (offline, proxy, DNS) | no button |
+| the check found something | a button |
+
+The frontend swallows a failed check on purpose — being offline is ordinary and
+is not news — and `api.ts`'s funnel recorded `update_check ok in 412ms`, which
+says the command ran and nothing about what it found.
+
+**Silent to the user and silent in the log are different promises, and only the
+first one was ever intended.** This is the logbook's own §2 rule applied to the
+one command where the *answer* is the diagnostic rather than the failure:
+
+```
+update  running 0.4.4; the endpoint offers 0.4.5
+update  running 0.4.5; the endpoint has nothing newer
+update  running 0.4.5; this build does not self-update
+update  the check did not complete: <Flyway-style verbatim error>
+```
+
+The wording lives in `update.rs` rather than inline in the command, for two
+reasons. Most of it sits behind `#[cfg(target_os = "windows")]`, which no
+machine here compiles — only CI does — so inline text would be unreachable to
+every local test. And the value of these lines is precisely that they are
+*distinguishable*; that is a property of the words, and nothing was checking
+it. `a_check_says_which_of_the_outcomes_it_was` now does, and it fails when two
+of them are made to read the same.
+
+### 8.2 The report now rules out the package first
+
+Diagnostics gained one line above the log:
+
+```
+updates    NOT this build — install the newer .deb by hand
+```
+
+A `.deb` never shows an update button, and from outside the machine that is
+indistinguishable from a release that never went out. It is a property of how
+the binary was packaged, knowable without a network call — so it is stated at
+the top of the report rather than inferred from an absence at the bottom. The
+test asserts the report cannot disagree with the build it came from.
+
+### 8.3 What this still does not cover
+
+The endpoint URL itself is not in the report. It is a build constant, CI has a
+packaging test pinning it, and adding it would mean threading the Tauri config
+through a module that deliberately has no handle on the app. If an endpoint
+ever turns out to be wrong in the field, that is the line to add.
+
+**708 UI tests on both engines, 382 Rust.**
