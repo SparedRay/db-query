@@ -29,6 +29,16 @@ export interface ConnectionEntry {
   capabilities: Capabilities | null;
   /** Populated on connect; drives the schema tree. */
   databases: string[];
+  /**
+   * The database this connection is on when a tab has not chosen one — the
+   * profile named it, or it is the server's default.
+   *
+   * `connect` has reported it since Stage 2 and nothing read it, so a tab
+   * started out claiming no database while its session was already on one.
+   * Autocomplete is what noticed: it had nothing to describe until somebody
+   * clicked a database in the tree.
+   */
+  currentDatabase: string | null;
 }
 
 export interface ConnectionHooks {
@@ -139,6 +149,7 @@ export class ConnectionManager {
           serverVersion: null,
           capabilities: null,
           databases: [],
+          currentDatabase: null,
         });
       }
       this.render();
@@ -185,6 +196,7 @@ export class ConnectionManager {
       entry.serverVersion = info.serverVersion;
       entry.capabilities = info.capabilities;
       entry.databases = info.databases;
+      entry.currentDatabase = info.currentDatabase ?? null;
       // Only now does it join the rail. A failed attempt must leave no trace —
       // otherwise every typo becomes a dead icon the user has to clean up.
       this.upsert(entry);
@@ -248,6 +260,7 @@ export class ConnectionManager {
     entry.serverVersion = null;
     entry.capabilities = null;
     entry.databases = [];
+    entry.currentDatabase = null;
     this.hooks.onDisconnected(entry);
 
     // An ad-hoc connection has nothing to go back to, so it leaves the rail.
@@ -416,6 +429,7 @@ export class ConnectionManager {
       serverVersion: null,
       capabilities: null,
       databases: [],
+      currentDatabase: null,
     });
   }
 

@@ -882,6 +882,15 @@ export const api = {
   // --- schema cache, per connection, served over that connection's meta link
   listTables: (connectionId: string, db: string) =>
     invoke<TableRef[]>("list_tables", { connectionId, db }),
+  /**
+   * Every table in `db` with its column names, in one call.
+   *
+   * What autocomplete is fed. `listColumns` is per table and is what the tree
+   * uses on expand; asking for a whole database that way is what left the
+   * editor knowing only the tables somebody had clicked open.
+   */
+  schemaNames: (connectionId: string, db: string) =>
+    invoke<Record<string, string[]>>("schema_names", { connectionId, db }),
   listColumns: (connectionId: string, db: string, table: string) =>
     invoke<ColumnInfo[]>("list_columns", { connectionId, db, table }),
   refreshSchema: (connectionId: string, db: string) =>

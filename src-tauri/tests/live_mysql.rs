@@ -2100,7 +2100,7 @@ async fn a_credential_statement_is_never_written_down() {
 async fn the_assistant_prompt_carries_columns_nobody_expanded() {
     let state = connected().await;
 
-    let warmed = schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+    let warmed = schema::warm(&state, C, "poc", schema::TABLE_DETAIL_BUDGET)
         .await
         .expect("warm failed");
     assert!(warmed.tables >= 4, "fixture should have tables: {warmed:?}");
@@ -2130,19 +2130,68 @@ async fn the_assistant_prompt_carries_columns_nobody_expanded() {
     );
 }
 
+/// **What autocomplete is fed**, and the two claims it makes.
+///
+/// Expands nothing first, because that is the state a user is in when they
+/// connect and start typing — which is exactly when the editor used to know
+/// nothing but the dialect's keywords.
+#[tokio::test]
+#[ignore]
+async fn completion_gets_the_whole_database_without_anything_being_expanded() {
+    let state = connected().await;
+
+    let names = schema::names(&state, C, "poc").await.expect("names failed");
+
+    // Every table, including the view: the tree shows it, so completing it is
+    // not optional.
+    assert!(names.contains_key("users"), "{names:?}");
+    assert!(names.contains_key("orders"), "{names:?}");
+    assert!(names.contains_key("user_totals"), "the view too: {names:?}");
+
+    // And columns, for a table nobody opened.
+    let users = &names["users"];
+    assert!(users.contains(&"email".to_string()), "{users:?}");
+
+    // Introspection, not execution — the same rule `warm` obeys.
+    let server = session::server(&state, C).await.unwrap();
+    assert!(server.introspection_count.load(Ordering::SeqCst) > 0);
+}
+
+/// A table whose columns could not be loaded is **present with an empty list**,
+/// never missing.
+///
+/// Omitting it would make autocomplete deny the existence of a table the schema
+/// tree is showing, which is a worse answer than offering it without columns.
+#[tokio::test]
+#[ignore]
+async fn a_table_beyond_the_budget_still_completes_by_name() {
+    let state = connected().await;
+
+    // A budget of zero details nothing, which is the shape of a database with
+    // more tables than the budget allows.
+    schema::warm(&state, C, "poc", 0).await.unwrap();
+    let names = schema::names_from_cache(&state, C, "poc").await.unwrap();
+
+    assert!(names.contains_key("users"), "named: {names:?}");
+    assert!(
+        names.values().all(|cols| cols.is_empty()),
+        "nothing should have been detailed: {names:?}"
+    );
+}
+
 /// Warming twice must not re-query: the cache is what makes the second question
 /// as fast as the first.
 #[tokio::test]
 #[ignore]
 async fn warming_a_second_time_costs_nothing() {
     let state = connected().await;
-    schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+    schema::warm(&state, C, "poc", schema::TABLE_DETAIL_BUDGET)
         .await
         .unwrap();
     let server = session::server(&state, C).await.unwrap();
     let after_first = server.introspection_count.load(Ordering::SeqCst);
 
-    schema::warm_for_assistant(&state, C, "poc", schema::ASSISTANT_TABLE_BUDGET)
+    schema::warm(&state, C, "poc", schema::TABLE_DETAIL_BUDGET)
         .await
         .unwrap();
     assert_eq!(

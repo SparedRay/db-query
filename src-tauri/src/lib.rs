@@ -468,10 +468,9 @@ async fn assistant_send(
                 // model was handed "columns not loaded" and invented the rest.
                 // A failure here is not fatal: an unreachable server should
                 // produce a thinner prompt, not a refused question.
-                let warmed =
-                    schema::warm_for_assistant(&state, id, ns, schema::ASSISTANT_TABLE_BUDGET)
-                        .await
-                        .unwrap_or_default();
+                let warmed = schema::warm(&state, id, ns, schema::TABLE_DETAIL_BUDGET)
+                    .await
+                    .unwrap_or_default();
 
                 let text = server
                     .schema_cache
@@ -641,6 +640,20 @@ async fn list_columns(
     table: String,
 ) -> Result<Vec<ColumnInfo>, String> {
     schema::list_columns(&state, &connection_id, &db, &table).await
+}
+
+/// Every table in `db` with its cached column names, for autocomplete.
+///
+/// One call rather than one per table: the editor needs the whole shape at
+/// once, and asking for it a table at a time is what left it knowing only what
+/// had been clicked open. See [`schema::names`].
+#[tauri::command]
+async fn schema_names(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    schema::names(&state, &connection_id, &db).await
 }
 
 #[tauri::command]
@@ -1779,6 +1792,7 @@ pub fn run() {
             lint_sql,
             list_tables,
             list_columns,
+            schema_names,
             refresh_schema,
             list_routines,
             routine_ddl,

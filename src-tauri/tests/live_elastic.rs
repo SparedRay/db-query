@@ -333,14 +333,10 @@ async fn the_assistant_prompt_is_warmed_for_a_cluster_too() {
         .await
         .expect("connect failed — is the fixture up?");
 
-    let warmed = db_query_lib::schema::warm_for_assistant(
-        &state,
-        C,
-        "",
-        db_query_lib::schema::ASSISTANT_TABLE_BUDGET,
-    )
-    .await
-    .expect("warm failed");
+    let warmed =
+        db_query_lib::schema::warm(&state, C, "", db_query_lib::schema::TABLE_DETAIL_BUDGET)
+            .await
+            .expect("warm failed");
     assert!(warmed.tables >= 1, "no indices found: {warmed:?}");
     assert_eq!(warmed.detailed, warmed.tables);
 

@@ -377,6 +377,16 @@ export const schemaBackend: Backend = {
   }),
   list_tables: () => SCHEMA.tables,
   list_columns: (a) => SCHEMA.columns[a.table as string] ?? [],
+  // What autocomplete asks for: a whole database in one call. Derived from the
+  // same fixture the tree is served from, so the two cannot disagree about
+  // what this database contains.
+  schema_names: () =>
+    Object.fromEntries(
+      SCHEMA.tables.map((t) => [
+        t.name,
+        (SCHEMA.columns[t.name] ?? []).map((c) => (c as { name: string }).name),
+      ]),
+    ),
   list_routines: () => SCHEMA.routines,
   refresh_schema: () => null,
   use_database: () => null,

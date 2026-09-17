@@ -254,7 +254,30 @@ let activeDb: string | null = null;
  */
 let browseLimit = 1000;
 /** Accumulated schema for CodeMirror autocomplete, grown as the tree loads. */
+/**
+ * What the editor completes against: table name to column names.
+ *
+ * **Loaded in bulk, not by clicking.** It used to be fed only from the tree
+ * — table names when a database was expanded, columns when a *table* was
+ * — so a freshly connected editor completed nothing but the dialect\'s own
+ * keywords, and after some browsing it completed whichever subset happened to
+ * have been opened. A partial list is worse than an empty one: it reads as
+ * complete, so a missing table looks like a table that does not exist.
+ *
+ * Tree expansion still merges into this, which is what fills in the tables
+ * beyond the backend\'s detail budget.
+ */
 const schemaMap: SQLNamespace = {};
+
+/**
+ * Which `connection\u0000database` `schemaMap` currently describes.
+ *
+ * It is one map for the whole app, and nothing used to clear it: connecting to
+ * staging after production left production\'s tables completing against a
+ * database that had never heard of them. This is both the cache key and the
+ * guard for a load that lands after the user has moved on.
+ */
+let schemaMapFor = "";
 
 // ---------------------------------------------------------------- utilities
 
@@ -638,6 +661,7 @@ els.form.addEventListener("submit", async (e) => {
       // Comes from the server on connect; a profile cannot claim capabilities.
       capabilities: null,
       databases: [],
+      currentDatabase: null,
     };
 
     // An empty password box on a profile that already remembers one means "use
@@ -914,10 +938,11 @@ function buildDbNode(connId: string, db: string): HTMLElement {
       try {
         await api.useDatabase(tab.id, db);
         tab.activeDb = db;
-        activeDb = db;
-        els.tree.querySelectorAll(".node.db-active").forEach((x) => x.classList.remove("db-active"));
-        n.classList.add("db-active");
-        activeDb = db;
+        // Through the one funnel rather than repainting here: this used to set
+        // `activeDb` and the classes itself, so anything else hung on changing
+        // database — autocomplete, now — would have been missed by the most
+        // common way of changing it.
+        markActiveDb(db);
         syncConnLabel();
       } catch (err) {
         results.setMessage(String(err));
@@ -1635,6 +1660,51 @@ function markActiveDb(db: string | null) {
   els.tree.querySelectorAll(".node.db").forEach((n) => {
     n.classList.toggle("db-active", db !== null && n.querySelector(".label")?.textContent === db);
   });
+  // The active database decides what an unqualified name means, so it is also
+  // what autocomplete has to describe. One funnel: tab activation, a `USE` in a
+  // script and a click in the tree all arrive here.
+  void loadCompletionSchema();
+}
+
+/**
+ * Load the active database\'s tables and columns for autocomplete.
+ *
+ * Runs the same introspection the tree runs, through the same cache on the
+ * same meta connection — no user SQL, nothing executed that anybody typed.
+ * Unawaited by every caller: completion getting better a moment after you
+ * connect is right, blocking the connection on it is not.
+ *
+ * **Cleared before it is refilled.** A stale map completes names that are not
+ * in this database, which is a confidently wrong answer rather than a missing
+ * one.
+ */
+async function loadCompletionSchema() {
+  const tab = tabs?.active();
+  const db = tab?.activeDb ?? null;
+  const key = tab && db ? `${tab.connectionId}\u0000${db}` : "";
+  if (key === schemaMapFor) return;
+
+  schemaMapFor = key;
+  for (const name of Object.keys(schemaMap)) {
+    delete (schemaMap as Record<string, string[]>)[name];
+  }
+  setSchema(view, schemaMap);
+  if (!key || !tab || !db) return;
+
+  try {
+    const names = await api.schemaNames(tab.connectionId, db);
+    // The user may have moved to another database while this was in flight,
+    // and a late answer must not overwrite the one that is current.
+    if (schemaMapFor !== key) return;
+    Object.assign(schemaMap, names);
+    setSchema(view, schemaMap);
+    // Linting is schema-aware, so diagnostics computed against the empty map
+    // are stale the moment this lands.
+    refreshLint(view);
+  } catch {
+    // Being unable to describe the schema must not break the editor. The tree
+    // still fills this in on expand, exactly as it did before.
+  }
 }
 
 /** Ctrl+Enter: the selection if there is one, else the statement under the cursor. */
@@ -1827,6 +1897,12 @@ conns = new ConnectionManager($("rail"), {
       }
     }
 
+    // Now that the tabs know their database, put the highlight and the
+    // completions on the one in front of the user. Reconnecting to a
+    // connection whose tabs already exist activates no tab, so this cannot be
+    // left to tab activation — the same reason the status line below is not.
+    markActiveDb(tabs.active()?.activeDb ?? null);
+
     // Named from the engine, not the word "MySQL", which is what this line
     // said on every connection including a cluster.
     //
@@ -1901,6 +1977,16 @@ tabs = new TabManager($("script-tabs"), view, {
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
     void api.openTab(tab.connectionId, tab.id);
+    // **The connection already knows which database it is on** — the profile
+    // named one, or the server has a default — and `connect` has reported it
+    // since Stage 2 with nothing reading it. A new tab\'s session starts on
+    // that database, so saying it has none was never true; it was just never
+    // contradicted until autocomplete needed a schema to describe and found
+    // nothing until somebody clicked a database in the tree.
+    //
+    // `??=`: a restored tab arrives here with the database it was left on, and
+    // that one wins.
+    tab.activeDb ??= conns?.get(tab.connectionId)?.currentDatabase ?? null;
     session.schedule();
   },
   onActivate: (tab) => {
@@ -1912,7 +1998,10 @@ tabs = new TabManager($("script-tabs"), view, {
     showResults(tab);
     syncBusy();
     refreshFileNote();
-    if (tab.activeDb) markActiveDb(tab.activeDb);
+    // Unconditional: a tab with no database of its own must clear the previous
+    // tab's highlight and its completions, not inherit them. Guarding on
+    // `tab.activeDb` left both belonging to whichever tab was open before.
+    markActiveDb(tab.activeDb ?? null);
     view.focus();
     session.schedule();
   },
