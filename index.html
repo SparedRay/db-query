@@ -68,15 +68,22 @@
         <section id="results-pane">
           <div id="tabs" class="tabs"></div>
           <div id="grid" class="grid-host" tabindex="0"></div>
+          <!-- Two rows. The note used to sit between the status chips and the
+               buttons, which left it a few characters wide: the chips wrapped
+               into a vertical stack to make room, and the sentence was
+               ellipsised after its first clause. A whole sentence needs a whole
+               row. -->
           <div class="result-bar">
-            <div id="status" class="status"></div>
-            <span id="result-note" class="result-note" hidden></span>
-            <div class="result-actions">
-              <button id="btn-copy" title="Copy the selection (Ctrl+C)">Copy</button>
-              <button id="btn-copy-head" title="Copy with the header row (Ctrl+Shift+C)">Copy with headers</button>
-              <button id="btn-export">Export…</button>
-              <button id="btn-close-results" title="Discard the results below">Close results</button>
+            <div class="result-bar-row">
+              <div id="status" class="status"></div>
+              <div class="result-actions">
+                <button id="btn-copy" title="Copy the selection (Ctrl+C)">Copy</button>
+                <button id="btn-copy-head" title="Copy with the header row (Ctrl+Shift+C)">Copy with headers</button>
+                <button id="btn-export">Export…</button>
+                <button id="btn-close-results" title="Discard the results below">Close results</button>
+              </div>
             </div>
+            <p id="result-note" class="result-note" hidden></p>
           </div>
         </section>
       </main>

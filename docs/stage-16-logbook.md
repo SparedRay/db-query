@@ -472,3 +472,52 @@ readable would fight the renderer's own line breaking.
 **718 UI tests on both engines.** Both new properties were falsified first:
 bypassing the renderer fails the rendering test, and building one paragraph
 with `innerHTML` fails the injection test.
+
+## 11. The export note had nowhere to go — 2026-09-17
+
+Also a [Stage 3](stage-3-explore-and-export.md) correction, recorded here.
+
+> *"the exported with how many lines shows broken on the bottom area. We should
+> render this on its own row"*
+
+Screenshotted before it was touched, which is what showed the size of it. The
+note shared the result bar with the status chips and four buttons, and lost:
+
+```
+[ 2   ]
+[ rows]   Exported 5000 row(s), 3.2 MB, to /home/…/widgets_2026_09_17.csv. Thes…   [Copy] [Copy with headers] [Export…] [Close results]
+[ 1  ]
+[ ms  ]
+```
+
+**Three failures from one cause.** The chips wrapped into a vertical stack to
+make room; the bar grew to three times its height; and the message was
+ellipsised after its first clause. The chips even wrapped *inside themselves* —
+"2" above "rows" — because nothing said a chip breaks between chips and never
+within one.
+
+The third is the one that matters. `describeExport` is not a receipt: after a
+truncated result it says *"the result had already been cut off — the query has
+more"*, and after a re-run it says *"this is every row"*. **Exactly the
+sentence that distinguishes a partial export from a whole one was the part
+being cut off**, which is the silent-wrong-answer failure the note was written
+to prevent. Stage 3's own rule, defeated by a flex row.
+
+So: its own row, wrapping rather than ellipsising, `white-space: nowrap` on
+`.chip`, and the `title` attribute dropped — it existed only because the text
+was unreadable, and a tooltip repeating what is on screen is noise.
+
+The test asserts all three sentences are present *and* that
+`scrollWidth/scrollHeight` do not exceed the client box — nothing is clipped —
+*and* that the status chips share one line. Restoring the old layout fails it,
+and so does putting `text-overflow: ellipsis` back on its own.
+
+**720 UI tests on both engines.**
+
+### 11.1 A note on where this is written down
+
+This tracker has now taken three corrections that have nothing to do with
+logbooks: an export button (§9), a changelog dialog (§10) and this. The rule
+says corrections go in the current stage's tracker, and stage 16 is it — but
+its scope closed at §7, and what is accumulating here is post-release polish
+rather than a coherent slice. A Stage 17 for it would be the honest shape.

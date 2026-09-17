@@ -257,6 +257,51 @@ test("a backend refusal is shown in the dialog, which stays open", async ({ page
   await expect(page.locator("#sql-table")).toHaveValue("keep_me");
 });
 
+/**
+ * **A sentence needs a row of its own.**
+ *
+ * The note used to sit between the status chips and the four buttons, which
+ * left it a few characters wide. Three things went wrong at once: the chips
+ * wrapped into a vertical stack to make room, the bar grew to three times its
+ * height, and the message was ellipsised after its first clause — so the
+ * warning that the export came from a *truncated* result was present on screen
+ * and impossible to read, which is the one part that must not be missed.
+ */
+test("a long export note is readable, and leaves the status row alone", async ({ page }) => {
+  await withRows(page, TWO_ROWS, {
+    export_csv: () => ({
+      ...OUTCOME,
+      rowsWritten: 5000,
+      truncatedSource: true,
+      path: "/home/someone/Documents/exports/widgets_2026_09_17.csv",
+      warnings: ["Two columns had the same name; the second was renamed."],
+    }),
+  });
+  await page.click("#btn-export");
+  await page.click("#export-ok");
+
+  const note = page.locator("#result-note");
+  await expect(note).toBeVisible();
+  // Every part of it, not only the first clause.
+  await expect(note).toContainText("widgets_2026_09_17.csv");
+  await expect(note).toContainText("already been cut off");
+  await expect(note).toContainText("the second was renamed");
+
+  // Nothing is clipped: it wraps rather than ellipsising. This is the
+  // assertion that fails if the note is ever put back in the button row.
+  const clipped = await note.evaluate(
+    (el) => el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight,
+  );
+  expect(clipped).toBe(false);
+
+  // And the status chips are still side by side on one line.
+  const tops = await page
+    .locator("#status .chip")
+    .evaluateAll((els) => els.map((el) => el.getBoundingClientRect().top));
+  expect(tops.length).toBeGreaterThan(1);
+  expect(new Set(tops).size).toBe(1);
+});
+
 test("warnings from the backend are surfaced, not swallowed", async ({ page }) => {
   await withRows(page, TWO_ROWS, {
     export_csv: () => ({

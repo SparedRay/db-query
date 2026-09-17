@@ -794,15 +794,23 @@ table.rs td.null { color: var(--null); font-style: italic; }
 table.rs tr:hover td { background: var(--bg-row-hover); }
 
 .result-bar {
-  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  flex: 0 0 auto; display: flex; flex-direction: column;
   border-top: 1px solid var(--border); background: var(--bg-raised);
 }
+.result-bar-row { display: flex; align-items: center; gap: 10px; }
 .result-bar .status { flex: 1; border-top: none; min-width: 0; }
-/* Feedback that must NOT cost the user their results — see `showNote`. */
+
+/* Feedback that must NOT cost the user their results — see `showNote`.
+   Its own row, because it is a sentence and sometimes three. Sharing the row
+   with the status chips and four buttons left it a few characters wide: the
+   chips wrapped into a vertical stack to make room, the bar grew to three
+   times its height, and the sentence was cut off after its first clause. It
+   wraps here instead of ellipsising, so a truncated-source warning is read
+   rather than merely present. */
 .result-note {
-  flex: 0 1 auto; min-width: 0; font-size: 11.5px; color: var(--fg-dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  padding: 2px 8px; border-radius: 4px; background: var(--chip-bg);
+  margin: 0; padding: 6px 10px 7px;
+  font-size: 11.5px; line-height: 1.5; color: var(--fg-dim);
+  border-top: 1px solid var(--border); background: var(--chip-bg);
 }
 .result-actions { display: flex; gap: 6px; padding: 0 10px; flex: 0 0 auto; }
 .result-actions button {
@@ -862,7 +870,10 @@ table.rs tr td.sel, table.rs tr:hover td.sel { background: var(--sel-cell-bg); }
 }
 #export-dialog .actions button[type="submit"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 #export-scope-note { margin: -6px 0 12px; }
-.chip { padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: var(--chip-bg); cursor: default; }
+/* `nowrap`: a chip is two or three words and must break between chips, never
+   inside one. Squeezed at a narrow window, "2 rows" was rendering as "2" above
+   "rows" in a box tall enough for both. */
+.chip { padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: var(--chip-bg); cursor: default; white-space: nowrap; }
 .chip.warn { border-color: var(--warn); color: var(--warn-fg); cursor: help; }
 .chip.err { border-color: var(--danger); color: var(--danger-fg); }
 
