@@ -248,3 +248,79 @@ test("an unreadable schema leaves completion working on keywords", async ({ page
   await offeringAgainst(page, "sel");
   expect((await offered(page)).join(" ")).toContain("SELECT");
 });
+
+// ------------------------------------------- what the second pass found
+
+/**
+ * **SQL is typed in the wrong order for this.** `SELECT` comes before `FROM`,
+ * so while writing a fresh query there is no table in scope at all — and the
+ * first version of this offered nothing there. `SELECT e` returned `EACH`,
+ * `EDIT`, `EGO`, `ELSE`, which is exactly the "only MySQL things" complaint.
+ *
+ * With no table named, every column in the database is offered instead, once
+ * something has been typed.
+ */
+test("columns are offered before the table has been named", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await offeringAgainst(page, "SELECT e");
+
+  expect((await offered(page))[0]).toContain("email");
+});
+
+/**
+ * **`FROM Users` found nothing when the server had said `users`.**
+ *
+ * MySQL folds table names to lower case on Windows and macOS, and people type
+ * them however they like everywhere. A case-sensitive lookup made the feature
+ * look broken for anyone who capitalises.
+ */
+test("a table typed in another case still resolves", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await offeringAgainst(page, "SELECT * FROM Users WHERE em");
+
+  expect((await offered(page))[0]).toContain("email");
+});
+
+/**
+ * Right after `FROM`, the thing being typed is a table. Offering columns there
+ * — boosted above the tables, as they are everywhere else — would put
+ * `user_id` ahead of `users` in `FROM us`.
+ */
+test("no columns are offered where a table name belongs", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await offeringAgainst(page, "SELECT * FROM us");
+
+  const list = await offered(page);
+  // Tables lead — which of the two matching ones comes first is lang-sql's
+  // own ordering and not this test's business.
+  expect(["users", "user_totals"]).toContain(list[0]);
+  // And the column is not there at all, boosted or otherwise.
+  expect(list.join(" ")).not.toContain("user_id");
+});
+
+/**
+ * A name in several tables appears once. Naming whichever table came first
+ * — "id — big" — would be a confident answer to a question nobody asked.
+ */
+test("a column shared by several tables is listed once, and says so", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await offeringAgainst(page, "SELECT i");
+
+  const ids = (await offered(page)).filter((l) => l.startsWith("id"));
+  expect(ids).toHaveLength(1);
+  // `id` is in both `users` and `orders`.
+  expect(ids[0]).toContain("2 tables");
+});
+
+/**
+ * And with a table in scope the columns lead, because `lang-sql` ranks its
+ * keywords at -1 and nothing ranked the schema above them.
+ */
+test("columns outrank keywords and tables once a table is in scope", async ({ page }) => {
+  await connect(page, schemaBackend);
+  await offeringAgainst(page, "SELECT * FROM users WHERE ");
+
+  const list = await offered(page);
+  expect(list.slice(0, 3).join(" ")).toContain("email");
+  expect(list.slice(0, 3).join(" ")).toContain("display_name");
+});

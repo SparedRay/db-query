@@ -33,8 +33,13 @@ const schemaCompartment = new Compartment();
  * Kept flat and separately from `sqlConfig.schema` because
  * [`columnsInScope`] reads it on every keystroke and wants a plain lookup, not
  * a walk of CodeMirror's nested namespace shape.
+ *
+ * **Keyed by lower-case name.** `FROM Users` found nothing when the server had
+ * said `users`, which is most of what "it does not suggest columns" turned out
+ * to mean: MySQL folds table names to lower case on Windows and macOS and
+ * people type them however they like everywhere.
  */
-let tableColumns: Record<string, string[]> = {};
+let tableColumns = new Map<string, { table: string; columns: string[] }>();
 
 /** Statement-ish boundary. Crude on purpose — see [`columnsInScope`]. */
 const STATEMENT_BREAK = ";";
@@ -58,17 +63,29 @@ function bareName(raw: string): string {
 }
 
 /**
- * Complete column names of the tables this statement mentions.
+ * Complete column names.
  *
  * **What `@codemirror/lang-sql` does not do.** Read from its source
  * (`node_modules/@codemirror/lang-sql/dist/index.js`, `completeFromSchema`, on
  * 2026-09-17): it offers columns after `table.` or an alias, and bare columns
- * only for a single configured `defaultTableName`. So `SELECT * FROM orders
- * WHERE us` offered the *tables* `users` and `user_totals` and never `orders`
- * own `user_id`, which is the position people actually type a column in.
+ * only for a single configured `defaultTableName`. So the positions people
+ * actually type a column in offered table names and keywords instead.
  *
- * Scoped to the statement around the cursor, so a script that touches twenty
- * tables does not offer every column in the database on every word.
+ * Two modes, and the second one is the fix for how SQL is actually typed:
+ *
+ *   * **The statement names tables** — offer their columns, always, even with
+ *     nothing typed yet. The list is short and every entry is certainly
+ *     relevant.
+ *   * **It names none** — offer every column in the database, but only once at
+ *     least one character has been typed. `SELECT` comes before `FROM`, so
+ *     while writing a fresh query there is no table in scope and the first
+ *     version of this offered nothing at all: `SELECT e` returned `EACH`,
+ *     `EDIT`, `EGO`, `ELSE`. Requiring a character keeps an explicit
+ *     Ctrl+Space on an empty word from dumping nine hundred names.
+ *
+ * A column that exists in several tables appears **once**, and says how many
+ * rather than naming whichever came first — "id — big" would be a confident
+ * answer to a question nobody asked.
  */
 function columnsInScope(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/[\w$]+/);
@@ -84,22 +101,45 @@ function columnsInScope(context: CompletionContext): CompletionResult | null {
   const end = doc.indexOf(STATEMENT_BREAK, context.pos);
   const statement = doc.slice(start, end === -1 ? doc.length : end);
 
-  const options: Completion[] = [];
-  const seen = new Set<string>();
+  // Right after FROM/JOIN/INTO/UPDATE the thing being typed is a *table*, so
+  // say nothing: a column boosted above the table it belongs to would put
+  // `order_id` ahead of `orders` in `FROM ord`.
+  if (/\b(?:from|join|into|update)$/i.test(doc.slice(start, from).trimEnd())) return null;
+
+  const named: { table: string; columns: string[] }[] = [];
   TABLE_REF.lastIndex = 0;
   for (let m = TABLE_REF.exec(statement); m; m = TABLE_REF.exec(statement)) {
-    const table = bareName(m[1]);
-    const columns = tableColumns[table];
-    if (!columns) continue;
+    const found = tableColumns.get(bareName(m[1]).toLowerCase());
+    if (found && !named.includes(found)) named.push(found);
+  }
+
+  // Something typed, or Ctrl+Space pressed. Both mean "show me what there is";
+  // what is excluded is the popup that opens by itself with an empty word,
+  // where nine hundred column names would be noise nobody asked for.
+  const asked = from < context.pos || context.explicit;
+  const sources = named.length ? named : asked ? [...tableColumns.values()] : [];
+  if (!sources.length) return null;
+
+  // Which tables each name belongs to, in the order the schema gave them.
+  const where = new Map<string, string[]>();
+  for (const { table, columns } of sources) {
     for (const column of columns) {
-      // One entry per name. Two tables with an `id` each would otherwise
-      // produce two identical rows, and the list is read, not parsed.
-      if (seen.has(column)) continue;
-      seen.add(column);
-      options.push({ label: column, type: "property", detail: table });
+      const tables = where.get(column);
+      if (!tables) where.set(column, [table]);
+      else if (!tables.includes(table)) tables.push(table);
     }
   }
-  if (!options.length) return null;
+  if (!where.size) return null;
+
+  const options: Completion[] = [...where].map(([column, tables]) => ({
+    label: column,
+    type: "property",
+    detail: tables.length === 1 ? tables[0] : `${tables.length} tables`,
+    // Above keywords, which `lang-sql` already ranks at -1, and above a column
+    // that merely exists somewhere in the database when this statement names
+    // the table it belongs to.
+    boost: named.length ? 2 : 1,
+  }));
   return { from, options, validFor: /^[\w$]*$/ };
 }
 
@@ -389,10 +429,15 @@ export function setSchema(view: EditorView, schema: SQLNamespace, defaultTable?:
   // The same names in the shape `columnsInScope` needs. Tables whose columns
   // have not been loaded are present with an empty list, and simply contribute
   // nothing.
-  tableColumns = Object.fromEntries(
+  tableColumns = new Map(
     Object.entries(schema as Record<string, unknown>).map(([table, cols]) => [
-      table,
-      Array.isArray(cols) ? (cols as string[]).filter((c) => typeof c === "string") : [],
+      table.toLowerCase(),
+      {
+        table,
+        columns: Array.isArray(cols)
+          ? (cols as string[]).filter((c) => typeof c === "string")
+          : [],
+      },
     ]),
   );
   applySqlConfig(view);
