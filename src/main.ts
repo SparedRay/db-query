@@ -1252,7 +1252,10 @@ function describeSelection(): string {
  */
 function showNote(text: string) {
   els.resultNote.textContent = text;
-  els.resultNote.title = text;
+  // No `title`. It was there because the note shared a row with the status
+  // chips and four buttons and was ellipsised after a few characters, so the
+  // tooltip was the only way to read it. It has its own row now and wraps, and
+  // a tooltip repeating text already on screen is noise.
   els.resultNote.hidden = !text;
 }
 
