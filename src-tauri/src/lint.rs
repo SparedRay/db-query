@@ -518,6 +518,19 @@ fn collect_tables(toks: &[Tok]) -> Vec<TableRef> {
     refs
 }
 
+/// **Present means the table exists; non-empty means we know its columns.**
+///
+/// Two different facts that used to be one. The schema handed to the linter
+/// listed only the tables whose *columns* had been fetched, so a table beyond
+/// the detail budget was reported as not existing — `Unknown table \`orders\``
+/// for a table sitting in the tree. Every table is listed now, with an empty
+/// column list when its columns have not been loaded, and the column checks ask
+/// this instead of `contains_key`: with no columns cached there is nothing to
+/// check a column against, and guessing would flag every one of them.
+fn columns_known(schema: &LintSchema, table: &str) -> bool {
+    schema.get(table).is_some_and(|cols| !cols.is_empty())
+}
+
 fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) {
     let tables = collect_tables(toks);
 
@@ -564,7 +577,7 @@ fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) 
         let Some(table) = scope.get(&left) else {
             continue;
         };
-        if !schema.contains_key(table) || has_column(table, &col_l) {
+        if !columns_known(schema, table) || has_column(table, &col_l) {
             continue;
         }
         diags.push(Diagnostic {
@@ -585,7 +598,7 @@ fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) 
         return;
     }
     let table = &tables[0].name;
-    if !schema.contains_key(table) {
+    if !columns_known(schema, table) {
         return;
     }
 
@@ -651,6 +664,72 @@ mod tests {
             vec!["id".into(), "user_id".into(), "total".into()],
         );
         m
+    }
+
+    /// A table the app knows exists and whose columns it has not loaded.
+    fn schema_with_an_unloaded_table() -> LintSchema {
+        let mut m = schema();
+        m.insert("shipments".into(), Vec::new());
+        m
+    }
+
+    /// **The false alarm this separation exists to stop.**
+    ///
+    /// `lint_schema` used to list only the tables whose columns had been
+    /// fetched, so a table past the detail budget was reported as not existing
+    /// while sitting in the schema tree. Presence now means "exists"; a
+    /// non-empty column list means "and we know its columns".
+    #[test]
+    fn a_table_whose_columns_are_not_loaded_still_exists() {
+        let out: Vec<String> = lint(
+            "SELECT tracking_code FROM shipments WHERE carrier = 1;",
+            &schema_with_an_unloaded_table(),
+            Dialect::mysql(),
+        )
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+
+        // Not "Unknown table `shipments`"...
+        assert!(!out.iter().any(|m| m.contains("Unknown table")), "{out:?}");
+        // ...and not a column complaint either: with nothing cached there is
+        // nothing to check against, and guessing would flag every name.
+        assert!(!out.iter().any(|m| m.contains("has no column")), "{out:?}");
+    }
+
+    /// The check still works where it can. A table we *have* loaded keeps
+    /// answering for its columns.
+    #[test]
+    fn a_loaded_table_still_catches_a_wrong_column() {
+        let out: Vec<String> = lint(
+            "SELECT emial FROM users;",
+            &schema_with_an_unloaded_table(),
+            Dialect::mysql(),
+        )
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+        assert!(
+            out.iter().any(|m| m.contains("no column `emial`")),
+            "{out:?}"
+        );
+    }
+
+    /// And a table that is in neither list is still unknown.
+    #[test]
+    fn a_table_nobody_has_heard_of_is_still_reported() {
+        let out: Vec<String> = lint(
+            "SELECT * FROM warehouses;",
+            &schema_with_an_unloaded_table(),
+            Dialect::mysql(),
+        )
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+        assert!(
+            out.iter().any(|m| m.contains("Unknown table `warehouses`")),
+            "{out:?}"
+        );
     }
 
     fn msgs(sql: &str) -> Vec<String> {

@@ -339,7 +339,7 @@ pub fn file() -> Option<PathBuf> {
 /// without running Flyway or starting an app. `probe` is the live half —
 /// passed in rather than called here, because this module must not know what
 /// Flyway is.
-pub fn report(probe: &str) -> String {
+pub fn report(probe: &str, schema: &str, tabs: &str) -> String {
     let mut out = format!(
         "db-query \u{2014} diagnostics\n\
          (paths only, no passwords \u{2014} redact if you like)\n\n\
@@ -364,7 +364,17 @@ pub fn report(probe: &str) -> String {
         None => "log        memory only \u{2014} nothing is being written\n\n".to_string(),
     });
 
-    out.push_str("=== Flyway ===\n");
+    // **Before Flyway and before the log**, because this is the section that
+    // answers the question that keeps being asked: the editor completes
+    // nothing, or the linter says a table does not exist, and neither the
+    // editor nor the tree can show why. Which database a tab is on, and how
+    // much of it has been introspected, is the whole answer and none of it is
+    // visible from the outside.
+    out.push_str("=== schema ===\n");
+    out.push_str(schema);
+    out.push_str(tabs);
+
+    out.push_str("\n=== Flyway ===\n");
     out.push_str(probe);
 
     let lines = tail(CAPACITY);
@@ -591,7 +601,11 @@ mod tests {
     /// only on the parts that are this test's own.
     #[test]
     fn the_report_names_the_build_the_platform_and_both_sections() {
-        let text = report("setting    \"flyway\"\nexit       0\n");
+        let text = report(
+            "setting    \"flyway\"\nexit       0\n",
+            "connection c1\n  poc: 12 tables named, 12 with columns cached (budget 60)\n",
+            "tab t1  db poc\n",
+        );
 
         assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
         assert!(text.contains(std::env::consts::OS), "{text}");
@@ -615,6 +629,19 @@ mod tests {
         // a release that never went out — the first thing to rule out, so it
         // is stated rather than inferred.
         assert!(text.contains("updates    "), "{text}");
+
+        // The section that answers "why does it not know my tables?" — which
+        // database a tab is on, and how much of it has been introspected.
+        // Neither is visible from the editor, and the question always arrives
+        // from somebody else's machine.
+        assert!(text.contains("=== schema ==="), "{text}");
+        assert!(text.contains("12 with columns cached"), "{text}");
+        assert!(text.contains("tab t1  db poc"), "{text}");
+        // Before the log, where somebody reading top-down finds it.
+        assert!(
+            text.find("=== schema ===") < text.find("=== log ("),
+            "{text}"
+        );
         assert_eq!(
             text.contains("NOT this build"),
             !crate::update::supported(),

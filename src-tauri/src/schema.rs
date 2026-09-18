@@ -222,6 +222,81 @@ pub async fn names_from_cache(
         .collect())
 }
 
+/// What the schema cache actually holds, for the diagnostics report.
+///
+/// **The question this answers is "why does it not know my tables?"** Every
+/// part of it has been wrong at least once: the tab on no database at all, the
+/// database cached under another name, the tables listed but their columns
+/// never fetched. None of that is visible from the editor, and the answer
+/// arrives second-hand from somebody else's machine — so it is written down
+/// rather than deduced.
+///
+/// Reads the cache and nothing else: opening the diagnostics dialog must not
+/// start introspecting a production server.
+pub async fn describe_cache(state: &AppState) -> String {
+    let mut out = String::new();
+    let connections = state.connections.lock().await.clone();
+    if connections.is_empty() {
+        out.push_str("(nothing connected)\n");
+        return out;
+    }
+
+    for (id, server) in &connections {
+        out.push_str(&format!(
+            "connection {id}\n  engine   {} {}\n  profile db {}\n",
+            server.capabilities.engine,
+            server.server_version,
+            server
+                .profile
+                .database
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .unwrap_or("(none set)"),
+        ));
+
+        let cache = server.schema_cache.lock().await;
+        if cache.is_empty() {
+            out.push_str("  cache    empty \u{2014} nothing has been introspected yet\n");
+            continue;
+        }
+        for (db, schema) in cache.iter() {
+            let named = schema.tables.as_ref().map(|t| t.len());
+            let detailed = schema.columns.len();
+            out.push_str(&format!(
+                "  {db}: {} tables named, {detailed} with columns cached (budget {TABLE_DETAIL_BUDGET})\n",
+                match named {
+                    Some(n) => n.to_string(),
+                    // Columns without a table list means something asked for
+                    // one table by name and never listed the database.
+                    None => "no".to_string(),
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// Which database each open tab is on, as its *session* has it.
+///
+/// The frontend has its own idea of this and the two have disagreed: the tab
+/// said `poc`, `current_db` said `None`, and the lint schema came back empty
+/// with nobody able to see why.
+pub async fn describe_tabs(state: &AppState) -> String {
+    let tabs = state.tabs.lock().await.clone();
+    if tabs.is_empty() {
+        return "(no tabs registered)\n".to_string();
+    }
+    let mut out = String::new();
+    for (id, tab) in &tabs {
+        let db = tab.current_db.lock().await.clone();
+        out.push_str(&format!(
+            "tab {id}  db {}\n",
+            db.as_deref().unwrap_or("(none)")
+        ));
+    }
+    out
+}
+
 /// Drop any cached introspection for `db`, so the next expand refetches.
 pub async fn refresh(state: &AppState, connection_id: &str, db: &str) -> Result<(), String> {
     let server = server(state, connection_id).await?;
@@ -543,25 +618,42 @@ pub(crate) async fn mysql_routine_ddl(
 ///
 /// Takes the server directly rather than a connection id, because `lint_sql`
 /// resolves it from the tab — which is the only source that cannot be wrong.
+/// What the linter is allowed to believe about this database.
+///
+/// **Every table, not only the detailed ones.** This used to be built from
+/// `columns` alone — the tables whose columns had been fetched — so a table
+/// beyond [`TABLE_DETAIL_BUDGET`], or one nobody had expanded, was reported as
+/// `Unknown table` while sitting in the schema tree three inches away. The
+/// check was harmless only for as long as nothing set a tab's database, which
+/// is what made it invisible until autocomplete started doing so.
+///
+/// A table with no columns cached is listed with an **empty** list. The linter
+/// reads presence as "this table exists" and non-emptiness as "and we know its
+/// columns", so an unloaded table is known to exist and its columns are not
+/// second-guessed.
 pub async fn lint_schema(server: &ServerConn, db: Option<&str>) -> crate::lint::LintSchema {
     let Some(db) = db else {
         return Default::default();
     };
     let cache = server.schema_cache.lock().await;
-    cache
-        .get(db)
-        .map(|s| {
-            s.columns
-                .iter()
-                .map(|(t, cols)| {
-                    (
-                        t.to_ascii_lowercase(),
-                        cols.iter().map(|c| c.name.to_ascii_lowercase()).collect(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(schema) = cache.get(db) else {
+        return Default::default();
+    };
+
+    let mut out: crate::lint::LintSchema = schema
+        .tables
+        .iter()
+        .flatten()
+        .map(|t| (t.name.to_ascii_lowercase(), Vec::new()))
+        .collect();
+
+    for (table, cols) in &schema.columns {
+        out.insert(
+            table.to_ascii_lowercase(),
+            cols.iter().map(|c| c.name.to_ascii_lowercase()).collect(),
+        );
+    }
+    out
 }
 
 // ------------------------------------------------------------ engine dispatch
