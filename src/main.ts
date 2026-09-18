@@ -25,6 +25,7 @@ import {
   type FlywayApplyFailed,
   type FlywayGroup,
   type FlywayProject,
+  type FlywayDisagreement,
   type FlywayMigration,
 } from "./api";
 import { copyText } from "./clipboard";
@@ -625,6 +626,20 @@ els.form.addEventListener("submit", async (e) => {
     kind,
     url,
     auth,
+    // The form has no Flyway fields, and building the profile from the form
+    // alone detached the project on every edit — including the edit somebody
+    // makes to fix the very field an apply was refused over.
+    flywayProject: editing?.profile.flywayProject ?? null,
+    flywayEnvironment: editing?.profile.flywayEnvironment ?? null,
+    // An accepted disagreement was accepted about *this* host, port and user.
+    // Change one and the question has to be asked again.
+    flywayAccepted:
+      editing &&
+      editing.profile.host === host &&
+      editing.profile.port === Number(fd.get("port") ?? 3306) &&
+      editing.profile.user === String(fd.get("user") ?? "").trim()
+        ? (editing.profile.flywayAccepted ?? [])
+        : [],
   };
   // Kept out of the profile on purpose — see ConnProfile's doc comment.
   const typed = String(fd.get("password") ?? "");
@@ -3260,7 +3275,12 @@ async function changeFlywayProject(project: FlywayProject | null) {
   if (what === "project") return void importFlywayProject();
   if (what === "environment") return void changeFlywayEnvironment(project);
   if (what === "detach") {
-    const profile = { ...active.profile, flywayProject: null, flywayEnvironment: null };
+    const profile = {
+      ...active.profile,
+      flywayProject: null,
+      flywayEnvironment: null,
+      flywayAccepted: [],
+    };
     const outcome = await api.saveProfile(profile, null);
     active.profile = { ...profile, ...outcome.profile };
     conns.upsert(active);
@@ -3294,9 +3314,15 @@ async function changeFlywayEnvironment(project: FlywayProject | null) {
       })),
     );
     if (!chosen || chosen === active.profile.flywayEnvironment) return;
-    if (!(await agreedOrOverridden(active.profile.id, path, chosen))) return;
+    const accepted = await agreedOrOverridden(active.profile.id, path, chosen);
+    if (!accepted) return;
 
-    const profile = { ...active.profile, flywayProject: path, flywayEnvironment: chosen };
+    const profile = {
+      ...active.profile,
+      flywayProject: path,
+      flywayEnvironment: chosen,
+      flywayAccepted: accepted,
+    };
     const outcome = await api.saveProfile(profile, null);
     active.profile = { ...profile, ...outcome.profile };
     conns.upsert(active);
@@ -3616,9 +3642,9 @@ async function agreedOrOverridden(
   connectionId: string,
   path: string,
   environment: string,
-): Promise<boolean> {
+): Promise<FlywayDisagreement[] | null> {
   const disagree = await api.flywayCheck(connectionId, path, environment);
-  if (!disagree.length) return true;
+  if (!disagree.length) return [];
 
   const fields = disagree.join(", ");
   const go = await choose(
@@ -3632,7 +3658,10 @@ async function agreedOrOverridden(
       { value: "go", label: "Attach anyway", danger: true },
     ],
   );
-  return go === "go";
+  // What was accepted is *saved*, and the apply guard reads it. It used to be
+  // forgotten on the spot, so the apply straight after "Attach anyway" refused
+  // with "re-attach it first" — which asked again and forgot again.
+  return go === "go" ? disagree : null;
 }
 
 /**
@@ -3665,9 +3694,15 @@ async function importFlywayProject() {
     );
     if (!chosen) return;
 
-    if (!(await agreedOrOverridden(active.profile.id, path, chosen))) return;
+    const accepted = await agreedOrOverridden(active.profile.id, path, chosen);
+    if (!accepted) return;
 
-    const profile = { ...active.profile, flywayProject: path, flywayEnvironment: chosen };
+    const profile = {
+      ...active.profile,
+      flywayProject: path,
+      flywayEnvironment: chosen,
+      flywayAccepted: accepted,
+    };
     const outcome = await api.saveProfile(profile, null);
     active.profile = { ...profile, ...outcome.profile };
     conns.upsert(active);

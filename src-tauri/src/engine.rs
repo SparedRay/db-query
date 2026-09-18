@@ -375,6 +375,7 @@ mod tests {
             read_only,
             flyway_project: None,
             flyway_environment: None,
+            flyway_accepted: Vec::new(),
         }
     }
 
