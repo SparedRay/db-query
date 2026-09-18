@@ -124,6 +124,12 @@ pub struct ConnProfile {
     /// environment *is* a database, so a connection answers this once.
     #[serde(default)]
     pub flyway_environment: Option<String>,
+    /// Disagreements between that environment and this connection that the
+    /// user accepted with "Attach anyway". Fields, not values: the apply guard
+    /// re-reads the file every time, and a field that was not accepted still
+    /// refuses. Cleared whenever the attachment changes.
+    #[serde(default)]
+    pub flyway_accepted: Vec<crate::flyway::Disagreement>,
 }
 
 /// Every key a serialised [`ConnProfile`] has, in sorted order.
@@ -141,11 +147,12 @@ pub struct ConnProfile {
 ///
 /// One list rather than two, because two would eventually disagree and the
 /// weaker one would be the one still passing.
-pub const PROFILE_KEYS: [&str; 15] = [
+pub const PROFILE_KEYS: [&str; 16] = [
     "allowInvalidCerts",
     "auth",
     "colour",
     "database",
+    "flywayAccepted",
     "flywayEnvironment",
     "flywayProject",
     "host",
@@ -891,6 +898,7 @@ mod tests {
             read_only: false,
             flyway_project: None,
             flyway_environment: None,
+            flyway_accepted: Vec::new(),
         }
     }
 

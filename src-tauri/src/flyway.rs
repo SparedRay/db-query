@@ -205,12 +205,20 @@ pub fn parse_jdbc(url: &str) -> Option<Target> {
 // ------------------------------------------------------------- the guard
 
 /// Which field of a connection an environment disagrees with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// **Not the database.** It used to be compared, and it refused the first real
+/// migration anybody tried: the project's URL ends in `/flyway` because that is
+/// the schema holding Flyway's history table, and the connection defaults to
+/// `maindatabase` because that is where its user works. In MySQL the database in
+/// a URL is only the session's default schema — the same server, the same
+/// account, the same reach. Host, port and user say *which server is about to be
+/// changed and by whom*; the default schema says neither, and a guard that can
+/// never pass on a correct setup teaches people to override it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Disagreement {
     Host,
     Port,
-    Database,
     User,
 }
 
@@ -219,7 +227,6 @@ impl Disagreement {
         match self {
             Disagreement::Host => "host",
             Disagreement::Port => "port",
-            Disagreement::Database => "database",
             Disagreement::User => "user",
         }
     }
@@ -279,7 +286,16 @@ pub fn write_refusal(
     // and changes with the branch — which is the actual workflow this was
     // built for — so the file that was checked is not necessarily the file
     // about to be used.
-    let disagreements = disagreements(env, profile);
+    //
+    // Minus what the user accepted when attaching. "Attach anyway" used to be
+    // forgotten the moment it was clicked, so the apply that followed refused
+    // with "re-attach it first" — and re-attaching asked the same question and
+    // forgot the answer again. What was accepted is remembered by *field*, so a
+    // file that later moves to another host is still refused.
+    let disagreements: Vec<Disagreement> = disagreements(env, profile)
+        .into_iter()
+        .filter(|d| !profile.flyway_accepted.contains(d))
+        .collect();
     if disagreements.is_empty() {
         return None;
     }
@@ -326,16 +342,6 @@ pub fn disagreements(
     }
     if target.port != profile.port {
         out.push(Disagreement::Port);
-    }
-    // A profile with no database is pointed at the server, not at one schema,
-    // so it cannot disagree with the environment about which schema that is.
-    if let (Some(theirs), Some(ours)) = (
-        target.database.as_deref(),
-        profile.database.as_deref().filter(|d| !d.is_empty()),
-    ) {
-        if !theirs.eq_ignore_ascii_case(ours) {
-            out.push(Disagreement::Database);
-        }
     }
     if let Some(theirs) = env.user.as_deref().filter(|u| !u.is_empty()) {
         if !theirs.eq_ignore_ascii_case(&profile.user) {
@@ -434,6 +440,7 @@ ignoreNewlinesInTextObjects = "off"
             read_only: false,
             flyway_project: None,
             flyway_environment: None,
+            flyway_accepted: Vec::new(),
         }
     }
 
@@ -563,14 +570,44 @@ ignoreNewlinesInTextObjects = "off"
         let d = disagreements(env, &conn);
         assert_eq!(
             d,
-            vec![
-                Disagreement::Host,
-                Disagreement::Port,
-                Disagreement::Database,
-                Disagreement::User
-            ],
+            vec![Disagreement::Host, Disagreement::Port, Disagreement::User],
             "the refusal has to say which field disagreed"
         );
+    }
+
+    /// **The first real migration.** The project's URL names Flyway's history
+    /// schema; the connection names the schema its user works in. Same server,
+    /// same account — and this used to refuse, every time, with no way through.
+    #[test]
+    fn a_different_default_schema_is_not_a_different_target() {
+        let p = parse(REAL).unwrap();
+        let env = p.environment("qa").unwrap();
+        let conn = profile(
+            "qa.example.com",
+            3306,
+            Some("maindatabase"),
+            "cftconn_qa_app",
+        );
+        assert_eq!(disagreements(env, &conn), vec![]);
+        assert_eq!(write_refusal(&p, &conn, "qa", Write::Apply), None);
+    }
+
+    /// "Attach anyway" is remembered by the apply it was clicked for — and only
+    /// for the fields it was clicked about.
+    #[test]
+    fn an_accepted_disagreement_is_not_refused_but_a_new_one_is() {
+        let p = parse(REAL).unwrap();
+        let mut conn = profile("dev.example.com", 3306, None, "a_personal_account");
+        assert!(write_refusal(&p, &conn, "development", Write::Apply).is_some());
+
+        conn.flyway_accepted = vec![Disagreement::User];
+        assert_eq!(write_refusal(&p, &conn, "development", Write::Apply), None);
+        assert_eq!(write_refusal(&p, &conn, "development", Write::Repair), None);
+
+        // The file moves to another server: that was never accepted.
+        conn.host = "elsewhere.example.com".into();
+        let reason = write_refusal(&p, &conn, "development", Write::Apply).expect("refused");
+        assert!(reason.contains("host differs"), "{reason}");
     }
 
     /// A connection pointed at the server rather than at one schema cannot

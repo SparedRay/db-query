@@ -184,6 +184,73 @@ test("a disagreeing environment is refused until it is deliberately overridden",
   await expect.poll(() => attachments(page)).toEqual([{ project: "/p/flyway.toml", env: "uat" }]);
 });
 
+/** Every `save_profile`'s profile, in order. */
+async function savedProfiles(page: Page) {
+  return (await calls(page))
+    .filter((c) => c.cmd === "save_profile")
+    .map((c) => c.args.profile as Record<string, unknown>);
+}
+
+/**
+ * **"Attach anyway" is remembered.** It used to be forgotten on the spot, so
+ * the first real apply refused with "re-attach it first", and re-attaching
+ * asked the same question and forgot the answer again. The apply guard reads
+ * what is saved here.
+ */
+test("an overridden disagreement is saved with the attachment", async ({ page }) => {
+  await connect(page, attached({ flyway_check: () => ["user"] }));
+  await openPane(page);
+  await page.click(".mig-empty button");
+  await page.locator('dialog.ask button:has-text("UAT database")').click();
+  await page.locator('dialog.ask button:has-text("Attach anyway")').click();
+  await page.locator(".mig").first().waitFor();
+
+  const saved = await savedProfiles(page);
+  expect(saved[saved.length - 1].flywayAccepted).toEqual(["user"]);
+
+  // Detaching forgets it, so the next project is asked afresh.
+  await page.click(".mig-proj-top button");
+  await page.locator('dialog.ask button:has-text("Detach")').click();
+  await expect(page.locator(".mig-empty")).toBeVisible();
+  const after = await savedProfiles(page);
+  expect(after[after.length - 1].flywayAccepted).toEqual([]);
+});
+
+/**
+ * The connection form has no Flyway fields, and building the profile from the
+ * form alone detached the project on every edit.
+ */
+test("editing a connection keeps its project, and re-asks only if the account changed", async ({ page }) => {
+  await connect(page, attached({ flyway_check: () => ["user"] }));
+  await openPane(page);
+  await page.click(".mig-empty button");
+  await page.locator('dialog.ask button:has-text("UAT database")').click();
+  await page.locator('dialog.ask button:has-text("Attach anyway")').click();
+  await page.locator(".mig").first().waitFor();
+
+  const edit = async (fill?: () => Promise<void>) => {
+    await page.locator(".rail-item").first().click({ button: "right" });
+    await page.locator('.ctx-menu button:has-text("Edit")').click();
+    await page.locator("#conn-dialog").waitFor({ state: "visible" });
+    await fill?.();
+    await page.click("#conn-ok");
+    await page.locator("#conn-dialog").waitFor({ state: "hidden" });
+    const saved = await savedProfiles(page);
+    return saved[saved.length - 1];
+  };
+
+  // A rename touches nothing Flyway cares about.
+  const renamed = await edit(() => page.fill("#conn-dialog input[name=name]", "renamed"));
+  expect(renamed.flywayProject).toBe("/p/flyway.toml");
+  expect(renamed.flywayEnvironment).toBe("uat");
+  expect(renamed.flywayAccepted).toEqual(["user"]);
+
+  // A different account was never what was accepted.
+  const other = await edit(() => page.fill("#conn-dialog input[name=user]", "somebody_else"));
+  expect(other.flywayProject).toBe("/p/flyway.toml");
+  expect(other.flywayAccepted).toEqual([]);
+});
+
 /** Once attached, the pane lists what Flyway reported. */
 test("the list shows Flyway's own states, and which environment it is", async ({ page }) => {
   await connect(page, attached());

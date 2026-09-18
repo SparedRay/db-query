@@ -66,6 +66,26 @@ export function note(level: NoteLevel, area: string, message: string, now = fals
  */
 const ROUTINE = new Set(["save_session", "tab_status", "list_connections"]);
 
+/**
+ * An error as a person would want it in the log.
+ *
+ * Most commands reject with a string, but some reject with a structure — a
+ * refused Flyway apply is `{ message, suggestsRepair }` — and `String()` of an
+ * object is `[object Object]`, which is what the diagnostics report showed on
+ * the one failure somebody needed to read.
+ */
+function describeError(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && typeof (err as { message?: unknown }).message === "string") {
+    return (err as { message: string }).message;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const started = performance.now();
   try {
@@ -75,7 +95,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
     return out;
   } catch (err) {
     const ms = Math.round(performance.now() - started);
-    note("error", "ui", `${cmd} failed after ${ms}ms: ${String(err)}`);
+    note("error", "ui", `${cmd} failed after ${ms}ms: ${describeError(err)}`);
     throw err;
   }
 }
@@ -136,6 +156,9 @@ export interface ConnProfile {
   flywayProject?: string | null;
   /** Which environment in that project this connection is. */
   flywayEnvironment?: string | null;
+  /** Disagreements with that environment the user accepted with "Attach
+   *  anyway". The apply guard honours these and still refuses any other. */
+  flywayAccepted?: FlywayDisagreement[];
   /** Refuse statements that change data or schema on this connection.
    *
    *  A guard rail, not a boundary: whoever can open the connection can clear
@@ -350,7 +373,7 @@ export interface FlywayProject {
   outOfOrder: boolean;
 }
 
-export type FlywayDisagreement = "host" | "port" | "database" | "user";
+export type FlywayDisagreement = "host" | "port" | "user";
 
 /** One migration, in Flyway's own words. `state` is kept as Flyway sends it —
  *  an unknown state should reach the user as itself, not as "other". */

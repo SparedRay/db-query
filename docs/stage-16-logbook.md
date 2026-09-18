@@ -934,3 +934,70 @@ longer decides it.
 
 **365 Rust unit, 76 live MySQL.** No frontend change, so the UI suite was not
 re-run.
+
+## 17. The first real migration was refused by our own guard — 2026-09-18
+
+> *"\"qa\" no longer matches this connection: database differs … Even when
+> connections are the same seems like flyway is rejecting it. Couldn't we just
+> make that the config we imported is applied to the active connection?"*
+
+Flyway never ran. The log says so — `apply refused before it started`, 3 ms in —
+and the refusal was `write_refusal`, ours. Three bugs, found in the order they
+were stood on.
+
+### 17.1 The database is not the target
+
+The real project's URLs end in `/flyway`, with `defaultSchema = "flyway"`: it is
+the schema holding Flyway's history table. The connection defaults to
+`maindatabase`, where its user works. Host, port and user all agreed.
+
+In MySQL the database in a URL is only the session's default schema — same
+server, same account, same reach. It does not say which server is about to be
+changed or by whom, which is the whole question the guard asks. A check that
+can never pass on a correct setup is worse than none: it teaches people to
+override. `Disagreement::Database` is gone; host, port and user remain.
+
+### 17.2 "Attach anyway" was forgotten on the spot
+
+Import offered a deliberate override, then apply re-checked from scratch, found
+the same disagreement and said *"re-attach it first"* — and re-attaching asked
+the same question and forgot the answer again. There was no way through.
+
+What is accepted is now saved on the profile as `flywayAccepted`, **by field**:
+`write_refusal` ignores the accepted fields and still refuses any other, so a
+project file that later moves to another host is refused as before. Detaching
+clears it. `PROFILE_KEYS` gained the key — a list of field names, no secret.
+
+### 17.3 Editing a connection detached its project
+
+Found while checking 17.2: the connection form built the profile from the
+form's fields, and the form has no Flyway fields. Every edit — including one
+made to fix the field an apply was refused over — silently detached the
+project. The form now carries the attachment through, and keeps the accepted
+fields only while host, port and user are unchanged: a different account was
+never what was accepted.
+
+### 17.4 `[object Object]`
+
+The failure line in the diagnostics log read `flyway_migrate failed after 3ms:
+[object Object]` — `String()` of the structured apply error, on the one failure
+somebody needed to read. `api.ts` now logs an error's `message`.
+
+### 17.5 What was asked for, and why it is not what was built
+
+The suggestion was to run Flyway against *this connection*, ignoring the file's.
+Not done, for three reasons:
+
+* Flyway would need this connection's **password**, from the keychain, handed to
+  a child process — on its command line (visible to every process on the
+  machine) or in its environment.
+* The file's URL carries JDBC options the project relies on
+  (`allowPublicKeyRetrieval`, `permitMysqlScheme`); ours would not.
+* The file's URL also picks the default schema, `flyway`. Swapping in ours would
+  change where unqualified objects land.
+
+In this case the two were the same server and account all along. The guard was
+wrong, and fixing the guard is enough.
+
+**367 Rust unit, 76 live MySQL, 752 UI on both engines.** Both new UI tests fail
+with their fix reverted.

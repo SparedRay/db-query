@@ -1001,6 +1001,7 @@ mod tests {
             read_only: true,
             flyway_project: None,
             flyway_environment: None,
+            flyway_accepted: Vec::new(),
         };
         let caps = crate::engine::Capabilities::mysql().for_profile(&profile);
         let p = system_prompt("8.4.0", None, Some(&caps));
