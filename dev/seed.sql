@@ -178,3 +178,33 @@ INSERT INTO awkward_types VALUES (
   1, 'héllo wörld', 'héllo latin1', 'héllo bincoll', 'ábc', 'latin1 text é',
   'alpha', 'x,y', '{"k": "v"}', b'10101010', 0x00FF10, 0xDEADBEEF
 );
+
+-- More tables than `TABLE_DETAIL_BUDGET` (60), so a database past the budget
+-- is reproducible here rather than only on somebody's production server.
+-- Columns used to be fetched one table at a time, sixty at most, and a real
+-- 385-table database had its other 325 tables completed and linted as if they
+-- had no columns. `every_table_is_described_however_many_there_are` asserts on
+-- the last of these alphabetically, which is the one a budget never reaches.
+--
+-- A procedure because the mysql client has no loop, and dropped afterwards so
+-- it never shows in the tree. Zero-padded so alphabetical is numeric.
+CREATE DATABASE IF NOT EXISTS poc_wide CHARACTER SET utf8mb4;
+USE poc_wide;
+DELIMITER $$
+DROP PROCEDURE IF EXISTS make_wide $$
+CREATE PROCEDURE make_wide()
+BEGIN
+  DECLARE i INT DEFAULT 1;
+  WHILE i <= 75 DO
+    SET @t = CONCAT('wide_', LPAD(i, 3, '0'));
+    SET @s = CONCAT('CREATE TABLE IF NOT EXISTS ', @t,
+      ' (id INT PRIMARY KEY, ', @t, '_name VARCHAR(40), created_at DATETIME)');
+    PREPARE stmt FROM @s;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
+    SET i = i + 1;
+  END WHILE;
+END $$
+DELIMITER ;
+CALL make_wide();
+DROP PROCEDURE make_wide;

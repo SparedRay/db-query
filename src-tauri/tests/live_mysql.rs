@@ -2111,7 +2111,11 @@ async fn the_assistant_prompt_carries_columns_nobody_expanded() {
 
     let server = session::server(&state, C).await.unwrap();
     let cache = server.schema_cache.lock().await;
-    let rendered = db_query_lib::assistant::render_schema("poc", cache.get("poc").unwrap());
+    let rendered = db_query_lib::assistant::render_schema(
+        "poc",
+        cache.get("poc").unwrap(),
+        schema::TABLE_DETAIL_BUDGET,
+    );
 
     assert!(
         !rendered.contains("columns not loaded"),
@@ -2167,9 +2171,9 @@ async fn completion_gets_the_whole_database_without_anything_being_expanded() {
 async fn a_table_beyond_the_budget_still_completes_by_name() {
     let state = connected().await;
 
-    // A budget of zero details nothing, which is the shape of a database with
-    // more tables than the budget allows.
-    schema::warm(&state, C, "poc", 0).await.unwrap();
+    // Tables listed, no columns fetched: the shape of a database whose columns
+    // could not all be described.
+    schema::list_tables(&state, C, "poc").await.unwrap();
     let names = schema::names_from_cache(&state, C, "poc").await.unwrap();
 
     assert!(names.contains_key("users"), "named: {names:?}");
@@ -2191,7 +2195,7 @@ async fn a_table_without_cached_columns_is_not_reported_as_missing() {
     use db_query_lib::lint;
 
     let state = connected().await;
-    schema::warm(&state, C, "poc", 0).await.unwrap();
+    schema::list_tables(&state, C, "poc").await.unwrap();
     let server = session::server(&state, C).await.unwrap();
 
     let lint_schema = schema::lint_schema(&server, Some("poc")).await;
@@ -2201,7 +2205,7 @@ async fn a_table_without_cached_columns_is_not_reported_as_missing() {
     );
     assert!(
         lint_schema["users"].is_empty(),
-        "and none is detailed at this budget: {lint_schema:?}"
+        "and none is detailed yet: {lint_schema:?}"
     );
 
     let out = lint::lint(
@@ -2230,6 +2234,89 @@ async fn a_table_without_cached_columns_is_not_reported_as_missing() {
         "{:?}",
         out.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
+}
+
+/// **The 385-table database.** Every column of every table, in one query.
+///
+/// Columns used to be fetched a table at a time under a budget of sixty, so a
+/// real database had 60 of 385 tables described — in twenty seconds, on a
+/// server 330 ms away — and autocomplete knew nothing about the tables the user
+/// was actually typing. The fixture creates more tables than that budget and
+/// asserts on the *last* one alphabetically, which is exactly the one a budget
+/// never reached.
+#[tokio::test]
+#[ignore]
+async fn every_table_is_described_however_many_there_are() {
+    let state = connected().await;
+    let tables = schema::list_tables(&state, C, "poc_wide").await.unwrap();
+    assert!(
+        tables.len() > schema::TABLE_DETAIL_BUDGET,
+        "the fixture must outnumber the budget to prove anything: {}",
+        tables.len()
+    );
+
+    let server = session::server(&state, C).await.unwrap();
+    let before = server.introspection_count.load(Ordering::SeqCst);
+    let warmed = schema::warm(&state, C, "poc_wide", schema::TABLE_DETAIL_BUDGET)
+        .await
+        .unwrap();
+    assert_eq!(warmed.detailed, warmed.tables, "{warmed:?}");
+    assert_eq!(
+        server.introspection_count.load(Ordering::SeqCst) - before,
+        1,
+        "one bulk query, not one per table"
+    );
+
+    let names = schema::names_from_cache(&state, C, "poc_wide")
+        .await
+        .unwrap();
+    let last = tables.last().unwrap();
+    assert!(
+        !names[&last.name].is_empty(),
+        "the last table has no columns: {:?}",
+        names[&last.name]
+    );
+
+    // And the linter believes in its columns, not only its name.
+    let lint_schema = schema::lint_schema(&server, Some("poc_wide")).await;
+    let out = db_query_lib::lint::lint(
+        &format!("SELECT no_such_column FROM {};", last.name),
+        &lint_schema,
+        db_query_lib::lint::Dialect::mysql(),
+    );
+    assert!(
+        out.iter().any(|d| d.message.contains("no_such_column")),
+        "{:?}",
+        out.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// A read cut short by the cap loses whole tables, never half of one, and says
+/// it was cut short.
+#[tokio::test]
+#[ignore]
+async fn a_capped_bulk_read_never_keeps_half_a_table() {
+    let state = connected().await;
+    let server = session::server(&state, C).await.unwrap();
+
+    let whole = schema::mysql_all_columns(&server, "poc", 100_000)
+        .await
+        .unwrap();
+    assert!(whole.complete);
+
+    let total: usize = whole.columns.values().map(Vec::len).sum();
+    let capped = schema::mysql_all_columns(&server, "poc", total - 1)
+        .await
+        .unwrap();
+    assert!(!capped.complete, "a read one row short must say so");
+    for (table, cols) in &capped.columns {
+        assert_eq!(
+            cols.len(),
+            whole.columns[table].len(),
+            "`{table}` came back partial"
+        );
+    }
+    assert!(capped.columns.len() < whole.columns.len());
 }
 
 /// Warming twice must not re-query: the cache is what makes the second question

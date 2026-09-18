@@ -477,11 +477,11 @@ async fn assistant_send(
                     .lock()
                     .await
                     .get(ns)
-                    .map(|s| assistant::render_schema(ns, s))
+                    .map(|s| assistant::render_schema(ns, s, schema::TABLE_DETAIL_BUDGET))
                     .map(|rendered| {
-                        // Say so when the budget bit. Silently truncating is
-                        // how a model ends up confidently sure a table has no
-                        // columns.
+                        // Say so when the warm-up could not describe every
+                        // table. Silently truncating is how a model ends up
+                        // confidently sure a table has no columns.
                         if warmed.tables > warmed.detailed {
                             format!(
                                 "{rendered}\n(Columns were loaded for {} of {} tables; ask the \

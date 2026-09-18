@@ -94,24 +94,43 @@ pub struct DbSchema {
     pub routines: Option<Vec<RoutineRef>>,
 }
 
-/// How many tables get their columns loaded when a database's shape is needed
-/// in bulk — by the assistant, and by autocomplete.
+/// How many tables get their columns loaded one at a time, for an engine that
+/// cannot describe a whole database in one query.
 ///
-/// A cap rather than "all of them" because columns are fetched per table: a
-/// 500-table warehouse would be 500 round trips before the first word of an
-/// answer. Sixty is roughly a screenful of `render_schema` and a few thousand
-/// tokens — enough that the model stops guessing, small enough that the wait is
-/// not noticed. Table *names* are never capped; they cost one query for all of
-/// them, and knowing a table exists is most of the value.
+/// A cap because each table is a round trip: a 500-table warehouse would be
+/// 500 of them before the first word of an answer. Table *names* are never
+/// capped; they cost one query for all of them.
 ///
-/// **That last sentence is why autocomplete shares this.** A completion list
-/// that knows every table and the columns of the sixty most likely is a
-/// different tool from one that knows neither; the sixty-first table still
-/// completes by name, and opening it in the tree fills in its columns exactly
-/// as it always did.
+/// **MySQL no longer goes through this.** It describes every column in one
+/// query ([`Engine::all_columns`](crate::engine::Engine::all_columns)), because
+/// this budget turned out to be the whole of "autocomplete does not know my
+/// columns": a real 385-table database had 60 tables described, in 20 seconds,
+/// and the tables the user was actually typing were among the other 325.
+///
+/// It is also, separately, how many tables the assistant is shown columns for —
+/// that limit is about prompt size, not round trips, and lives in
+/// [`crate::assistant::render_schema`]'s caller.
 pub const TABLE_DETAIL_BUDGET: usize = 60;
 
-/// What [`warm_for_assistant`] managed to load.
+/// The most column rows one bulk query will read.
+///
+/// About a hundred bytes a row, so a few megabytes at the cap. A database past
+/// it is described alphabetically up to the cap, and the rest falls back to the
+/// per-table budget — the cap exists so that a warehouse with half a million
+/// columns costs a bounded wait rather than an unbounded one.
+pub const BULK_COLUMN_CAP: usize = 50_000;
+
+/// What a bulk column query returned.
+#[derive(Debug, Clone, Default)]
+pub struct BulkColumns {
+    /// Table name to its columns, in ordinal order.
+    pub columns: HashMap<String, Vec<ColumnInfo>>,
+    /// `false` when [`BULK_COLUMN_CAP`] cut the read short. Only a complete
+    /// read can say that a table missing from it has no columns.
+    pub complete: bool,
+}
+
+/// What [`warm`] managed to load.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Warmed {
     /// Tables and views this database has.
@@ -120,15 +139,16 @@ pub struct Warmed {
     pub detailed: usize,
 }
 
-/// Load enough of a database's shape to describe it in bulk.
+/// Load a database's shape: every table name, and as many columns as the engine
+/// can describe cheaply.
 ///
 /// # Why this is not "running queries automatically"
 ///
 /// It runs no user SQL and executes nothing the user wrote. It calls the same
-/// introspection the schema tree calls when you expand a node — the engine's
-/// `tables` and `columns` — which is the app describing its own connection, not
-/// the model reaching a database. Nothing here is recorded as history, nothing
-/// appears in the grid, and the assistant still cannot execute a statement.
+/// introspection the schema tree calls when you expand a node, which is the app
+/// describing its own connection, not the model reaching a database. Nothing
+/// here is recorded as history, nothing appears in the grid, and the assistant
+/// still cannot execute a statement.
 ///
 /// Without it the model is told "columns not loaded" for every table nobody
 /// happened to click, and so it invents column names — which is the one failure
@@ -136,6 +156,9 @@ pub struct Warmed {
 ///
 /// Results land in the ordinary schema cache, so this is paid once per database
 /// per connection, and the tree and autocomplete get the benefit too.
+///
+/// `budget` only bounds the per-table fallback: tables the bulk query did not
+/// reach, or every table on an engine that has no bulk query.
 pub async fn warm(
     state: &AppState,
     connection_id: &str,
@@ -143,24 +166,55 @@ pub async fn warm(
     budget: usize,
 ) -> Result<Warmed, String> {
     let tables = list_tables(state, connection_id, db).await?;
-    let mut warmed = Warmed {
-        tables: tables.len(),
-        detailed: 0,
+    let server = server(state, connection_id).await?;
+
+    let undescribed = |cache: &HashMap<String, DbSchema>| -> Vec<String> {
+        let known = cache.get(db).map(|s| &s.columns);
+        tables
+            .iter()
+            .filter(|t| !known.is_some_and(|c| c.contains_key(&t.name)))
+            .map(|t| t.name.clone())
+            .collect()
     };
 
-    for t in tables.iter().take(budget) {
-        // Per table, and tolerant: a view whose definition no longer resolves
-        // cannot be described, and that must cost us that one table rather than
-        // the whole schema. `list_columns` is cache-first, so a table the tree
-        // already expanded costs nothing here.
-        if list_columns(state, connection_id, db, &t.name)
-            .await
-            .is_ok()
-        {
-            warmed.detailed += 1;
+    if !undescribed(&*server.schema_cache.lock().await).is_empty() {
+        // Tolerant, like the per-table loop below: a server that refuses the
+        // bulk read still gets described the slow way.
+        if let Ok(Some(bulk)) = server.engine.all_columns(&server, db).await {
+            let mut cache = server.schema_cache.lock().await;
+            let entry = cache.entry(db.to_string()).or_default();
+            if bulk.complete {
+                // A table the complete read did not mention has no columns we
+                // can see — a view whose definition no longer resolves, say.
+                // Recorded as empty so it is not asked about again, table by
+                // table, on every warm-up.
+                for t in &tables {
+                    entry.columns.entry(t.name.clone()).or_default();
+                }
+            }
+            entry.columns.extend(bulk.columns);
         }
     }
-    Ok(warmed)
+
+    let rest = undescribed(&*server.schema_cache.lock().await);
+    for name in rest.iter().take(budget) {
+        // Per table, and tolerant: a view whose definition no longer resolves
+        // cannot be described, and that must cost us that one table rather than
+        // the whole schema.
+        let _ = list_columns(state, connection_id, db, name).await;
+    }
+
+    let cache = server.schema_cache.lock().await;
+    let detailed = cache.get(db).map_or(0, |s| {
+        tables
+            .iter()
+            .filter(|t| s.columns.contains_key(&t.name))
+            .count()
+    });
+    Ok(Warmed {
+        tables: tables.len(),
+        detailed,
+    })
 }
 
 /// Every table in `db`, each with the column names already cached for it.
@@ -263,7 +317,7 @@ pub async fn describe_cache(state: &AppState) -> String {
             let named = schema.tables.as_ref().map(|t| t.len());
             let detailed = schema.columns.len();
             out.push_str(&format!(
-                "  {db}: {} tables named, {detailed} with columns cached (budget {TABLE_DETAIL_BUDGET})\n",
+                "  {db}: {} tables named, {detailed} with columns cached\n",
                 match named {
                     Some(n) => n.to_string(),
                     // Columns without a table list means something asked for
@@ -388,21 +442,7 @@ pub(crate) async fn mysql_list_columns(
         .map_err(|e| friendly(&e))?
     };
 
-    let columns: Vec<ColumnInfo> = rows
-        .into_iter()
-        .filter_map(|r| {
-            let key: String = r.try_get("col_key").unwrap_or_default();
-            Some(ColumnInfo {
-                name: r.try_get::<String, _>("name").ok()?,
-                data_type: r.try_get::<String, _>("data_type").unwrap_or_default(),
-                nullable: r
-                    .try_get::<String, _>("nullable")
-                    .map(|v| v.eq_ignore_ascii_case("YES"))
-                    .unwrap_or(true),
-                key: (!key.is_empty()).then_some(key),
-            })
-        })
-        .collect();
+    let columns: Vec<ColumnInfo> = rows.iter().filter_map(column_from_row).collect();
 
     server
         .schema_cache
@@ -413,6 +453,70 @@ pub(crate) async fn mysql_list_columns(
         .columns
         .insert(table.to_string(), columns.clone());
     Ok(columns)
+}
+
+/// Every column in `db`, in one query, reading at most `cap` rows.
+///
+/// Ordered by table so that a read cut short by the cap loses whole tables,
+/// never half of one: the last table seen may be partial, so it is dropped and
+/// left to the per-table fallback.
+pub async fn mysql_all_columns(
+    server: &ServerConn,
+    db: &str,
+    cap: usize,
+) -> Result<BulkColumns, String> {
+    let rows = {
+        let mut meta = server.mysql_meta().await?;
+        server.introspection_count.fetch_add(1, Ordering::SeqCst);
+        sqlx::query(
+            "SELECT table_name AS tbl, column_name AS name, column_type AS data_type, \
+                    is_nullable AS nullable, column_key AS col_key \
+             FROM information_schema.columns \
+             WHERE table_schema = ? \
+             ORDER BY table_name, ordinal_position \
+             LIMIT ?",
+        )
+        .bind(db)
+        // One past the cap, so "exactly at the cap" and "cut short" differ.
+        .bind(cap as u64 + 1)
+        .fetch_all(&mut *meta)
+        .await
+        .map_err(|e| friendly(&e))?
+    };
+
+    let complete = rows.len() <= cap;
+    let mut last = None::<String>;
+    let mut columns: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+    for r in rows.iter().take(cap) {
+        let Ok(table) = r.try_get::<String, _>("tbl") else {
+            continue;
+        };
+        let Some(column) = column_from_row(r) else {
+            continue;
+        };
+        last = Some(table.clone());
+        columns.entry(table).or_default().push(column);
+    }
+    if !complete {
+        if let Some(last) = last {
+            columns.remove(&last);
+        }
+    }
+    Ok(BulkColumns { columns, complete })
+}
+
+/// One `information_schema.columns` row, as both column queries alias it.
+fn column_from_row(r: &sqlx::mysql::MySqlRow) -> Option<ColumnInfo> {
+    let key: String = r.try_get("col_key").unwrap_or_default();
+    Some(ColumnInfo {
+        name: r.try_get::<String, _>("name").ok()?,
+        data_type: r.try_get::<String, _>("data_type").unwrap_or_default(),
+        nullable: r
+            .try_get::<String, _>("nullable")
+            .map(|v| v.eq_ignore_ascii_case("YES"))
+            .unwrap_or(true),
+        key: (!key.is_empty()).then_some(key),
+    })
 }
 
 /// Procedures and functions in one database, with their parameters.
@@ -622,7 +726,7 @@ pub(crate) async fn mysql_routine_ddl(
 ///
 /// **Every table, not only the detailed ones.** This used to be built from
 /// `columns` alone — the tables whose columns had been fetched — so a table
-/// beyond [`TABLE_DETAIL_BUDGET`], or one nobody had expanded, was reported as
+/// beyond the detail budget, or one nobody had expanded, was reported as
 /// `Unknown table` while sitting in the schema tree three inches away. The
 /// check was harmless only for as long as nothing set a tab's database, which
 /// is what made it invisible until autocomplete started doing so.

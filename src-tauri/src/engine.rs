@@ -149,6 +149,24 @@ pub trait Engine: Send + Sync {
         table: &str,
     ) -> Result<Vec<crate::schema::ColumnInfo>, String>;
 
+    /// Every column of every table in `ns`, in **one** round trip — or `None`
+    /// when this engine has no such query, and callers fall back to
+    /// [`Engine::columns`] one table at a time under a budget.
+    ///
+    /// Exists because per-table fetching is latency-bound, not size-bound: on
+    /// a server 330 ms away, sixty tables took twenty seconds and the other
+    /// 325 of a real 385-table database were never described at all. One
+    /// query for six thousand rows costs about one round trip.
+    ///
+    /// Does not touch the cache; [`crate::schema::warm`] owns that.
+    async fn all_columns(
+        &self,
+        _server: &crate::session::ServerConn,
+        _ns: &str,
+    ) -> Result<Option<crate::schema::BulkColumns>, String> {
+        Ok(None)
+    }
+
     /// Engines without stored routines return an empty list rather than an
     /// error — the tree omits empty groups, so nothing has to know why.
     async fn routines(
