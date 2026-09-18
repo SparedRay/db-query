@@ -284,3 +284,62 @@ the next statement.
 
 Six tests. The report's own case and the "does not leak into the next
 statement" case fail when CTE names are not treated as tables.
+
+### 8.2 Exported dates were their packed bytes
+
+> *"@client_calculation.csv this is the result of an export but seems like the
+> date values are with wrong characters. On result grid looks fine"*
+
+The CSV held `07 EA 07 09 0B 02 2D 35` where the grid showed
+`2026-09-11 02:45:53`: MySQL's **binary-protocol** encoding of a date, written
+as lossy UTF-8. `EA` is not valid UTF-8, so it became `�`.
+
+The grid reads through the text protocol (`raw_sql`); export streams through a
+prepared statement, which uses the binary one. `temporal_text` tried
+`NaiveDateTime`, which accepts only a column typed exactly `DATETIME` —
+`sqlx-mysql-0.9.0/src/types/chrono.rs:206`, read 2026-09-18: no `compatible()`
+override, unlike `DateTime<Utc>`. On a **`TIMESTAMP`** column it refused, so did
+every typed attempt after it, and the last resort printed the raw bytes. The
+grid was right by accident: in the text protocol the raw bytes are the
+formatted value.
+
+Now `binary_temporal` decodes MySQL's documented layouts itself, by column type,
+whenever the bytes are not server-formatted text. That also handles what sqlx's
+types cannot hold: zero dates, `TIME` beyond a day or below zero, and `YEAR`.
+The text protocol goes through the same code as before, so the grid is
+unchanged.
+
+**A second bug under the first:** sqlx treats a binary zero date as NULL, on
+purpose (`value.rs:102`, *"zero dates and date times should be treated the same
+as NULL"*). The grid shows `0000-00-00 00:00:00`, so export wrote NULL where the
+grid had a value. A real NULL has no bytes at all, so reading the bytes tells
+them apart.
+
+The live test `an_export_writes_dates_exactly_as_the_grid_shows_them` covers
+`TIMESTAMP`, `DATETIME(6)`, `DATE`, a zero date, `-838:59:59`, `26:00:01` and
+`YEAR` through the real streaming path, checks that the export equals the grid,
+and checks that a real NULL still exports as NULL. With the binary decoding
+switched off it fails. Five unit tests start from the exact bytes in the
+reported file.
+
+### 8.3 Too many tabs, and no way to reach them
+
+> *"when opening too many tabs there's no way to scroll on them"*
+
+The strip hides its scrollbar to stay one line tall. A plain mouse wheel did
+scroll it, but nothing on screen said so. A newly opened tab landed off-screen,
+Ctrl+Tab could switch to a tab you could not see, and `+` scrolled away with the
+tabs.
+
+* **‹ › buttons**, shown only while the tabs overflow, each disabled at its own
+  end. Each press scrolls 80% of the strip's width.
+* **The active tab is scrolled into view** when it changes or a tab is added or
+  closed — not on every re-render, which would snap the strip back while
+  somebody was scrolling to look. This is done by hand, because
+  `scrollIntoView` would park the tab under the pinned `+`.
+* **`+` is pinned** to the right edge.
+
+Four UI tests measure geometry, not just whether the buttons exist. The reveal
+and the no-snap-back guard each fail their test when removed.
+
+**385 Rust unit tests, 77 live MySQL tests, 762 UI tests on both engines.**

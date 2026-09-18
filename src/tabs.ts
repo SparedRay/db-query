@@ -196,10 +196,20 @@ export class TabManager {
   /** Where each connection was left, so switching back returns you there. */
   private lastActive = new Map<string, string>();
 
+  /** Which tab was last scrolled into view, and with how many tabs. */
+  private revealed = "";
+
   constructor(
     private bar: HTMLElement,
     private view: EditorView,
     private hooks: TabHooks,
+    /**
+     * The ‹ › buttons either side of the strip. Optional so a strip without
+     * them still works — but the strip hides its own scrollbar to stay one
+     * line tall, so without them the only way past the edge was a wheel or a
+     * trackpad gesture nobody could see was available.
+     */
+    private scrollers?: { left: HTMLButtonElement; right: HTMLButtonElement },
   ) {
     this.bar.addEventListener("wheel", (e) => {
       // Horizontal scroll with a plain wheel, so an overflowing bar is usable
@@ -209,6 +219,53 @@ export class TabManager {
         e.preventDefault();
       }
     });
+    if (scrollers) {
+      // Most of a strip's width per click, so each press shows tabs that were
+      // hidden without skipping any.
+      const step = (dir: number) => () => {
+        this.bar.scrollBy({ left: dir * this.bar.clientWidth * 0.8, behavior: "smooth" });
+      };
+      scrollers.left.onclick = step(-1);
+      scrollers.right.onclick = step(1);
+      this.bar.addEventListener("scroll", () => this.syncScrollers(), { passive: true });
+      new ResizeObserver(() => this.syncScrollers()).observe(this.bar);
+    }
+  }
+
+  /** Arrows only while the tabs overflow; each disabled at its own end. */
+  private syncScrollers() {
+    if (!this.scrollers) return;
+    const { left, right } = this.scrollers;
+    const max = this.bar.scrollWidth - this.bar.clientWidth;
+    const overflowing = max > 1;
+    left.hidden = !overflowing;
+    right.hidden = !overflowing;
+    left.disabled = this.bar.scrollLeft <= 0;
+    right.disabled = this.bar.scrollLeft >= max - 1;
+  }
+
+  /**
+   * Scroll the active tab into view — **only when it changes**, or a tab is
+   * added or closed. On every render it would snap the strip back to the
+   * active tab while somebody was scrolling to look at the others, because a
+   * tab elsewhere finishing its query re-renders the strip.
+   *
+   * By hand rather than `scrollIntoView`, which knows nothing about the `+`
+   * pinned over the right edge and would park the tab underneath it.
+   */
+  private reveal() {
+    const key = `${this.activeId}:${this.visible().length}`;
+    if (key === this.revealed) return;
+    this.revealed = key;
+    const el = this.bar.querySelector<HTMLElement>(".stab.active");
+    if (!el) return;
+    const pinned = this.bar.querySelector<HTMLElement>(".stab-add")?.offsetWidth ?? 0;
+    const visible = this.bar.clientWidth - pinned;
+    if (el.offsetLeft < this.bar.scrollLeft) {
+      this.bar.scrollLeft = el.offsetLeft;
+    } else if (el.offsetLeft + el.offsetWidth > this.bar.scrollLeft + visible) {
+      this.bar.scrollLeft = el.offsetLeft + el.offsetWidth - visible;
+    }
   }
 
   /** Every tab across every connection. */
@@ -606,5 +663,7 @@ export class TabManager {
     }
 
     this.bar.replaceChildren(...nodes, ...extras);
+    this.reveal();
+    this.syncScrollers();
   }
 }

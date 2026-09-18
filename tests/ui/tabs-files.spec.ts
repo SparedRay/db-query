@@ -231,3 +231,80 @@ test("duplicating a connection opens the editor with a new name and no password"
   await expect(page.locator('#conn-form input[name="name"]')).toHaveValue(/copy/);
   await expect(page.locator('#conn-form input[name="password"]')).toHaveValue("");
 });
+
+// ---------------------------------------------------- many tabs
+
+/**
+ * **"When opening too many tabs there's no way to scroll."** The strip hides
+ * its own scrollbar to stay one line tall, so past the edge there was nothing
+ * to click: a wheel scrolled it, but nothing said so, the newest tab opened
+ * out of sight, and `+` scrolled away with the tabs.
+ */
+async function openMany(page: import("@playwright/test").Page, n: number) {
+  for (let i = 0; i < n; i++) await page.click(".stab-add");
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(n + 1);
+}
+
+/** Is `el` wholly inside the strip's visible area? */
+async function inView(page: import("@playwright/test").Page, selector: string) {
+  return page.evaluate((sel) => {
+    const bar = document.getElementById("script-tabs")!.getBoundingClientRect();
+    const el = document.querySelector(sel)!.getBoundingClientRect();
+    return el.left >= bar.left - 1 && el.right <= bar.right + 1;
+  }, selector);
+}
+
+test("the scroll arrows appear only when the tabs overflow", async ({ page }) => {
+  await connect(page);
+  await expect(page.locator("#stab-left")).toBeHidden();
+  await expect(page.locator("#stab-right")).toBeHidden();
+
+  await openMany(page, 25);
+  await expect(page.locator("#stab-left")).toBeVisible();
+  await expect(page.locator("#stab-right")).toBeVisible();
+});
+
+test("a new tab is scrolled into view, and + stays reachable", async ({ page }) => {
+  await connect(page);
+  await openMany(page, 25);
+
+  await expect(page.locator("#script-tabs .stab.active .stab-label")).toHaveText("Untitled-26");
+  expect(await inView(page, "#script-tabs .stab.active"), "the tab just opened is off-screen").toBe(true);
+  expect(await inView(page, ".stab-add"), "+ scrolled away with the tabs").toBe(true);
+  // At the far end, so only the way back is offered.
+  await expect(page.locator("#stab-right")).toBeDisabled();
+  await expect(page.locator("#stab-left")).toBeEnabled();
+});
+
+test("the arrows walk the strip back to the first tab and forward again", async ({ page }) => {
+  await connect(page);
+  await openMany(page, 25);
+  const first = "#script-tabs .stab:first-child";
+  expect(await inView(page, first)).toBe(false);
+
+  for (let i = 0; i < 20 && !(await inView(page, first)); i++) {
+    await page.click("#stab-left");
+    await page.waitForTimeout(250);
+  }
+  expect(await inView(page, first), "the arrows never reached the first tab").toBe(true);
+  await expect(page.locator("#stab-left")).toBeDisabled();
+
+  await page.click("#stab-right");
+  await expect
+    .poll(() => page.evaluate(() => document.getElementById("script-tabs")!.scrollLeft))
+    .toBeGreaterThan(0);
+});
+
+/** Scrolling to look must not be undone by the strip re-rendering. */
+test("scrolling away is not snapped back by a re-render", async ({ page }) => {
+  await connect(page);
+  await openMany(page, 25);
+  await page.evaluate(() => {
+    document.getElementById("script-tabs")!.scrollLeft = 0;
+  });
+  // Typing marks the active tab dirty, which re-renders the strip.
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.type("x");
+  await expect(page.locator("#script-tabs .stab.active")).toHaveClass(/dirty/);
+  expect(await page.evaluate(() => document.getElementById("script-tabs")!.scrollLeft)).toBe(0);
+});

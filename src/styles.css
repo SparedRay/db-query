@@ -698,12 +698,27 @@ input.num {
 .node.table, .node.routine { user-select: none; }
 
 /* --- script tabs (one per open SQL buffer) --- */
+.script-tabs-row {
+  display: flex; align-items: stretch; flex: 0 0 auto; min-width: 0;
+  background: var(--bg-tabs); border-bottom: 1px solid var(--border);
+}
 .script-tabs {
   display: flex; align-items: stretch; gap: 1px;
-  flex: 0 0 auto; overflow-x: auto; overflow-y: hidden;
-  background: var(--bg-tabs); border-bottom: 1px solid var(--border);
+  flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden;
+  /* The offset parent for revealing the active tab — see TabManager.reveal. */
+  position: relative;
   scrollbar-width: none;
 }
+.stab { flex: 0 0 auto; }
+.stab-scroll {
+  flex: 0 0 auto; width: 22px; padding: 0; border: none;
+  background: var(--bg-tabs); color: var(--fg-dim);
+  font-size: 16px; line-height: 1; cursor: pointer;
+}
+.stab-scroll:hover:not(:disabled) { color: var(--fg); background: var(--bg-hover); }
+.stab-scroll:disabled { opacity: .35; cursor: default; }
+#stab-left { border-right: 1px solid var(--border); }
+#stab-right { border-left: 1px solid var(--border); }
 .script-tabs::-webkit-scrollbar { display: none; }
 
 .stab {
@@ -752,9 +767,12 @@ input.num {
 .stab-origin[data-origin="migration"] { color: var(--fg-dim); opacity: 1; }
 .stab:has(.stab-origin[data-origin="migration"]) { border-left-color: var(--border); }
 
+/* Pinned to the strip's right edge, so a new tab is one click away however
+   many are open. It used to scroll off the end with the tabs. */
 .stab-add {
-  background: none; border: none; color: var(--fg-dim);
+  background: var(--bg-tabs); border: none; color: var(--fg-dim);
   font-size: 15px; line-height: 1; padding: 0 10px; cursor: pointer; flex: 0 0 auto;
+  position: sticky; right: 0;
 }
 .stab-add:hover { color: var(--fg); }
 
