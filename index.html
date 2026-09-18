@@ -41,7 +41,16 @@
 
       <main id="main">
         <section id="editor-pane">
-          <div id="script-tabs" class="script-tabs"></div>
+          <!-- The arrows exist because the strip's own scrollbar is hidden to
+               keep it one line tall, and a hidden scrollbar is no affordance at
+               all. Shown only while the tabs overflow. -->
+          <div class="script-tabs-row">
+            <button id="stab-left" class="stab-scroll" type="button"
+                    title="Scroll tabs left" aria-label="Scroll tabs left" hidden>&lsaquo;</button>
+            <div id="script-tabs" class="script-tabs"></div>
+            <button id="stab-right" class="stab-scroll" type="button"
+                    title="Scroll tabs right" aria-label="Scroll tabs right" hidden>&rsaquo;</button>
+          </div>
           <div class="pane-head">
             <button id="btn-run" class="mini" disabled>Run <kbd>Ctrl+Enter</kbd></button>
             <button id="btn-run-all" class="mini" disabled>Run all <kbd>Ctrl+Shift+Enter</kbd></button>

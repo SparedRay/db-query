@@ -2005,6 +2005,9 @@ tabs = new TabManager($("script-tabs"), view, {
     void api.closeTab(tab.id);
     session.schedule();
   },
+}, {
+  left: $<HTMLButtonElement>("stab-left"),
+  right: $<HTMLButtonElement>("stab-right"),
 });
 
 files = createFileUx({

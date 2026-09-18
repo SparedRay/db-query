@@ -1862,6 +1862,118 @@ async fn the_rerun_export_writes_more_rows_than_the_grid_can_hold() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// **The export must say what the grid says**, for every temporal type.
+///
+/// The grid reads through the text protocol and export streams through a
+/// prepared statement, the binary protocol. A `TIMESTAMP` looked right in the
+/// grid and came out of a real export as its packed bytes —
+/// `\x07\u{fffd}\x07\x09\x0b\x02-5` — because sqlx's `NaiveDateTime`
+/// refuses a column that is not exactly `DATETIME`. The cases below include
+/// what sqlx's types cannot hold at all: a zero date, a `TIME` beyond a day and
+/// below zero, and `YEAR`.
+#[tokio::test]
+#[ignore]
+async fn an_export_writes_dates_exactly_as_the_grid_shows_them() {
+    let state = connected().await;
+    exec::run_script(
+        &state,
+        T,
+        "SET SESSION sql_mode = ''; \
+         CREATE TEMPORARY TABLE temporal_export ( \
+           ts TIMESTAMP NULL, dt6 DATETIME(6), d DATE, zero DATETIME, t TIME, y YEAR); \
+         INSERT INTO temporal_export VALUES \
+           ('2026-09-11 02:45:53', '2026-09-11 02:45:53.123456', '2026-01-02', \
+            '0000-00-00 00:00:00', '-838:59:59', 2026), \
+           ('2026-01-02 00:00:00', '2026-01-02 00:00:00', '2026-12-31', \
+            '2026-09-11 00:00:00', '26:00:01', 1999);",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let sql = "SELECT ts, dt6, d, zero, t, y FROM temporal_export ORDER BY y DESC";
+    let shown = exec::run_script(&state, T, sql, false, None).await.unwrap();
+    let Outcome::Rows { rows, .. } = &shown.statements[0].outcome else {
+        panic!("expected rows")
+    };
+    let grid: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| match c {
+                    db_query_lib::decode::CellValue::Text(s) => s.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+    // The grid was always right; pin it, so "equal to the grid" means this.
+    assert_eq!(
+        grid,
+        [
+            "2026-09-11 02:45:53,2026-09-11 02:45:53.123456,2026-01-02,0000-00-00 00:00:00,-838:59:59,2026",
+            "2026-01-02 00:00:00,2026-01-02 00:00:00,2026-12-31,2026-09-11 00:00:00,26:00:01,1999",
+        ]
+    );
+
+    let dir = std::env::temp_dir().join(format!("db-query-temporal-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("temporal.csv");
+    let opts = csv_opts();
+    let header_opts = opts.clone();
+    exec::stream_to_file(
+        &state,
+        T,
+        sql,
+        &path,
+        move |row, buf| {
+            buf.push_str(&db_query_lib::export::csv_row(row, &opts));
+            Ok(())
+        },
+        move |row| Ok(db_query_lib::export::csv_header(row, &header_opts)),
+    )
+    .await
+    .unwrap();
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    let exported: Vec<&str> = body.lines().skip(1).collect();
+    assert_eq!(exported, grid, "the export disagrees with the grid");
+
+    // And a real NULL is still NULL. sqlx reports a zero date as null too, and
+    // the fix tells them apart by the bytes: a NULL has none.
+    exec::run_script(
+        &state,
+        T,
+        "INSERT INTO temporal_export VALUES (NULL, NULL, NULL, NULL, NULL, NULL);",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let null_path = dir.join("nulls.csv");
+    let opts = csv_opts();
+    let header_opts = opts.clone();
+    exec::stream_to_file(
+        &state,
+        T,
+        "SELECT ts, dt6, d, zero, t, y FROM temporal_export WHERE y IS NULL",
+        &null_path,
+        move |row, buf| {
+            buf.push_str(&db_query_lib::export::csv_row(row, &opts));
+            Ok(())
+        },
+        move |row| Ok(db_query_lib::export::csv_header(row, &header_opts)),
+    )
+    .await
+    .unwrap();
+    let nulls = std::fs::read_to_string(&null_path).unwrap();
+    // `nullAs` is empty in these options, so six NULLs are five commas.
+    assert_eq!(nulls.lines().nth(1), Some(",,,,,"), "{nulls:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn csv_opts() -> db_query_lib::export::CsvOptions {
     // No BOM so the assertions above can compare against plain text.
     serde_json::from_str(
