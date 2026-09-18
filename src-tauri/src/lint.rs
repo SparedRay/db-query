@@ -10,7 +10,7 @@
 //! execution scanner (so "inside a string" means exactly what it means to the
 //! splitter), and the schema cache it needs is already here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -293,12 +293,14 @@ const KEYWORDS: &[&str] = &[
     "PARTITION",
     "PRIMARY",
     "PROCEDURE",
+    "RECURSIVE",
     "REFERENCES",
     "REGEXP",
     "RENAME",
     "REPLACE",
     "RIGHT",
     "RLIKE",
+    "ROLLUP",
     "SECOND",
     "SELECT",
     "SEPARATOR",
@@ -518,6 +520,69 @@ fn collect_tables(toks: &[Tok]) -> Vec<TableRef> {
     refs
 }
 
+/// Index of the `)` closing the `(` at `open`, or `None` if it never closes.
+/// Both carry the depth *outside* the parentheses, which is what pairs them.
+fn closing_paren(toks: &[Tok], open: usize) -> Option<usize> {
+    let depth = toks.get(open)?.depth;
+    (open + 1..toks.len()).find(|&j| toks[j].text == ")" && toks[j].depth == depth)
+}
+
+/// Names a `WITH` clause defines: `WITH [RECURSIVE] a [(cols)] AS (…), b AS (…)`.
+///
+/// **They are tables for the rest of the statement**, and the linter used to
+/// report every one of them as `Unknown table` — it only knew the tables the
+/// server has. Their columns are whatever the CTE's `SELECT` produces, which
+/// this does not work out, so they are known to exist and nothing is said about
+/// their columns.
+///
+/// A name is taken only once its `AS (` is seen, so `WITH ROLLUP`,
+/// `WITH CHECK OPTION` and `WITH GRANT OPTION` define nothing. Any `WITH` in
+/// the statement counts, nested ones included: a CTE inside a subquery is
+/// visible only there, but saying nothing about a name is the safe mistake.
+fn cte_names(toks: &[Tok]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.upper != "WITH" {
+            continue;
+        }
+        let mut j = i + 1;
+        if toks.get(j).is_some_and(|t| t.upper == "RECURSIVE") {
+            j += 1;
+        }
+        loop {
+            let Some(name) = toks.get(j).filter(|t| t.is_word) else {
+                break;
+            };
+            j += 1;
+            // An optional column list: `name (a, b) AS (…)`.
+            if toks.get(j).is_some_and(|t| t.text == "(") {
+                let Some(close) = closing_paren(toks, j) else {
+                    break;
+                };
+                j = close + 1;
+            }
+            if !toks.get(j).is_some_and(|t| t.upper == "AS") {
+                break;
+            }
+            j += 1;
+            if !toks.get(j).is_some_and(|t| t.text == "(") {
+                break;
+            }
+            names.insert(name.text.to_ascii_lowercase());
+            let Some(close) = closing_paren(toks, j) else {
+                break;
+            };
+            j = close + 1;
+            if toks.get(j).is_some_and(|t| t.text == ",") {
+                j += 1;
+                continue;
+            }
+            break;
+        }
+    }
+    names
+}
+
 /// **Present means the table exists; non-empty means we know its columns.**
 ///
 /// Two different facts that used to be one. The schema handed to the linter
@@ -533,10 +598,15 @@ fn columns_known(schema: &LintSchema, table: &str) -> bool {
 
 fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) {
     let tables = collect_tables(toks);
+    let ctes = cte_names(toks);
+    // A CTE shadows a real table of the same name, and its columns are not the
+    // table's — so for column checks it counts as a table whose columns are
+    // unknown, whatever the schema says.
+    let columns_known = |table: &str| !ctes.contains(table) && columns_known(schema, table);
 
     // --- unknown tables
     for t in &tables {
-        if t.foreign || schema.contains_key(&t.name) {
+        if t.foreign || schema.contains_key(&t.name) || ctes.contains(&t.name) {
             continue;
         }
         diags.push(Diagnostic {
@@ -577,7 +647,7 @@ fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) 
         let Some(table) = scope.get(&left) else {
             continue;
         };
-        if !columns_known(schema, table) || has_column(table, &col_l) {
+        if !columns_known(table) || has_column(table, &col_l) {
             continue;
         }
         diags.push(Diagnostic {
@@ -598,7 +668,7 @@ fn check_schema(toks: &[Tok], schema: &LintSchema, diags: &mut Vec<Diagnostic>) 
         return;
     }
     let table = &tables[0].name;
-    if !columns_known(schema, table) {
+    if !columns_known(table) {
         return;
     }
 
@@ -728,6 +798,74 @@ mod tests {
         .collect();
         assert!(
             out.iter().any(|m| m.contains("Unknown table `warehouses`")),
+            "{out:?}"
+        );
+    }
+
+    // ------------------------------------------------------------- CTEs
+
+    /// **The report.** A CTE is a table for the rest of its statement, and
+    /// was flagged as unknown because the server has no table by that name.
+    #[test]
+    fn a_cte_is_a_table_for_its_own_statement() {
+        none(
+            "WITH recent AS (SELECT id, email FROM users WHERE id > 10) \
+              SELECT r.email FROM recent r;",
+        );
+    }
+
+    #[test]
+    fn several_ctes_recursive_and_with_column_lists_are_all_tables() {
+        none(
+            "WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5), \
+                   big AS (SELECT id FROM users) \
+              SELECT n.i, b.id FROM n JOIN big b ON b.id = n.i;",
+        );
+    }
+
+    /// A CTE named like a real table is the CTE: its columns are whatever its
+    /// `SELECT` makes, so the table's columns must not be used to judge them.
+    #[test]
+    fn a_cte_shadowing_a_real_table_is_not_checked_against_its_columns() {
+        none("WITH users AS (SELECT 1 AS made_up) SELECT u.made_up FROM users u;");
+    }
+
+    /// Still a linter: a real typo beside a CTE is still reported, inside the
+    /// CTE and outside it.
+    #[test]
+    fn a_misspelt_table_beside_a_cte_is_still_reported() {
+        let out = msgs(
+            "WITH r AS (SELECT id FROM custmers) SELECT id FROM r JOIN ordrs o ON o.id = r.id;",
+        );
+        assert!(
+            out.iter().any(|m| m.contains("Unknown table `custmers`")),
+            "{out:?}"
+        );
+        assert!(
+            out.iter().any(|m| m.contains("Unknown table `ordrs`")),
+            "{out:?}"
+        );
+        assert!(!out.iter().any(|m| m.contains("`r`")), "{out:?}");
+    }
+
+    /// `WITH` has other jobs, and none of them defines a table.
+    #[test]
+    fn with_rollup_defines_nothing() {
+        let out = msgs("SELECT id, COUNT(*) FROM users GROUP BY id WITH ROLLUP;");
+        assert!(!out.iter().any(|m| m.contains("ROLLUP")), "{out:?}");
+        let toks = tokenize("SELECT id FROM users GROUP BY id WITH ROLLUP", 0);
+        assert!(cte_names(&toks).is_empty());
+    }
+
+    /// A CTE's name is its own statement's; the next statement does not see it.
+    #[test]
+    fn a_cte_does_not_leak_into_the_next_statement() {
+        let out = msgs("WITH r AS (SELECT id FROM users) SELECT id FROM r; SELECT id FROM r;");
+        assert_eq!(
+            out.iter()
+                .filter(|m| m.contains("Unknown table `r`"))
+                .count(),
+            1,
             "{out:?}"
         );
     }

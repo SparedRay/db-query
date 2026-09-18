@@ -256,3 +256,31 @@ spec (was 37). The new tests for stale answers and the post-apply refresh both
 fail when their fix is removed. The live Flyway suite does not exercise these
 commands, since it drives `flywaycli` directly, so it was not re-run. That is
 Phase 3.
+
+## 8. Found in use, alongside this stage — 2026-09-18
+
+Corrections that are not about Flyway, recorded here because this is the
+current tracker.
+
+### 8.1 A CTE was an "Unknown table"
+
+> *"When using a CTE. is not recognized as a table if used on same script"*
+
+The linter knew only the server's tables, so every name a `WITH` clause defines
+was reported as missing. `cte_names` now collects them —
+`WITH [RECURSIVE] a [(cols)] AS (…), b AS (…)` — and they count as tables that
+exist for the rest of their statement. Their columns are whatever their
+`SELECT` produces, which the linter does not work out, so nothing is said about
+them. That includes a CTE that shadows a real table: its columns are not the
+table's.
+
+A name only counts once its `AS (` has been seen, so `WITH ROLLUP`, `WITH CHECK
+OPTION` and `WITH GRANT OPTION` define nothing. A CTE does not carry over into
+the next statement.
+
+**Found on the way:** `ROLLUP` was not in the keyword list, so
+`GROUP BY id WITH ROLLUP` on a single table reported "`users` has no column
+`ROLLUP`". Added, with `RECURSIVE`.
+
+Six tests. The report's own case and the "does not leak into the next
+statement" case fail when CTE names are not treated as tables.
