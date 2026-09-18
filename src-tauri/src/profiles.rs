@@ -50,13 +50,13 @@ pub fn path_in(dir: &Path) -> PathBuf {
 /// Restrict the file to the owner. Called before any content is written, not
 /// after — a window where the file exists world-readable is a window too many.
 #[cfg(unix)]
-fn restrict(path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict(_path: &Path) -> std::io::Result<()> {
     // Windows and macOS place the app config dir under the user's profile,
     // which is already user-scoped by the OS.
     Ok(())
@@ -198,9 +198,6 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only: false,
-            flyway_project: None,
-            flyway_environment: None,
-            flyway_accepted: Vec::new(),
         }
     }
 

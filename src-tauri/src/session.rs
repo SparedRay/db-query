@@ -111,25 +111,6 @@ pub struct ConnProfile {
     /// restricted", which is what it meant when it was written.
     #[serde(default)]
     pub read_only: bool,
-
-    /// Path to a Flyway project's `flyway.toml`, when one is attached.
-    ///
-    /// **The path, never a copy of what is in it.** The file lives in a
-    /// repository and changes with the branch — that is how the environment is
-    /// targeted — so a snapshot of its values would go stale the moment the
-    /// branch changed and then claim the wrong folder with confidence.
-    #[serde(default)]
-    pub flyway_project: Option<String>,
-    /// Which environment in that project this connection is. A Flyway
-    /// environment *is* a database, so a connection answers this once.
-    #[serde(default)]
-    pub flyway_environment: Option<String>,
-    /// Disagreements between that environment and this connection that the
-    /// user accepted with "Attach anyway". Fields, not values: the apply guard
-    /// re-reads the file every time, and a field that was not accepted still
-    /// refuses. Cleared whenever the attachment changes.
-    #[serde(default)]
-    pub flyway_accepted: Vec<crate::flyway::Disagreement>,
 }
 
 /// Every key a serialised [`ConnProfile`] has, in sorted order.
@@ -147,14 +128,11 @@ pub struct ConnProfile {
 ///
 /// One list rather than two, because two would eventually disagree and the
 /// weaker one would be the one still passing.
-pub const PROFILE_KEYS: [&str; 16] = [
+pub const PROFILE_KEYS: [&str; 13] = [
     "allowInvalidCerts",
     "auth",
     "colour",
     "database",
-    "flywayAccepted",
-    "flywayEnvironment",
-    "flywayProject",
     "host",
     "id",
     "kind",
@@ -896,9 +874,6 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only: false,
-            flyway_project: None,
-            flyway_environment: None,
-            flyway_accepted: Vec::new(),
         }
     }
 

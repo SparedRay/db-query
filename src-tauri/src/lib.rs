@@ -9,6 +9,7 @@ pub mod export;
 pub mod files;
 pub mod flyway;
 pub mod flywaycli;
+pub mod flywaystore;
 pub mod history;
 pub mod httpsql;
 pub mod lint;
@@ -1084,9 +1085,9 @@ fn read_file(path: String) -> Result<OpenedFile, String> {
 
 // ---------------------------------------------------------------- Flyway
 //
-// Stage 15. Everything here reads: picking a project, parsing it, comparing it
-// with the connection it is about to be attached to, and asking Flyway what it
-// thinks the state is. Nothing in this section changes a database.
+// Stage 15, reshaped by Stage 17: a project stands on its own, and each of its
+// environments is *matched* to the saved connections it is, rather than being
+// attached to one. Only `flyway_migrate` and `flyway_repair` change a database.
 
 /// Choose a `flyway.toml`. Returns the path, not the contents — the project is
 /// re-read every time it is used, because it lives in a repository and changes
@@ -1111,12 +1112,138 @@ async fn flyway_pick_project(app: tauri::AppHandle) -> Result<Option<String>, St
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-/// Read a project file. Re-read rather than remembered — see `flyway_project`
-/// on `ConnProfile`.
-#[tauri::command]
-fn flyway_read_project(path: String) -> Result<flyway::Project, String> {
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+/// One project as the pane shows it.
+///
+/// Built from the file **as it reads now** and the saved connections as they
+/// are now: nothing in it is remembered except the path and the last selected
+/// environment.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectView {
+    pub id: String,
+    pub path: String,
+    /// The environment last selected, if it still exists; else the file's own
+    /// `[flyway] environment`; else none.
+    pub selected: Option<String>,
+    pub name: Option<String>,
+    pub out_of_order: bool,
+    pub environments: Vec<flyway::EnvironmentView>,
+    /// Why the file could not be read. The project stays listed — a branch
+    /// without the file is a reason to say so, not to forget the project.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectList {
+    pub projects: Vec<ProjectView>,
+    pub warning: Option<String>,
+}
+
+fn read_project(path: &str) -> Result<flyway::Project, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
     flyway::parse(&text)
+}
+
+fn project_view(stored: &flywaystore::StoredProject, profiles: &[ConnProfile]) -> ProjectView {
+    match read_project(&stored.path) {
+        Ok(project) => {
+            let selected = stored
+                .environment
+                .clone()
+                .filter(|e| project.environment(e).is_some())
+                .or_else(|| {
+                    project
+                        .default_environment
+                        .clone()
+                        .filter(|e| project.environment(e).is_some())
+                });
+            ProjectView {
+                id: stored.id.clone(),
+                path: stored.path.clone(),
+                selected,
+                name: project.name.clone(),
+                out_of_order: project.out_of_order,
+                environments: flyway::environment_views(&project, profiles),
+                error: None,
+            }
+        }
+        Err(e) => ProjectView {
+            id: stored.id.clone(),
+            path: stored.path.clone(),
+            selected: stored.environment.clone(),
+            name: None,
+            out_of_order: false,
+            environments: Vec::new(),
+            error: Some(e),
+        },
+    }
+}
+
+/// Every added project, each re-read and matched against the saved
+/// connections. Needs no connection to be open: Flyway connects by itself.
+#[tauri::command]
+fn flyway_projects(app: tauri::AppHandle) -> Result<ProjectList, String> {
+    let dir = config_dir(&app)?;
+    let loaded = flywaystore::load(&dir);
+    let profiles = profiles::load(&dir).profiles;
+    Ok(ProjectList {
+        projects: loaded
+            .projects
+            .iter()
+            .map(|p| project_view(p, &profiles))
+            .collect(),
+        warning: loaded.warning,
+    })
+}
+
+/// Add a project by path. Refuses a file that is not a readable Flyway
+/// project, so a mistaken pick is an error now rather than a broken row
+/// forever. Adding the same file twice returns the one already there.
+#[tauri::command]
+fn flyway_add_project(app: tauri::AppHandle, path: String) -> Result<ProjectView, String> {
+    read_project(&path)?;
+    let dir = config_dir(&app)?;
+    let mut projects = flywaystore::load(&dir).projects;
+    let stored = match projects.iter().find(|p| p.path == path) {
+        Some(existing) => existing.clone(),
+        None => {
+            let added = flywaystore::StoredProject {
+                id: flywaystore::new_id(),
+                path,
+                environment: None,
+            };
+            projects.push(added.clone());
+            flywaystore::save_all(&dir, &projects)?;
+            added
+        }
+    };
+    Ok(project_view(&stored, &profiles::load(&dir).profiles))
+}
+
+/// Forget a project. The file itself is not touched.
+#[tauri::command]
+fn flyway_remove_project(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let mut projects = flywaystore::load(&dir).projects;
+    projects.retain(|p| p.id != id);
+    flywaystore::save_all(&dir, &projects)
+}
+
+/// Remember which environment was last selected. A preference only.
+#[tauri::command]
+fn flyway_select_environment(
+    app: tauri::AppHandle,
+    id: String,
+    environment: String,
+) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let mut projects = flywaystore::load(&dir).projects;
+    let Some(p) = projects.iter_mut().find(|p| p.id == id) else {
+        return Err("That Flyway project is no longer in the list.".into());
+    };
+    p.environment = Some(environment);
+    flywaystore::save_all(&dir, &projects)
 }
 
 /// The configured Flyway command, or the default. Empty means "whatever is on
@@ -1129,58 +1256,19 @@ fn program_or_default(program: String) -> String {
     }
 }
 
-/// Which fields of a connection an environment disagrees with, before it is
-/// attached. Empty means they agree.
-///
-/// The decision on a disagreement is the **user's**, not this command's: it
-/// reports, the UI asks, and an override is a deliberate confirmation rather
-/// than a flag somebody set once.
-#[tauri::command]
-fn flyway_check(
-    app: tauri::AppHandle,
-    connection_id: String,
-    path: String,
-    environment: String,
-) -> Result<Vec<flyway::Disagreement>, String> {
-    let dir = config_dir(&app)?;
-    let profile = profiles::load(&dir)
-        .profiles
-        .into_iter()
-        .find(|p| p.id == connection_id)
-        .ok_or_else(|| "No saved connection with that id.".to_string())?;
-
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let project = flyway::parse(&text)?;
-    let env = project
-        .environment(&environment)
-        .ok_or_else(|| format!("This project has no environment called \"{environment}\"."))?;
-    Ok(flyway::disagreements(env, &profile))
-}
-
-/// What Flyway says about this connection's project.
+/// What Flyway says about one environment of a project.
 ///
 /// `program` is the path to the CLI, which the user can set; empty means
 /// "whatever is on the PATH".
 #[tauri::command]
 async fn flyway_info(
     app: tauri::AppHandle,
-    connection_id: String,
+    project_id: String,
+    environment: String,
     program: String,
     out_of_order: bool,
 ) -> Result<Vec<flywaycli::Migration>, String> {
-    let dir = config_dir(&app)?;
-    let profile = profiles::load(&dir)
-        .profiles
-        .into_iter()
-        .find(|p| p.id == connection_id)
-        .ok_or_else(|| "No saved connection with that id.".to_string())?;
-
-    let path = profile
-        .flyway_project
-        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
-    let environment = profile
-        .flyway_environment
-        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
+    let (path, _, _) = flyway_target(&app, &project_id)?;
 
     let program = program_or_default(program);
     // Asked with the same flag the apply will use, so what the pane reports as
@@ -1267,27 +1355,30 @@ pub struct Applied {
 /// **The one command in this app that changes a database without a statement
 /// the user typed.** Three things guard it, in this order:
 ///
-///   1. A read-only connection refuses, here rather than only in the UI.
-///   2. The environment guard runs **again**. It ran at import, but the TOML
-///      lives in a repository and changes with the branch — which is the
-///      user's actual workflow — so the file that was checked is not
-///      necessarily the file about to be used.
-///   3. The caller has already confirmed, naming the versions.
+///   1. The caller has confirmed, naming the versions and the target.
+///   2. [`flyway::write_refusal`], against the file as it reads **now**: the
+///      target must still be the one confirmed, and no saved connection that
+///      *is* this environment may be read-only.
 ///
 /// Flyway's own refusal is returned verbatim. It explains itself well, and a
 /// paraphrase would replace an instruction with a summary.
 #[tauri::command]
 async fn flyway_migrate(
     app: tauri::AppHandle,
-    connection_id: String,
+    project_id: String,
+    environment: String,
+    confirmed: flyway::Confirmed,
     program: String,
     out_of_order: bool,
 ) -> Result<Applied, ApplyFailed> {
-    let (profile, path, environment, project) =
-        flyway_target(&app, &connection_id).map_err(ApplyFailed::ours)?;
-    if let Some(reason) =
-        flyway::write_refusal(&project, &profile, &environment, flyway::Write::Apply)
-    {
+    let (path, project, profiles) = flyway_target(&app, &project_id).map_err(ApplyFailed::ours)?;
+    if let Some(reason) = flyway::write_refusal(
+        &project,
+        &environment,
+        &confirmed,
+        &profiles,
+        flyway::Write::Apply,
+    ) {
         logbook::warn("flyway", "apply refused before it started");
         return Err(ApplyFailed::ours(reason));
     }
@@ -1357,18 +1448,23 @@ async fn flyway_migrate(
 /// failing still applied them, and the next apply will run it again from the
 /// first.
 ///
-/// Guarded exactly as `flyway_migrate` is: read-only refuses, and the
-/// environment is re-checked against the file as it is now.
+/// Guarded exactly as `flyway_migrate` is.
 #[tauri::command]
 async fn flyway_repair(
     app: tauri::AppHandle,
-    connection_id: String,
+    project_id: String,
+    environment: String,
+    confirmed: flyway::Confirmed,
     program: String,
 ) -> Result<flywaycli::Repaired, String> {
-    let (profile, path, environment, project) = flyway_target(&app, &connection_id)?;
-    if let Some(reason) =
-        flyway::write_refusal(&project, &profile, &environment, flyway::Write::Repair)
-    {
+    let (path, project, profiles) = flyway_target(&app, &project_id)?;
+    if let Some(reason) = flyway::write_refusal(
+        &project,
+        &environment,
+        &confirmed,
+        &profiles,
+        flyway::Write::Repair,
+    ) {
         logbook::warn("flyway", "repair refused before it started");
         return Err(reason);
     }
@@ -1400,35 +1496,23 @@ async fn flyway_repair(
     flywaycli::repaired(&out.stdout)
 }
 
-/// The connection, its project path, its environment, and the project as the
-/// file reads **now**.
+/// A project's path, the project as the file reads **now**, and the saved
+/// connections to match its environments against.
 ///
-/// Shared by apply and repair. Re-reading rather than remembering is the point:
-/// the TOML lives in a repository and changes with the branch, so a project
-/// cached at attach time is a description of whatever was checked out then.
+/// Re-reading rather than remembering is the point: the TOML lives in a
+/// repository and changes with the branch.
 fn flyway_target(
     app: &tauri::AppHandle,
-    connection_id: &str,
-) -> Result<(session::ConnProfile, String, String, flyway::Project), String> {
+    project_id: &str,
+) -> Result<(String, flyway::Project, Vec<ConnProfile>), String> {
     let dir = config_dir(app)?;
-    let profile = profiles::load(&dir)
-        .profiles
+    let stored = flywaystore::load(&dir)
+        .projects
         .into_iter()
-        .find(|p| p.id == connection_id)
-        .ok_or_else(|| "No saved connection with that id.".to_string())?;
-
-    let path = profile
-        .flyway_project
-        .clone()
-        .ok_or_else(|| "This connection has no Flyway project.".to_string())?;
-    let environment = profile
-        .flyway_environment
-        .clone()
-        .ok_or_else(|| "This connection has no Flyway environment chosen.".to_string())?;
-
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let project = flyway::parse(&text)?;
-    Ok((profile, path, environment, project))
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "That Flyway project is no longer in the list.".to_string())?;
+    let project = read_project(&stored.path)?;
+    Ok((stored.path, project, profiles::load(&dir).profiles))
 }
 
 // ------------------------------------------------------------- the logbook
@@ -1782,8 +1866,10 @@ pub fn run() {
             delete_profile,
             reorder_profiles,
             flyway_pick_project,
-            flyway_read_project,
-            flyway_check,
+            flyway_projects,
+            flyway_add_project,
+            flyway_remove_project,
+            flyway_select_environment,
             flyway_info,
             flyway_migrate,
             flyway_repair,

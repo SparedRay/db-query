@@ -1,23 +1,18 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  CONN_INFO,
-  MYSQL_CAPS,
-  calls,
-  commandNames,
-  connect,
-  installBackend,
-  schemaBackend,
-} from "./harness";
+import { calls, commandNames, connect, installBackend, schemaBackend } from "./harness";
 
 /**
  * The migrations pane.
  *
- * A pane on the right rather than a section of the schema tree, so the database
- * structure stays visible while a migration is being read — which is the only
- * reason to want both at once.
+ * **Stage 17: projects stand on their own.** A project used to be attached to
+ * a connection, and the pane followed whichever connection was active — which
+ * implied that connection was the one being migrated, when Flyway always
+ * connects with the project file's own settings. Now the pane lists projects
+ * and their environments, and says which saved connection each environment
+ * *is*, worked out from the file every time.
  *
- * Everything here **reads**. Applying and repairing are later phases, and the
- * pane offers neither rather than offering a button that explains itself.
+ * A pane on the right rather than a section of the schema tree, so the database
+ * structure stays visible while a migration is being read.
  */
 
 test.beforeEach(async ({ page }) => {
@@ -26,19 +21,45 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-/** MySQL can host a Flyway project; Elasticsearch cannot, and says so. */
-const NO_MIGRATIONS = { ...MYSQL_CAPS, engine: "elasticsearch", migrations: false };
+const PATH = "/p/flyway.toml";
 
-const PROJECT = {
-  name: "Flyway Connections",
-  databaseType: "MySql",
-  defaultEnvironment: "uat",
-  outOfOrder: false,
-  environments: [
-    { id: "development", displayName: "Development database", url: "jdbc:mysql://dev:3306/f", user: "dev_app" },
-    { id: "uat", displayName: "UAT database", url: "jdbc:mysql://uat:3306/f", user: "uat_app" },
-  ],
-};
+interface Match {
+  connectionId: string;
+  name: string;
+  colour: string;
+  readOnly: boolean;
+}
+
+const UAT: Match = { connectionId: "c-uat", name: "UAT", colour: "#ef4444", readOnly: false };
+
+function env(id: string, displayName: string, host: string, user: string, matches: Match[] = []) {
+  return {
+    id,
+    displayName,
+    url: `jdbc:mysql://${host}:3306/flyway`,
+    user,
+    target: `${host}:3306`,
+    matches,
+  };
+}
+
+/** One project as `flyway_projects` returns it: `uat` matches a saved
+ *  connection, `development` matches none. */
+function project(over: Record<string, unknown> = {}) {
+  return {
+    id: "fp1",
+    path: PATH,
+    selected: "uat",
+    name: "Flyway Connections",
+    outOfOrder: false,
+    environments: [
+      env("development", "Development database", "dev.example.com", "dev_app"),
+      env("uat", "UAT database", "uat.example.com", "uat_app", [UAT]),
+    ],
+    error: null,
+    ...over,
+  };
+}
 
 const MIGRATIONS = [
   {
@@ -58,19 +79,32 @@ const MIGRATIONS = [
   },
 ];
 
-/** A connection with a project already attached. */
-function attached(extra: Record<string, unknown> = {}) {
+const PENDING_ONLY = [
+  { version: "5", description: "add index", state: "Pending", category: "Versioned",
+    kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
+    executionTimeMs: null, group: "pending" },
+];
+
+/**
+ * A backend with a projects store that behaves like the real one: adding,
+ * removing and listing all see the same list.
+ */
+function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
+  let store = [...initial] as Array<Record<string, unknown>>;
   return {
     ...schemaBackend,
-    save_profile: (a: Record<string, unknown>) => ({
-      profile: { ...(a.profile as object), rememberPassword: false, needsSecret: false },
-      passwordWarning: null,
-      passwordStored: false,
-    }),
+    flyway_projects: () => ({ projects: store, warning: null }),
+    flyway_pick_project: () => PATH,
+    flyway_add_project: (a: Record<string, unknown>) => {
+      const added = project({ path: a.path });
+      store.push(added);
+      return added;
+    },
+    flyway_remove_project: (a: Record<string, unknown>) => {
+      store = store.filter((p) => p.id !== a.id);
+    },
+    flyway_select_environment: () => null,
     flyway_info: () => MIGRATIONS,
-    flyway_read_project: () => PROJECT,
-    flyway_pick_project: () => "/p/flyway.toml",
-    flyway_check: () => [],
     flyway_migrate: () => ({ executed: 1, target: "2" }),
     flyway_repair: () => ({
       actions: ["Removed failed migrations"],
@@ -78,26 +112,9 @@ function attached(extra: Record<string, unknown> = {}) {
       deleted: [],
       aligned: [],
     }),
+    refresh_schema: () => null,
     ...extra,
   };
-}
-
-/** Attach the project through the real dialogs, and land on the list. */
-async function attach(page: Page, extra: Record<string, unknown> = {}) {
-  await connect(page, attached(extra));
-  await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-  await page.locator(".mig").first().waitFor();
-}
-
-/** Every `save_profile` that actually attached a project. */
-async function attachments(page: Page) {
-  return (await calls(page))
-    .filter((c) => c.cmd === "save_profile")
-    .map((c) => c.args.profile as Record<string, unknown>)
-    .filter((p) => p.flywayProject)
-    .map((p) => ({ project: p.flywayProject, env: p.flywayEnvironment }));
 }
 
 async function openPane(page: Page) {
@@ -105,27 +122,44 @@ async function openPane(page: Page) {
   await expect(page.locator("#migrations-pane")).toBeVisible();
 }
 
-test("the toggle is offered on an engine Flyway can drive, and not otherwise", async ({ page }) => {
-  await connect(page, attached());
-  await expect(page.locator("#btn-migrations")).toBeVisible();
-
-  // A capability, never the engine's name — an engine Flyway cannot drive has
-  // nothing to attach, so the button is not there to press.
-  await page.reload();
-  await installBackend(page, {
-    ...attached(),
-    connect: () => ({ ...CONN_INFO, capabilities: NO_MIGRATIONS }),
-  });
+/** The app with one project added, **nothing connected**, on the list. */
+async function withProject(page: Page, extra: Record<string, unknown> = {}) {
+  await installBackend(page, flyway([project()], extra));
   await page.goto("/");
-  await page.click("#btn-connect");
-  await page.click("#conn-ok");
-  await expect(page.locator("#btn-migrations")).toBeHidden();
+  await openPane(page);
+  await page.locator(".mig").first().waitFor();
+}
+
+/** The last element, without `Array.prototype.at` (the tests target ES2020). */
+const last = <T>(xs: T[]): T | undefined => xs[xs.length - 1];
+
+const infoCalls = async (page: Page) =>
+  (await calls(page)).filter((c) => c.cmd === "flyway_info").map((c) => c.args);
+
+// ------------------------------------------------ standing on their own (F1)
+
+/**
+ * **The point of the stage.** Flyway connects with the project file's own
+ * settings, so nothing about a project needs a connection open — and a pane
+ * that followed the active connection implied that connection was the one
+ * being migrated.
+ */
+test("the pane is offered, and works, with nothing connected", async ({ page }) => {
+  await installBackend(page, flyway([project()]));
+  await page.goto("/");
+  await expect(page.locator("#btn-migrations")).toBeVisible();
+  await openPane(page);
+
+  await page.locator(".mig").first().waitFor();
+  expect(await commandNames(page)).not.toContain("connect");
+  expect(await infoCalls(page)).toEqual([
+    { projectId: "fp1", environment: "uat", program: "", outOfOrder: false },
+  ]);
 });
 
 test("the pane opens beside the schema tree, not instead of it", async ({ page }) => {
-  await connect(page, attached());
+  await connect(page, flyway([project()]));
   await openPane(page);
-  // The whole reason it is a pane: both are on screen at once.
   await expect(page.locator("#sidebar")).toBeVisible();
   await expect(page.locator("#editor")).toBeVisible();
 
@@ -133,180 +167,246 @@ test("the pane opens beside the schema tree, not instead of it", async ({ page }
   await expect(page.locator("#migrations-pane")).toBeHidden();
 });
 
-test("with no project attached the pane says what to do", async ({ page }) => {
-  await connect(page, attached());
+test("with no projects the pane says what to do, and asks Flyway nothing", async ({ page }) => {
+  await installBackend(page, flyway([]));
+  await page.goto("/");
   await openPane(page);
 
-  await expect(page.locator(".mig-empty")).toContainText(/No Flyway project/);
-  await expect(page.locator(".mig-empty button")).toHaveText(/Import a project/);
-  // And it has not gone asking Flyway about a project that is not there.
-  expect(await calls(page)).not.toContainEqual(expect.objectContaining({ cmd: "flyway_info" }));
+  await expect(page.locator(".mig-empty")).toContainText(/No Flyway projects yet/);
+  await expect(page.locator(".mig-empty")).toContainText(/No connection needs to be open/);
+  await expect(page.locator(".mig-empty button")).toHaveText(/Add a project/);
+  expect(await commandNames(page)).not.toContain("flyway_info");
 });
 
-/** Importing: pick, choose an environment, and it is remembered on the profile. */
-test("importing a project stores the path and the chosen environment", async ({ page }) => {
-  await connect(page, attached());
+test("adding a project stores its path and lands on its environment", async ({ page }) => {
+  await installBackend(page, flyway([]));
+  await page.goto("/");
   await openPane(page);
   await page.click(".mig-empty button");
 
-  // The environment the file itself names is offered first.
-  await expect(page.locator("dialog.ask")).toBeVisible();
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-
-  await expect.poll(() => attachments(page)).toEqual([{ project: "/p/flyway.toml", env: "uat" }]);
-});
-
-/**
- * **The guard.** `flyway migrate -environment=x` connects using the project's
- * own settings, so attaching the wrong environment means watching one database
- * while changing another.
- */
-test("a disagreeing environment is refused until it is deliberately overridden", async ({ page }) => {
-  await connect(page, attached({ flyway_check: () => ["host", "user"] }));
-  await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-
-  // It names the fields, because "does not match" is not actionable.
-  await expect(page.locator("dialog.ask h2")).toContainText(/points somewhere else/);
-  await expect(page.locator("dialog.ask p")).toContainText(/host, user/);
-
-  // Cancelling attaches nothing. Connecting saves the profile on its own, so
-  // the question is whether a project was written to it — not whether the
-  // profile was ever saved.
-  await page.locator('dialog.ask button:has-text("Cancel")').click();
-  expect(await attachments(page), "cancelling must attach nothing").toEqual([]);
-
-  // Overriding is a second, deliberate act.
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-  await page.locator('dialog.ask button:has-text("Attach anyway")').click();
-  await expect.poll(() => attachments(page)).toEqual([{ project: "/p/flyway.toml", env: "uat" }]);
-});
-
-/** Every `save_profile`'s profile, in order. */
-async function savedProfiles(page: Page) {
-  return (await calls(page))
-    .filter((c) => c.cmd === "save_profile")
-    .map((c) => c.args.profile as Record<string, unknown>);
-}
-
-/**
- * **"Attach anyway" is remembered.** It used to be forgotten on the spot, so
- * the first real apply refused with "re-attach it first", and re-attaching
- * asked the same question and forgot the answer again. The apply guard reads
- * what is saved here.
- */
-test("an overridden disagreement is saved with the attachment", async ({ page }) => {
-  await connect(page, attached({ flyway_check: () => ["user"] }));
-  await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-  await page.locator('dialog.ask button:has-text("Attach anyway")').click();
   await page.locator(".mig").first().waitFor();
+  const added = (await calls(page)).find((c) => c.cmd === "flyway_add_project")!;
+  expect(added.args).toEqual({ path: PATH });
+  // No environment question and no connection question: the file's own
+  // default is selected, and which connection each environment is gets worked
+  // out from the file.
+  expect(await commandNames(page)).not.toContain("save_profile");
+  expect(last(await infoCalls(page))).toMatchObject({ projectId: "fp1", environment: "uat" });
+});
 
-  const saved = await savedProfiles(page);
-  expect(saved[saved.length - 1].flywayAccepted).toEqual(["user"]);
+test("the header's Add button adds a project too", async ({ page }) => {
+  await installBackend(page, flyway([]));
+  await page.goto("/");
+  await openPane(page);
+  await page.click("#btn-mig-add");
+  await expect(page.locator(".mig-envrow")).toHaveCount(2);
+});
 
-  // Detaching forgets it, so the next project is asked afresh.
-  await page.click(".mig-proj-top button");
-  await page.locator('dialog.ask button:has-text("Detach")').click();
-  await expect(page.locator(".mig-empty")).toBeVisible();
-  const after = await savedProfiles(page);
-  expect(after[after.length - 1].flywayAccepted).toEqual([]);
+test("a project can be removed, and the file is not touched", async ({ page }) => {
+  await withProject(page);
+  await page.click(".mig-project-more");
+  await expect(page.locator("dialog.ask")).toContainText(PATH);
+  await page.locator('dialog.ask button:has-text("Remove from list")').click();
+
+  await expect(page.locator(".mig-empty")).toContainText(/No Flyway projects yet/);
+  const removed = (await calls(page)).find((c) => c.cmd === "flyway_remove_project")!;
+  expect(removed.args).toEqual({ id: "fp1" });
+  expect(await commandNames(page)).not.toContain("save_file");
+});
+
+/** A branch switch can take the file away; the project stays, with the reason. */
+test("a project whose file cannot be read stays listed and says why", async ({ page }) => {
+  await installBackend(
+    page,
+    flyway([
+      project({
+        environments: [],
+        name: null,
+        error: "Cannot read /p/flyway.toml: No such file or directory",
+      }),
+    ]),
+  );
+  await page.goto("/");
+  await openPane(page);
+
+  await expect(page.locator(".mig-project-error")).toContainText("No such file or directory");
+  await expect(page.locator(".mig-project-name")).toHaveText("flyway.toml");
+  expect(await commandNames(page)).not.toContain("flyway_info");
+});
+
+// ------------------------------------------------- which database it is (F2)
+
+/**
+ * Each environment says which of the user's saved connections it is — its
+ * name and colour — or that it is none of them. That is what says "this is
+ * prod" before anybody presses Apply.
+ */
+test("each environment names the saved connection it is, or says it is none", async ({ page }) => {
+  await withProject(page);
+
+  const uat = page.locator('.mig-envrow[data-env="uat"]');
+  await expect(uat.locator(".mig-env-target")).toHaveText("uat.example.com:3306");
+  await expect(uat.locator(".mig-match-name")).toHaveText("UAT");
+  await expect(uat.locator(".conn-dot")).toHaveCSS("background-color", "rgb(239, 68, 68)");
+
+  const dev = page.locator('.mig-envrow[data-env="development"]');
+  await expect(dev.locator(".mig-match")).toHaveText("no saved connection");
+
+  // The selected one is said in full above the list.
+  await expect(page.locator("#mig-env")).toContainText("uat.example.com:3306 as uat_app");
+  await expect(page.locator(".mig-proj-match")).toHaveText("This is your connection “UAT”.");
+});
+
+test("an environment matching several connections shows the first and how many more", async ({
+  page,
+}) => {
+  await withProject(page, {
+    flyway_projects: () => ({
+      projects: [
+        project({
+          environments: [
+            env("uat", "UAT", "uat.example.com", "uat_app", [
+              UAT,
+              { ...UAT, connectionId: "c-2", name: "UAT (browse)" },
+            ]),
+          ],
+        }),
+      ],
+      warning: null,
+    }),
+  });
+  await expect(page.locator(".mig-match-name")).toHaveText("UAT +1");
+});
+
+// --------------------------------------------------- choosing an environment
+
+test("choosing another environment asks Flyway about it, and is remembered", async ({ page }) => {
+  await withProject(page);
+  await page.click('.mig-envrow[data-env="development"]');
+
+  await expect(page.locator('.mig-envrow[data-env="development"]')).toHaveClass(/selected/);
+  await expect(page.locator('.mig-envrow[data-env="uat"]')).not.toHaveClass(/selected/);
+  await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
+
+  const remembered = (await calls(page)).find((c) => c.cmd === "flyway_select_environment")!;
+  expect(remembered.args).toEqual({ id: "fp1", environment: "development" });
+  await expect(page.locator(".mig-proj-match")).toHaveText(
+    "This is not one of your saved connections.",
+  );
 });
 
 /**
- * The connection form has no Flyway fields, and building the profile from the
- * form alone detached the project on every edit.
+ * **A late answer must not land under the wrong environment.** Flyway takes
+ * ten seconds on a real server; clicking another environment in the meantime
+ * and then getting the first one's list beside the second one's Apply button
+ * would be an invitation to apply to a database whose list you were not shown.
  */
-test("editing a connection keeps its project, and re-asks only if the account changed", async ({ page }) => {
-  await connect(page, attached({ flyway_check: () => ["user"] }));
+test("an answer for an environment you have left is dropped", async ({ page }) => {
+  const DEV_ONLY = [{ ...MIGRATIONS[1], description: "dev's own migration" }];
+  await installBackend(
+    page,
+    flyway([project()], {
+      flyway_info: async (a: Record<string, unknown>) => {
+        if (a.environment === "uat") {
+          await new Promise((r) => setTimeout(r, 1500));
+          return MIGRATIONS;
+        }
+        return DEV_ONLY;
+      },
+    }),
+  );
+  await page.goto("/");
   await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-  await page.locator('dialog.ask button:has-text("Attach anyway")').click();
-  await page.locator(".mig").first().waitFor();
+  await page.click('.mig-envrow[data-env="development"]');
 
-  const edit = async (fill?: () => Promise<void>) => {
-    await page.locator(".rail-item").first().click({ button: "right" });
-    await page.locator('.ctx-menu button:has-text("Edit")').click();
-    await page.locator("#conn-dialog").waitFor({ state: "visible" });
-    await fill?.();
-    await page.click("#conn-ok");
-    await page.locator("#conn-dialog").waitFor({ state: "hidden" });
-    const saved = await savedProfiles(page);
-    return saved[saved.length - 1];
-  };
-
-  // A rename touches nothing Flyway cares about.
-  const renamed = await edit(() => page.fill("#conn-dialog input[name=name]", "renamed"));
-  expect(renamed.flywayProject).toBe("/p/flyway.toml");
-  expect(renamed.flywayEnvironment).toBe("uat");
-  expect(renamed.flywayAccepted).toEqual(["user"]);
-
-  // A different account was never what was accepted.
-  const other = await edit(() => page.fill("#conn-dialog input[name=user]", "somebody_else"));
-  expect(other.flywayProject).toBe("/p/flyway.toml");
-  expect(other.flywayAccepted).toEqual([]);
+  await expect(page.locator(".mig .d")).toHaveText("dev's own migration");
+  // Long enough for the slow uat answer to have arrived and been ignored.
+  await page.waitForTimeout(2000);
+  await expect(page.locator(".mig .d")).toHaveText("dev's own migration");
+  await expect(page.locator(".mig")).toHaveCount(1);
 });
 
-/** Once attached, the pane lists what Flyway reported. */
-test("the list shows Flyway's own states, and which environment it is", async ({ page }) => {
-  await connect(page, attached());
-  await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
+/**
+ * Out-of-order decides what an apply will run, so it belongs to one
+ * environment. A shared flag would carry the choice made on dev onto UAT the
+ * moment you clicked across.
+ */
+test("out of order belongs to the environment, not to the window", async ({ page }) => {
+  await withProject(page);
+  await page.locator("#mig-out-of-order").check();
+  await expect.poll(async () => last(await infoCalls(page))?.outOfOrder).toBe(true);
+
+  await page.click('.mig-envrow[data-env="development"]');
+  await expect(page.locator("#mig-out-of-order")).not.toBeChecked();
+  await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
+  expect(last(await infoCalls(page))?.outOfOrder).toBe(false);
+
+  await page.click('.mig-envrow[data-env="uat"]');
+  await expect(page.locator("#mig-out-of-order")).toBeChecked();
+});
+
+// ------------------------------------------------------------ the list
+
+test("the list shows Flyway's own states, grouped", async ({ page }) => {
+  await withProject(page);
 
   await expect(page.locator(".mig")).toHaveCount(3);
   await expect(page.locator('.mig[data-state="failed"] .d')).toHaveText("deliberately broken");
   await expect(page.locator('.mig[data-state="pending"] .d')).toHaveText("add colour");
-  // Grouped by what an apply would do; *named* for what has happened. The
-  // headings used to be "Will run" / "Will not run", which read as a verdict:
-  // an applied migration under "Will not run" looked rejected.
+  // Named for what has happened, not for what an apply would do: "Will not
+  // run" over applied migrations read as a verdict.
   await expect(page.locator('.mig-group[data-group="pending"] .mig-group-title')).toHaveText(
     "Pending",
   );
   await expect(page.locator('.mig-group[data-group="done"] .mig-group-title')).toHaveText(
     "Executed",
   );
-  // The grouping itself did not move: the applied one is still under the
-  // heading an apply will not touch.
   await expect(page.locator('.mig-group[data-group="done"] .mig .d')).toHaveText(
     "create widgets",
   );
-  // §3.5's second half: the environment is never out of sight, because a guard
-  // can only compare what differs.
-  await expect(page.locator("#mig-env")).toContainText("uat");
 });
 
-test("clicking a migration opens its SQL without binding the file", async ({ page }) => {
-  await connect(
-    page,
-    attached({ read_file: () => ({
-      name: "V2__add_colour.sql", path: "/p/V2__add_colour.sql", contents: "ALTER TABLE widgets ADD colour VARCHAR(16);",
-      sizeBytes: 41, encoding: "utf-8", lineEnding: "lf", mtimeMs: 1, readOnly: false,
-    }) }),
-  );
-  await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
+const V2_FILE = {
+  read_file: () => ({
+    name: "V2__add_colour.sql", path: "/p/V2__add_colour.sql",
+    contents: "ALTER TABLE widgets ADD colour VARCHAR(16);",
+    sizeBytes: 41, encoding: "utf-8", lineEnding: "lf", mtimeMs: 1, readOnly: false,
+  }),
+};
 
+test("clicking a migration opens its SQL in a tab, without binding the file", async ({ page }) => {
+  await connect(page, flyway([project()], V2_FILE));
+  await openPane(page);
   await page.locator('.mig[data-state="pending"]').click();
 
-  await expect.poll(async () => (await calls(page)).some((c) => c.cmd === "read_file")).toBe(true);
   await expect(page.locator("#editor .cm-content")).toContainText("ADD colour");
-  // Nothing was run, and nothing was saved over.
-  const names = (await calls(page)).map((c) => c.cmd);
+  const names = await commandNames(page);
   expect(names).not.toContain("run_script");
   expect(names).not.toContain("save_file");
+
+  // And it says it is a migration, not something an MCP client sent.
+  const mark = page.locator("#script-tabs .stab.active .stab-origin");
+  await expect(mark).toHaveAttribute("data-origin", "migration");
+  await expect(mark).toHaveAttribute("title", /Flyway migration/);
+  await expect(mark.locator("svg")).toHaveCount(1);
+});
+
+/** A tab belongs to a connection; with none open there is still SQL to read. */
+test("with nothing connected a migration opens in the viewer", async ({ page }) => {
+  await withProject(page, V2_FILE);
+  await page.locator('.mig[data-state="pending"]').click();
+
+  const viewer = page.locator("dialog.viewer");
+  await expect(viewer.locator("h2")).toHaveText("V2 add colour");
+  await expect(viewer.locator(".viewer-body")).toContainText("ADD colour");
+  expect(await commandNames(page)).not.toContain("run_script");
 });
 
 /** Flyway explains itself well; a paraphrase would replace an instruction. */
 test("Flyway's own refusal is what the pane shows", async ({ page }) => {
-  await connect(
+  await installBackend(
     page,
-    attached({
+    flyway([project()], {
       flyway_info: () => {
         throw new Error(
           "Validate failed: Detected failed migration to version 4. Please remove any " +
@@ -315,114 +415,62 @@ test("Flyway's own refusal is what the pane shows", async ({ page }) => {
       },
     }),
   );
+  await page.goto("/");
   await openPane(page);
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-
   await expect(page.locator(".mig-empty")).toContainText(/run repair to fix the schema history/);
 });
 
-// ------------------------------------------------- what a tab says it is
-
-/**
- * A migration tab claimed to have been "Added by an MCP client", because the
- * provenance mark was a boolean called `external` and MCP was the only thing
- * that could set it. A fact with two possible answers does not fit in a flag.
- */
-test("a migration opens as a migration, not as something an MCP client sent", async ({
-  page,
-}) => {
-  await attach(page, {
-    read_file: () => ({
-      name: "V2__add_colour.sql", path: "/p/V2__add_colour.sql",
-      contents: "ALTER TABLE widgets ADD colour VARCHAR(16);",
-      sizeBytes: 41, encoding: "utf-8", lineEnding: "lf", mtimeMs: 1, readOnly: false,
-    }),
-  });
-  await page.locator('.mig[data-state="pending"]').click();
-
-  const mark = page.locator("#script-tabs .stab.active .stab-origin");
-  await expect(mark).toHaveAttribute("data-origin", "migration");
-  await expect(mark).toHaveAttribute("title", /Flyway migration/);
-  await expect(mark).not.toHaveAttribute("title", /MCP/);
-  // It is an icon from the app's own set, not a stray arrow character.
-  await expect(mark.locator("svg")).toHaveCount(1);
-});
-
-// ------------------------------------------------------------- grouping
-
 test("groups collapse and expand without asking Flyway again", async ({ page }) => {
-  await attach(page);
+  await withProject(page);
   const done = page.locator('.mig-group[data-group="done"]');
-  const runs = async () => (await calls(page)).filter((c) => c.cmd === "flyway_info").length;
 
-  // The long pile starts shut: a project with two hundred applied migrations
-  // should not need scrolling to find the one that is pending.
   await expect(done).toHaveClass(/collapsed/);
   await expect(done.locator(".mig-group-count")).toHaveText("1");
 
-  const before = await runs();
+  const before = (await infoCalls(page)).length;
   await done.locator(".mig-group-head").click();
   await expect(done).not.toHaveClass(/collapsed/);
   await expect(done.locator(".mig-group-head")).toHaveAttribute("aria-expanded", "true");
-  // Redrawn from what is already on screen: collapsing must not start a JVM.
-  expect(await runs()).toBe(before);
+  expect((await infoCalls(page)).length).toBe(before);
 
   await done.locator(".mig-group-head").click();
   await expect(done).toHaveClass(/collapsed/);
 });
 
-/**
- * Out-of-order changes *which* migrations Flyway will run, so the question is
- * asked again with the flag rather than reasoned about here. `Ignored` becomes
- * `Pending` under it, and a confirmation built on a guess would name the wrong
- * versions.
- */
+/** `Ignored` becomes `Pending` under out-of-order, so the question is asked
+ *  again with the flag rather than reasoned about here. */
 test("out of order re-asks Flyway with the flag", async ({ page }) => {
-  await attach(page);
-  const flags = async () =>
-    (await calls(page)).filter((c) => c.cmd === "flyway_info").map((c) => c.args.outOfOrder);
-
-  expect(await flags()).toEqual([false]);
+  await withProject(page);
+  expect((await infoCalls(page)).map((a) => a.outOfOrder)).toEqual([false]);
 
   await page.locator("#mig-out-of-order").check();
-  await expect.poll(async () => (await flags()).length).toBe(2);
-  expect((await flags())[1]).toBe(true);
+  await expect.poll(async () => (await infoCalls(page)).length).toBe(2);
+  expect((await infoCalls(page))[1].outOfOrder).toBe(true);
 });
 
-// -------------------------------------------- seeing and changing the project
+// ---------------------------------------------------- where it is reading
 
-/** There was no way to see which file a connection was pointed at. */
 test("the pane says which project file and folder it is using", async ({ page }) => {
-  await attach(page);
-  await expect(page.locator(".mig-proj-name")).toHaveText("Flyway Connections");
+  await withProject(page);
+  await expect(page.locator(".mig-project-name")).toHaveText("Flyway Connections");
+  await expect(page.locator(".mig-project-name")).toHaveAttribute("title", PATH);
   await expect(page.locator(".mig-proj-where")).toContainText("flyway.toml");
   await expect(page.locator(".mig-proj-where")).toContainText("/p");
-  await expect(page.locator(".mig-proj-name")).toHaveAttribute("title", "/p/flyway.toml");
 });
 
 /**
- * **Where the migrations come from, which the config line does not answer.**
- * Knowing the `flyway.toml` is on a branch says nothing about which folder it
- * points `locations` at, and that is the thing somebody is checking when they
- * wonder why a migration they just wrote is not listed.
- *
- * Taken from the files Flyway reported, never from `locations`: that setting
- * is relative, can be a list, can name a classpath entry and can be overridden
- * per environment, so re-deriving it would produce a plausible path rather
- * than a true one.
+ * Where the migrations come from — taken from the files Flyway reported, never
+ * from `locations`, which is relative, can be a list and can be overridden per
+ * environment.
  */
 test("the pane says which folder the migrations were actually read from", async ({ page }) => {
-  await attach(page);
+  await withProject(page);
   await expect(page.locator(".mig-proj-from")).toContainText("/p");
-  await expect(page.locator(".mig-proj-from")).toHaveAttribute(
-    "title",
-    /reading migrations from/,
-  );
+  await expect(page.locator(".mig-proj-from")).toHaveAttribute("title", /reading migrations from/);
 });
 
 test("several folders are all named, and none is invented", async ({ page }) => {
-  await attach(page, {
+  await withProject(page, {
     flyway_info: () => [
       { ...MIGRATIONS[0], filepath: "/repo/sql/common/V1__create_widgets.sql" },
       { ...MIGRATIONS[1], filepath: "/repo/sql/uat/V2__add_colour.sql" },
@@ -433,179 +481,172 @@ test("several folders are all named, and none is invented", async ({ page }) => 
   await expect(from).toContainText("/repo/sql/uat");
 });
 
-/** No paths to derive one from, so it says nothing rather than guessing. */
 test("a list with no file paths leaves the folder line out", async ({ page }) => {
-  await attach(page, {
-    // The pending one, because the executed group starts collapsed and
-    // `attach` waits for a visible row.
-    flyway_info: () => [{ ...MIGRATIONS[1], filepath: null }],
-  });
+  await withProject(page, { flyway_info: () => [{ ...MIGRATIONS[1], filepath: null }] });
   await expect(page.locator(".mig-proj-from")).toBeHidden();
-});
-
-/**
- * The environment decides which database every migration here would be applied
- * to, and moving between a dev and a UAT one is what this pane gets used for
- * most — it was two clicks deep inside "Change\u2026", where nobody found it.
- */
-test("the environment can be swapped from the line that names it", async ({ page }) => {
-  await attach(page);
-  await expect(page.locator(".mig-proj-swap")).toHaveText("uat");
-
-  await page.click(".mig-proj-swap");
-  await page.locator('dialog.ask button:has-text("Development database")').click();
-
-  await expect.poll(async () => (await attachments(page)).length).toBe(2);
-  expect((await attachments(page))[1].env).toBe("development");
-});
-
-/**
- * Same switch, same guard. The shortcut must not become the way around the
- * check that stops somebody watching one database while changing another.
- */
-test("swapping from that line goes through the guard too", async ({ page }) => {
-  let asked = 0;
-  await attach(page, { flyway_check: () => (asked++ === 0 ? [] : ["host"]) });
-
-  await page.click(".mig-proj-swap");
-  await page.locator('dialog.ask button:has-text("Development database")').click();
-
-  await expect(page.locator("dialog.ask")).toContainText("points somewhere else");
-  await page.locator('dialog.ask button:has-text("Cancel")').click();
-  expect(await attachments(page)).toHaveLength(1);
-  expect((await attachments(page))[0].env).toBe("uat");
-});
-
-test("the environment can be changed, and goes through the same guard", async ({ page }) => {
-  // Agrees at import, disagrees afterwards: the file moved on, which is what
-  // a branch switch does.
-  let asked = 0;
-  await attach(page, { flyway_check: () => (asked++ === 0 ? [] : ["host"]) });
-
-  await page.click(".mig-proj-top button");
-  await page.locator('dialog.ask button:has-text("Change environment")').click();
-  await page.locator('dialog.ask button:has-text("Development database")').click();
-
-  // The guard fires for a change exactly as it does for an import.
-  await expect(page.locator("dialog.ask")).toContainText("points somewhere else");
-  await page.locator('dialog.ask button:has-text("Cancel")').click();
-  expect(await attachments(page)).toHaveLength(1);
-  expect((await attachments(page))[0].env).toBe("uat");
-});
-
-test("detaching clears the project and offers the import again", async ({ page }) => {
-  await attach(page);
-  await page.click(".mig-proj-top button");
-  await page.locator('dialog.ask button:has-text("Detach")').click();
-
-  await expect(page.locator(".mig-empty")).toContainText("No Flyway project is attached");
-  const saved = (await calls(page))
-    .filter((c) => c.cmd === "save_profile")
-    .map((c) => c.args.profile as Record<string, unknown>);
-  const last = saved[saved.length - 1];
-  expect(last.flywayProject).toBeNull();
-  expect(last.flywayEnvironment).toBeNull();
-});
-
-/** A branch switch can take the file away while the connection still names it. */
-test("a project file that has gone says so and offers a way out", async ({ page }) => {
-  // Readable when it is attached, gone by the time the pane re-reads it —
-  // which is exactly what switching branch does to it.
-  let reads = 0;
-  await attach(page, {
-    flyway_read_project: () => {
-      if (reads++ < 2) return PROJECT;
-      throw new Error("Cannot read /p/flyway.toml: No such file or directory");
-    },
-  });
-  await page.click("#btn-mig-refresh");
-
-  await expect(page.locator(".mig-empty")).toContainText("could not be read");
-  await expect(page.locator(".mig-empty button")).toHaveText(/Change project/);
 });
 
 // ------------------------------------------------------------- applying
 
-test("Apply names the versions and runs nothing until it is confirmed", async ({ page }) => {
-  await attach(page, {
-    flyway_info: () => [
-      { version: "1", description: "create widgets", state: "Success", category: "Versioned",
-        kind: "SQL", filepath: "/p/V1.sql", installedOnUtc: "2026-09-10T23:39:43Z",
-        installedBy: "root", executionTimeMs: 12, group: "done" },
-      { version: "5", description: "add index", state: "Pending", category: "Versioned",
-        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
-        executionTimeMs: null, group: "pending" },
-    ],
-  });
+test("Apply names the versions and the target, and runs nothing until confirmed", async ({
+  page,
+}) => {
+  await withProject(page, { flyway_info: () => [MIGRATIONS[0], ...PENDING_ONLY] });
 
   await expect(page.locator("#btn-mig-apply")).toBeEnabled();
   await expect(page.locator("#btn-mig-apply")).toHaveText("Apply 1…");
   await page.click("#btn-mig-apply");
 
-  // Versions, not a count: "Apply 3 migrations?" is a question about
-  // arithmetic; naming them is a question about which changes.
   const ask = page.locator("dialog.ask");
   await expect(ask).toContainText("V5");
   await expect(ask).toContainText("add index");
-  await expect(ask).toContainText("uat");
+  // Which database, as whom, and which of your connections that is.
+  await expect(ask).toContainText("uat.example.com:3306 as uat_app");
+  await expect(ask).toContainText("This is your connection “UAT”.");
 
   await ask.locator('button:has-text("Cancel")').click();
   expect(await commandNames(page)).not.toContain("flyway_migrate");
 });
 
-test("confirming applies, and says what Flyway did", async ({ page }) => {
-  await attach(page, {
-    flyway_info: () => [
-      { version: "5", description: "add index", state: "Pending", category: "Versioned",
-        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
-        executionTimeMs: null, group: "pending" },
+/** Unmatched is allowed — often the migration account — but said plainly. */
+test("applying to an environment that is none of your connections says so", async ({ page }) => {
+  await withProject(page, { flyway_info: () => PENDING_ONLY });
+  await page.click('.mig-envrow[data-env="development"]');
+  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
+  await page.click("#btn-mig-apply");
+
+  const ask = page.locator("dialog.ask");
+  await expect(ask).toContainText("dev.example.com:3306 as dev_app");
+  await expect(ask).toContainText("This is not one of your saved connections.");
+});
+
+/**
+ * F5's UI half. The dialog is built from the file as it reads **when the
+ * dialog opens**, and the command is handed that URL and user so Rust can
+ * refuse if the file moved again before the button was pressed.
+ */
+test("the confirmation describes the file as it reads now, and sends that target back", async ({
+  page,
+}) => {
+  let reads = 0;
+  const moved = project({
+    environments: [
+      env("development", "Development database", "dev.example.com", "dev_app"),
+      env("uat", "UAT database", "uat2.example.com", "uat_app"),
     ],
+  });
+  await withProject(page, {
+    flyway_projects: () => ({ projects: [reads++ === 0 ? project() : moved], warning: null }),
+    flyway_info: () => PENDING_ONLY,
+  });
+
+  await page.click("#btn-mig-apply");
+  const ask = page.locator("dialog.ask");
+  await expect(ask).toContainText("uat2.example.com:3306");
+  await expect(ask).toContainText("This is not one of your saved connections.");
+  await ask.locator('button:has-text("Apply to uat")').click();
+
+  await expect.poll(async () => commandNames(page)).toContain("flyway_migrate");
+  const call = (await calls(page)).find((c) => c.cmd === "flyway_migrate")!;
+  expect(call.args).toEqual({
+    projectId: "fp1",
+    environment: "uat",
+    confirmed: { url: "jdbc:mysql://uat2.example.com:3306/flyway", user: "uat_app" },
+    program: "",
+    outOfOrder: false,
+  });
+});
+
+test("confirming applies, and says what Flyway did", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
     flyway_migrate: () => ({ executed: 1, target: "5" }),
   });
 
   await page.click("#btn-mig-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect.poll(async () => commandNames(page)).toContain("flyway_migrate");
-  const call = (await calls(page)).find((c) => c.cmd === "flyway_migrate")!;
-  expect(call.args.outOfOrder).toBe(false);
-  await expect(page.locator("#grid .empty")).toContainText("applied 1 migration");
+  await expect(page.locator("#grid .empty")).toContainText("applied 1 migration to uat");
   await expect(page.locator("#grid .empty")).toContainText("now at 5");
+  // UAT is not open here, so there is nothing to refresh and it says so.
+  await expect(page.locator("#grid .empty")).toContainText("may need a refresh");
 });
 
-/** F7. Refused in Rust too; this is the courtesy, not the guard. */
-test("a read-only connection is not offered an apply", async ({ page }) => {
-  await attach(page, {
-    save_profile: (a: Record<string, unknown>) => ({
-      profile: { ...(a.profile as object), readOnly: true, rememberPassword: false, needsSecret: false },
-      passwordWarning: null, passwordStored: false,
+/**
+ * F6. The tree beside the pane should show what the apply just made. Every
+ * open connection this environment *is* has its schema cache dropped.
+ */
+test("after an apply, an open connection that is this environment is refreshed", async ({
+  page,
+}) => {
+  let connId = "";
+  await connect(
+    page,
+    flyway([], {
+      flyway_projects: () => ({
+        projects: [
+          project({
+            environments: [
+              env("uat", "UAT", "uat.example.com", "uat_app", [{ ...UAT, connectionId: connId }]),
+            ],
+          }),
+        ],
+        warning: null,
+      }),
+      flyway_info: () => PENDING_ONLY,
+    }),
+  );
+  const connected = (await calls(page)).find((c) => c.cmd === "connect")!;
+  connId = (connected.args.profile as { id: string }).id;
+
+  await openPane(page);
+  await page.click("#btn-mig-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("refreshed the schema of UAT");
+  const refreshed = (await calls(page)).filter((c) => c.cmd === "refresh_schema");
+  expect(refreshed.map((c) => c.args)).toEqual([{ connectionId: connId, db: "poc" }]);
+});
+
+/** F3. Refused in Rust too; this is the courtesy, not the guard. */
+test("a read-only match is not offered an apply or a repair, and says which", async ({
+  page,
+}) => {
+  await withProject(page, {
+    flyway_projects: () => ({
+      projects: [
+        project({
+          environments: [
+            env("uat", "UAT", "uat.example.com", "uat_app", [{ ...UAT, readOnly: true }]),
+          ],
+        }),
+      ],
+      warning: null,
     }),
   });
 
+  await expect(page.locator('.mig-envrow[data-env="uat"] .chip')).toHaveText("read-only");
   await expect(page.locator("#btn-mig-apply")).toBeDisabled();
-  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /read-only/);
+  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /“UAT”.*read-only/);
+  await expect(page.locator("#btn-mig-repair")).toBeDisabled();
+  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /“UAT”.*read-only/);
+  // Not urged either: something is failed, but nothing may be done about it.
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
 });
 
-/** Flyway refuses while a failure sits in the history, so the button says so
- *  rather than spending a confirmation to find out. */
 test("a failed migration blocks apply, and the button explains why", async ({ page }) => {
-  await attach(page);
+  await withProject(page);
   await expect(page.locator("#btn-mig-apply")).toBeDisabled();
   await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /failed/);
   await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /repaired/);
 });
 
-/** Flyway's own words: it names the file, the line and the SQL error. */
 test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
   const FLYWAY_SAID =
     "Failed to execute script V4__deliberately_broken.sql against development environment\n" +
     "Message    : (conn=13) Can't DROP 'weight'; check that column/key exists";
-  await attach(page, {
-    flyway_info: () => [
-      { version: "5", description: "add index", state: "Pending", category: "Versioned",
-        kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
-        executionTimeMs: null, group: "pending" },
-    ],
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
     flyway_migrate: () => {
       throw new Error(FLYWAY_SAID);
     },
@@ -618,53 +659,17 @@ test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
   await expect(page.locator("#grid .empty")).toContainText("V4__deliberately_broken.sql");
 });
 
-/**
- * Out-of-order decides what an apply will run, so it belongs to a connection
- * rather than to the app. One shared flag would carry the choice made on a dev
- * connection onto a UAT one the moment you clicked across — silently changing
- * which migrations the next confirmation would name.
- */
-test("out of order belongs to the connection, not to the window", async ({ page }) => {
-  await attach(page);
-  await page.locator("#mig-out-of-order").check();
-  await expect(page.locator("#mig-out-of-order")).toBeChecked();
-
-  // A second connection, its own project, its own default.
-  await page.click(".rail-add");
-  await page.locator("#conn-dialog").waitFor({ state: "visible" });
-  await page.fill("#conn-dialog input[name=name]", "second");
-  await page.click("#conn-ok");
-  await page.locator("#conn-dialog").waitFor({ state: "hidden" });
-  await page.click(".mig-empty button");
-  await page.locator('dialog.ask button:has-text("UAT database")').click();
-  await page.locator(".mig").first().waitFor();
-
-  await expect(page.locator("#mig-out-of-order")).not.toBeChecked();
-  const flags = (await calls(page))
-    .filter((c) => c.cmd === "flyway_info")
-    .map((c) => c.args.outOfOrder);
-  expect(flags[flags.length - 1]).toBe(false);
-});
-
 // ------------------------------------------------------------- repairing
 
 /**
- * Repair rewrites the schema history, so the first pass hid the button unless
- * something was `Failed`: not a maintenance button somebody might press to see
- * what it does.
- *
- * That was backwards. Two of the three things repair fixes — a checksum that
- * drifted when a migration was edited after it ran, an entry whose file has
- * since been deleted — are reported by `info` as `Success`, so the button
- * was absent in exactly the cases this list cannot see. It is now always
- * offered, and *urged* only when something has asked for it.
+ * Always offered: two of the three things repair fixes — a drifted checksum,
+ * an entry whose file is gone — are reported by `info` as `Success`, so a
+ * button shown only when the list looks wrong is missing when it is needed.
+ * Urged only when something has asked for it.
  */
 test("Repair is always offered, and urged while something has failed", async ({ page }) => {
-  // Failed to begin with, healthy once the list is asked again — which is what
-  // a successful repair looks like from here, and proves the emphasis tracks
-  // the list rather than being decided once.
   let asked = 0;
-  await attach(page, {
+  await withProject(page, {
     flyway_info: () => (asked++ === 0 ? MIGRATIONS : [MIGRATIONS[0], MIGRATIONS[1]]),
   });
   await expect(page.locator("#btn-mig-repair")).toBeVisible();
@@ -672,29 +677,18 @@ test("Repair is always offered, and urged while something has failed", async ({ 
 
   await page.click("#btn-mig-refresh");
   await expect(page.locator('.mig[data-state="failed"]')).toHaveCount(0);
-  // Still offered: this is precisely what a checksum mismatch looks like from
-  // here, and there would otherwise be no way to act on one.
   await expect(page.locator("#btn-mig-repair")).toBeVisible();
   await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
-  // And Apply becomes possible again, which is the point of having repaired.
   await expect(page.locator("#btn-mig-apply")).toBeEnabled();
 });
 
 /**
- * **Repair does two different jobs, and agreeing to one is not agreeing to the
- * other.** With nothing failed there is no entry to remove: it realigns the
- * checksum of a migration whose file was edited after it ran, which leaves the
- * database holding the *original* version while the history claims the edited
- * one ran. Somebody shown only the failed-entry wording would reasonably
- * expect their edit to have been applied.
- *
- * Measured against Flyway 13.5.0 on 2026-09-16: `repairActions` came back as
- * `Aligned applied migration checksums`, and the history row kept its original
- * `installed_on` and `execution_time` — only the checksum column was
- * rewritten.
+ * With nothing failed, repair realigns checksums — which leaves the database
+ * holding the *original* version while the history claims the edited one ran.
+ * Measured against Flyway 13.5.0 on 2026-09-16.
  */
 test("repairing with nothing failed says what realigning a checksum means", async ({ page }) => {
-  await attach(page, {
+  await withProject(page, {
     flyway_info: () => [MIGRATIONS[0], MIGRATIONS[1]],
     flyway_repair: () => ({
       actions: ["Aligned applied migration checksums"],
@@ -706,10 +700,8 @@ test("repairing with nothing failed says what realigning a checksum means", asyn
 
   await page.click("#btn-mig-repair");
   const ask = page.locator("dialog.ask");
-  // Not the failed-entry wording, which would be a lie here.
   await expect(ask).not.toContainText("remove the failed entry");
   await expect(ask).toContainText("realign the checksum");
-  // The part that is easy to misread, said out loud.
   await expect(ask).toContainText("does not run, re-run or undo anything");
   await expect(ask).toContainText("as it was first executed");
 
@@ -718,25 +710,18 @@ test("repairing with nothing failed says what realigning a checksum means", asyn
   await expect(page.locator("#grid .empty")).toContainText("V1");
 });
 
-/**
- * **The confirmation is the feature.** "Repair" sounds like it fixes the
- * database, and it does not — it removes a row from the schema history and
- * leaves every change that migration made in place. Somebody who misreads that
- * will apply again on top of a half-applied migration.
- */
-test("the repair confirmation says what it does not undo", async ({ page }) => {
-  await attach(page);
+/** "Repair" sounds like it fixes the database, and it does not. */
+test("the repair confirmation says where, and what it does not undo", async ({ page }) => {
+  await withProject(page);
   await page.click("#btn-mig-repair");
 
   const ask = page.locator("dialog.ask");
-  await expect(ask).toContainText("uat");
-  // Which entry, by version and description.
+  await expect(ask).toContainText("uat.example.com:3306 as uat_app");
+  await expect(ask).toContainText("This is your connection “UAT”.");
   await expect(ask).toContainText("V3");
   await expect(ask).toContainText("deliberately broken");
-  // What it does not do.
   await expect(ask).toContainText("does not undo");
   await expect(ask).toContainText("still in the database");
-  // And what happens next, so "pending again" is not a surprise.
   await expect(ask).toContainText("pending again");
 
   await ask.locator('button:has-text("Cancel")').click();
@@ -744,34 +729,30 @@ test("the repair confirmation says what it does not undo", async ({ page }) => {
 });
 
 test("confirming repairs, says what Flyway did, and re-reads the list", async ({ page }) => {
-  await attach(page);
-  const before = (await calls(page)).filter((c) => c.cmd === "flyway_info").length;
+  await withProject(page);
+  const before = (await infoCalls(page)).length;
 
   await page.click("#btn-mig-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
   await expect.poll(async () => commandNames(page)).toContain("flyway_repair");
+  const call = (await calls(page)).find((c) => c.cmd === "flyway_repair")!;
+  expect(call.args).toEqual({
+    projectId: "fp1",
+    environment: "uat",
+    confirmed: { url: "jdbc:mysql://uat.example.com:3306/flyway", user: "uat_app" },
+    program: "",
+  });
   await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
   await expect(page.locator("#grid .empty")).toContainText("V3");
-  // The claim the confirmation made, repeated where it is acted on.
   await expect(page.locator("#grid .empty")).toContainText("database itself is unchanged");
-
-  // The list is asked again: after a repair the failed row is gone and the
-  // migration is pending, and a stale pane would still show it as blocking.
-  await expect
-    .poll(async () => (await calls(page)).filter((c) => c.cmd === "flyway_info").length)
-    .toBeGreaterThan(before);
+  await expect.poll(async () => (await infoCalls(page)).length).toBeGreaterThan(before);
 });
 
-/**
- * Success and "nothing needed doing" are different answers. Flyway reports the
- * second as a success with every list empty, and calling that "repaired" tells
- * somebody their problem is fixed when nothing was touched.
- */
 test("a repair that found nothing to do says so, rather than claiming success", async ({
   page,
 }) => {
-  await attach(page, {
+  await withProject(page, {
     flyway_repair: () => ({ actions: [], removed: [], deleted: [], aligned: [] }),
   });
 
@@ -782,25 +763,8 @@ test("a repair that found nothing to do says so, rather than claiming success", 
   await expect(page.locator("#grid .empty")).not.toContainText("Removed");
 });
 
-/** F7's other half. Refused in Rust too; this is the courtesy. */
-test("a read-only connection cannot repair either", async ({ page }) => {
-  await attach(page, {
-    save_profile: (a: Record<string, unknown>) => ({
-      profile: { ...(a.profile as object), readOnly: true, rememberPassword: false, needsSecret: false },
-      passwordWarning: null, passwordStored: false,
-    }),
-  });
-
-  await expect(page.locator("#btn-mig-repair")).toBeVisible();
-  await expect(page.locator("#btn-mig-repair")).toBeDisabled();
-  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /read-only/);
-  // Not urged either: there is a failed migration here, but nothing this
-  // connection is allowed to do about it.
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
-});
-
 test("a refused repair shows Flyway's own message", async ({ page }) => {
-  await attach(page, {
+  await withProject(page, {
     flyway_repair: () => {
       throw new Error("Unable to connect to the database. Check the connection details.");
     },
@@ -813,19 +777,13 @@ test("a refused repair shows Flyway's own message", async ({ page }) => {
 });
 
 /**
- * **The dead end this closes.** A migration edited after it ran is still
- * reported by `info` as `Success`, so the list looks entirely healthy and
- * nothing is failed. Apply is offered, Flyway refuses it with a checksum
- * mismatch and says to run repair. Repair is offered here whatever the list
- * says, so the button exists; this is about pushing it forward at the one
- * moment Flyway itself has named it as the way out.
- *
- * Measured against Flyway 13.5.0 on 2026-09-16; the message below is its own.
+ * A migration edited after it ran is still `Success` in `info`, so the list
+ * looks healthy; Flyway refuses the apply with a checksum mismatch and says to
+ * run repair. That is the one moment to push the button forward.
  */
 test("Repair is urged when Flyway asks for one, even with nothing failed", async ({ page }) => {
-  const HEALTHY = [MIGRATIONS[0], MIGRATIONS[1]]; // done + pending, nothing failed
-  await attach(page, {
-    flyway_info: () => HEALTHY,
+  await withProject(page, {
+    flyway_info: () => [MIGRATIONS[0], MIGRATIONS[1]],
     flyway_migrate: () => {
       throw {
         message:
@@ -841,20 +799,18 @@ test("Repair is urged when Flyway asks for one, even with nothing failed", async
   await page.click("#btn-mig-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  // Flyway's own words, and the button that follows them pushed forward.
   await expect(page.locator("#grid .empty")).toContainText("checksum mismatch");
   await expect(page.locator("#btn-mig-repair")).toBeEnabled();
   await expect(page.locator("#btn-mig-repair")).toHaveClass(/urge/);
   await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /asked for a repair/);
+
+  // Asked for *this* environment. Moving to another must not carry it along.
+  await page.click('.mig-envrow[data-env="development"]');
+  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
 });
 
-/**
- * A refusal that has nothing to do with repair must not offer one. Rewriting a
- * schema history because the database was unreachable would be a real change
- * made in answer to an imaginary problem.
- */
 test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
-  await attach(page, {
+  await withProject(page, {
     flyway_info: () => [MIGRATIONS[0], MIGRATIONS[1]],
     flyway_migrate: () => {
       throw {

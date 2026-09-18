@@ -39,9 +39,6 @@ fn profile(id: &str) -> ConnProfile {
         auth: Default::default(),
         no_password: false,
         read_only: false,
-        flyway_project: None,
-        flyway_environment: None,
-        flyway_accepted: Vec::new(),
     }
 }
 
