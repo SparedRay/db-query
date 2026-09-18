@@ -54,6 +54,16 @@ impl Engine for MysqlEngine {
         schema::mysql_list_columns(server, ns, table).await
     }
 
+    async fn all_columns(
+        &self,
+        server: &ServerConn,
+        ns: &str,
+    ) -> Result<Option<schema::BulkColumns>, String> {
+        schema::mysql_all_columns(server, ns, schema::BULK_COLUMN_CAP)
+            .await
+            .map(Some)
+    }
+
     async fn routines(&self, server: &ServerConn, ns: &str) -> Result<Vec<RoutineRef>, String> {
         schema::mysql_list_routines(server, ns).await
     }

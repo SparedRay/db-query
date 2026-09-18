@@ -140,7 +140,13 @@ pub enum StreamEvent {
 /// Only names and types — the shape, never the contents. Tables whose columns
 /// have not been expanded yet appear by name alone, which is honest: it tells
 /// the model the table exists without inventing columns for it.
-pub fn render_schema(db: &str, schema: &DbSchema) -> String {
+///
+/// **At most `detail_limit` tables are rendered with their columns.** The
+/// cache can now hold every column of a large database, and 385 tables of them
+/// is tens of thousands of tokens in every request. Past the limit a table is
+/// named alone and the prompt says why, so the model asks rather than assumes
+/// the table has no columns.
+pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String {
     let mut out = String::new();
     // An engine without namespaces — a local Elasticsearch cluster has no
     // catalogs — describes itself under the empty one, and "Database ``" reads
@@ -157,6 +163,8 @@ pub fn render_schema(db: &str, schema: &DbSchema) -> String {
         return out;
     }
 
+    let mut detailed = 0;
+    let mut elided = 0;
     for t in tables {
         let kind = if t.kind.to_ascii_uppercase().contains("VIEW") {
             "VIEW"
@@ -164,7 +172,12 @@ pub fn render_schema(db: &str, schema: &DbSchema) -> String {
             "TABLE"
         };
         match schema.columns.get(&t.name) {
+            Some(cols) if !cols.is_empty() && detailed >= detail_limit => {
+                elided += 1;
+                out.push_str(&format!("{kind} `{}`\n", t.name));
+            }
             Some(cols) if !cols.is_empty() => {
+                detailed += 1;
                 out.push_str(&format!("{kind} `{}` (", t.name));
                 let rendered: Vec<String> = cols
                     .iter()
@@ -189,6 +202,13 @@ pub fn render_schema(db: &str, schema: &DbSchema) -> String {
             // loaded" beats listing nothing, which reads as "no columns".
             _ => out.push_str(&format!("{kind} `{}` (columns not loaded)\n", t.name)),
         }
+    }
+    if elided > 0 {
+        out.push_str(&format!(
+            "(Columns are listed for the first {detailed} tables only, to keep this short; \
+             the {elided} tables named without them do have columns. Ask the user for a \
+             table's columns rather than guessing them.)\n"
+        ));
     }
 
     if let Some(routines) = &schema.routines {
@@ -536,7 +556,7 @@ mod tests {
             columns: Default::default(),
             routines: None,
         };
-        let out = render_schema("", &schema);
+        let out = render_schema("", &schema, 60);
         assert!(!out.contains("``"), "{out}");
         assert!(out.starts_with("Schema"), "{out}");
     }
@@ -687,7 +707,7 @@ mod tests {
 
     #[test]
     fn the_schema_renders_names_types_and_keys() {
-        let rendered = render_schema("poc", &schema_fixture());
+        let rendered = render_schema("poc", &schema_fixture(), 60);
         assert!(rendered.contains("TABLE `users`"), "{rendered}");
         assert!(rendered.contains("id int NOT NULL PK"), "{rendered}");
         assert!(
@@ -701,11 +721,23 @@ mod tests {
     /// rather than appear to have none, which would invite invented column names.
     #[test]
     fn a_table_with_no_cached_columns_says_so() {
-        let rendered = render_schema("poc", &schema_fixture());
+        let rendered = render_schema("poc", &schema_fixture(), 60);
         assert!(
             rendered.contains("`user_totals` (columns not loaded)"),
             "{rendered}"
         );
+    }
+
+    /// The cache can hold every column of a large database; the prompt must not.
+    #[test]
+    fn past_the_limit_tables_are_named_and_the_prompt_says_why() {
+        let rendered = render_schema("poc", &schema_fixture(), 0);
+        assert!(!rendered.contains("id int"), "{rendered}");
+        assert!(rendered.contains("TABLE `users`\n"), "{rendered}");
+        assert!(rendered.contains("do have columns"), "{rendered}");
+
+        let full = render_schema("poc", &schema_fixture(), 60);
+        assert!(!full.contains("do have columns"), "{full}");
     }
 
     /// The whole feature rests on this instruction.
@@ -732,7 +764,7 @@ mod tests {
     /// because this is the promise the UI makes on the feature's behalf.
     #[test]
     fn the_prompt_carries_no_row_data() {
-        let rendered = render_schema("poc", &schema_fixture());
+        let rendered = render_schema("poc", &schema_fixture(), 60);
         assert!(
             !rendered.contains("@"),
             "an email address reached the prompt"

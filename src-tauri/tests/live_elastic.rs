@@ -342,7 +342,11 @@ async fn the_assistant_prompt_is_warmed_for_a_cluster_too() {
 
     let server = session::server(&state, C).await.unwrap();
     let cache = server.schema_cache.lock().await;
-    let rendered = db_query_lib::assistant::render_schema("", cache.get("").unwrap());
+    let rendered = db_query_lib::assistant::render_schema(
+        "",
+        cache.get("").unwrap(),
+        db_query_lib::schema::TABLE_DETAIL_BUDGET,
+    );
     assert!(!rendered.contains("columns not loaded"), "{rendered}");
     assert!(rendered.contains("orders"), "{rendered}");
     // The mapped fields, which is the whole point of warming.

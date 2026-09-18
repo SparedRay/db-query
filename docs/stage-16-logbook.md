@@ -865,3 +865,72 @@ It reads the cache and nothing else. Opening the diagnostics dialog must not
 start introspecting a production server.
 
 **748 UI tests on both engines, 385 Rust, 74 live MySQL.**
+
+## 16. The budget was the bug — 2026-09-18
+
+> *"tried on real DB, probably issue is that is not cached based on the table on
+> current script? … Maybe something we can do to reproduce locally is indeed
+> adding more tables to our test db"*
+
+§15.2 paid for itself on the first report. The line was:
+
+```
+maindatabase: 385 tables named, 60 with columns cached (budget 60)
+```
+
+and the log beside it: `schema_names ok in 19770ms`. Sixty per-table queries
+at about 330 ms each. Every table *name* was known; columns were known for the
+first sixty alphabetically, and the tables in the user's script were among the
+other 325 — so autocomplete offered no columns for them and the linter could not
+check them. The suspicion in the message was right.
+
+### 16.1 Why there was a budget, and why it had two jobs
+
+[`TABLE_DETAIL_BUDGET`] capped two different costs with one number:
+
+* **Round trips.** Columns were fetched one table at a time, and a 500-table
+  warehouse would have been 500 of them.
+* **Prompt size.** Sixty tables of columns is a few thousand tokens of
+  assistant prompt; 385 is tens of thousands in every request.
+
+The first is not a property of the data, it is a property of asking one table
+at a time. `information_schema.columns` answers for a whole schema in one query.
+
+### 16.2 What changed
+
+* `Engine::all_columns` — every column in a namespace, one round trip, or
+  `None` for an engine with no such query. MySQL implements it; Elasticsearch
+  keeps the per-table path under the budget, unchanged.
+* `warm` asks for the bulk read first and falls back to per-table fetching only
+  for whatever it did not reach. A complete read also records tables it did not
+  mention as having no columns, so a broken view is not re-asked on every
+  warm-up.
+* **A cap, [`BULK_COLUMN_CAP`] = 50 000 rows**, so a warehouse with half a
+  million columns is a bounded wait. The read is ordered by table and fetches
+  one row past the cap, so "cut short" is distinguishable from "exactly at the
+  cap", and the last, possibly partial, table is dropped rather than kept half
+  described.
+* **The prompt limit moved to where it belongs**: `render_schema` takes a
+  `detail_limit` (still sixty). Tables past it are named without columns, and
+  the prompt says they *do* have columns — otherwise the model reads a bare name
+  as a table with none.
+* Diagnostics no longer prints `(budget 60)`, which now describes only the
+  fallback.
+
+### 16.3 Reproduced locally, as suggested
+
+`dev/seed.sql` now creates `poc_wide`: 75 tables, more than the budget.
+`every_table_is_described_however_many_there_are` asserts on the **last** one
+alphabetically — the one a budget never reaches — that it has columns, that the
+linter catches a wrong column in it, and that the whole database cost **one**
+introspection query. With the bulk read switched off it fails with
+`Warmed { tables: 75, detailed: 60 }`: the user's database in miniature.
+
+`a_capped_bulk_read_never_keeps_half_a_table` pins the cap's behaviour.
+
+The two §15 live tests that used "budget zero" to mean "named but not detailed"
+now reach that state with `list_tables` alone, because for MySQL a budget no
+longer decides it.
+
+**365 Rust unit, 76 live MySQL.** No frontend change, so the UI suite was not
+re-run.
