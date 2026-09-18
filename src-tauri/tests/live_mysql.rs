@@ -2179,6 +2179,59 @@ async fn a_table_beyond_the_budget_still_completes_by_name() {
     );
 }
 
+/// **The false "Unknown table" a real database produces.**
+///
+/// The linter was handed only the tables whose *columns* had been fetched, so
+/// anything past the detail budget was reported as not existing while sitting
+/// in the schema tree. Budget zero is that situation in miniature: every table
+/// named, none detailed.
+#[tokio::test]
+#[ignore]
+async fn a_table_without_cached_columns_is_not_reported_as_missing() {
+    use db_query_lib::lint;
+
+    let state = connected().await;
+    schema::warm(&state, C, "poc", 0).await.unwrap();
+    let server = session::server(&state, C).await.unwrap();
+
+    let lint_schema = schema::lint_schema(&server, Some("poc")).await;
+    assert!(
+        lint_schema.contains_key("users"),
+        "every table is named: {lint_schema:?}"
+    );
+    assert!(
+        lint_schema["users"].is_empty(),
+        "and none is detailed at this budget: {lint_schema:?}"
+    );
+
+    let out = lint::lint(
+        "SELECT anything FROM users WHERE whatever = 1;",
+        &lint_schema,
+        lint::Dialect::mysql(),
+    );
+    let messages: Vec<&str> = out.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages.is_empty(),
+        "a table we have not detailed must produce no complaint at all: {messages:?}"
+    );
+
+    // And once its columns *are* known, the check comes back.
+    schema::list_columns(&state, C, "poc", "users")
+        .await
+        .unwrap();
+    let detailed = schema::lint_schema(&server, Some("poc")).await;
+    let out = lint::lint(
+        "SELECT emial FROM users;",
+        &detailed,
+        lint::Dialect::mysql(),
+    );
+    assert!(
+        out.iter().any(|d| d.message.contains("emial")),
+        "{:?}",
+        out.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
 /// Warming twice must not re-query: the cache is what makes the second question
 /// as fast as the first.
 #[tokio::test]

@@ -798,3 +798,70 @@ asked what the author already believed. Eleven lines of printed output found in
 one run what a dozen assertions had not. **When the complaint is "it feels
 wrong", print what it does before writing another test about what it should
 do.**
+
+## 15. The linter started lying, and why nobody could see it — 2026-09-17
+
+> *"Now when not using fully qualified name is saying that the table does not
+> exist on selected schema. What if we add the info to the diagnostic so I can
+> properly share and we can debug why is not taking it"*
+
+Not an autocomplete bug at all. **§12 switched on a check that had been dead
+since it was written, and the check was wrong.**
+
+### 15.1 Two facts that had been one
+
+`lint_schema` built the linter's world from `DbSchema.columns` — the tables
+whose *columns* had been fetched. `check_schema` then reported `Unknown table`
+for anything not in it.
+
+So the set of tables the linter believed existed was the set whose columns
+happened to be cached: at most [`TABLE_DETAIL_BUDGET`] of them, and before §12,
+only the ones somebody had expanded in the tree. A real database has more than
+sixty tables. Table sixty-one does not exist, says the editor, about a table in
+the tree three inches away.
+
+It had been harmless only because `lint_sql` reads `tab.current_db`, which was
+always `None` — so the schema was always empty and the check never fired. §12
+gave tabs a database, and a dead check woke up wrong.
+
+The fix is to stop conflating two facts:
+
+* **Present** in the map means *this table exists*. Every table is listed now.
+* **Non-empty** means *and we know its columns*. The column checks ask that
+  instead of `contains_key`, because a table listed with no columns has nothing
+  to check a column against, and the old guard would have flagged every column
+  in it.
+
+Three unit tests and one live test, the live one at budget zero — every table
+named, none detailed, which is a real database in miniature. Reverting
+`lint_schema` fails it.
+
+### 15.2 The diagnostic, which is the part worth keeping
+
+The request behind the report is the better half of the message. Every layer of
+this has now been wrong at least once, and **none of it is visible from the
+editor**: the tab on no database, the database cached under another name, the
+tables listed but their columns never fetched. The answer always arrives
+second-hand from another machine.
+
+So Diagnostics grew a section, above Flyway and above the log:
+
+```
+=== schema ===
+connection c1-mf2k9
+  engine   mysql 8.4.0
+  profile db (none set)
+  poc: 312 tables named, 60 with columns cached (budget 60)
+tab t3  db poc
+```
+
+Four questions answered in five lines: is anything connected, does the profile
+name a database, has this database been introspected at all, and does the tab's
+*session* agree with what the UI shows. That last one has already disagreed
+once — the tab said `poc` while `current_db` said `None`, and the lint schema
+came back empty with nobody able to see why.
+
+It reads the cache and nothing else. Opening the diagnostics dialog must not
+start introspecting a production server.
+
+**748 UI tests on both engines, 385 Rust, 74 live MySQL.**

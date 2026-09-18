@@ -1482,8 +1482,12 @@ fn log_notes(entries: Vec<Note>) {
 /// "it failed an hour ago" and "here is what it does when I press it" are
 /// different questions.
 #[tauri::command]
-async fn diagnostics(program: String) -> String {
-    logbook::report(&flywaycli::probe(&program).await)
+async fn diagnostics(state: State<'_, AppState>, program: String) -> Result<String, String> {
+    Ok(logbook::report(
+        &flywaycli::probe(&program).await,
+        &schema::describe_cache(&state).await,
+        &schema::describe_tabs(&state).await,
+    ))
 }
 
 /// Save over an existing file. `expect_mtime` is what we saw when the file was

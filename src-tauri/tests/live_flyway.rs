@@ -146,7 +146,13 @@ async fn the_whole_report_reads_as_one_document() {
     );
     logbook::error("mysql", "connecting to mysql://root:hunter2@db:3306/app");
 
-    let text = logbook::report(&flywaycli::probe(&program()).await);
+    // The schema and tab sections are the app's own state, which this test has
+    // none of; it is about what the Flyway probe puts in the report.
+    let text = logbook::report(
+        &flywaycli::probe(&program()).await,
+        "(nothing connected)\n",
+        "(no tabs registered)\n",
+    );
     println!("{text}");
 
     assert!(text.contains("=== Flyway ==="), "{text}");
