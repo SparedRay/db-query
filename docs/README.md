@@ -23,6 +23,7 @@ decisions that were corrected along the way.
 | 14 | [Read-only connections](stage-14-read-only-connections.md) | 🚧 **Built** — a connection can refuse writes before they are sent, deferred from Stage 2; hands-on pass outstanding |
 | 15 | [Flyway migrations](stage-15-flyway-migrations.md) | 🚧 **Built** — list, read, apply and repair migrations on a connection that has a Flyway project; hands-on pass outstanding |
 | 16 | [A logbook](stage-16-logbook.md) | 🚧 **Built** — what the app did, kept where a user can copy it; Settings → About → Diagnostics |
+| 17 | [Flyway projects stand on their own](stage-17-flyway-projects.md) | 🚧 **Built** — projects listed without a connection; each environment matched to the saved connection it is; hands-on pass outstanding |
 
 ## Rules
 

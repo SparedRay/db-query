@@ -150,15 +150,6 @@ export interface ConnProfile {
    *  password is empty. Distinct from "no password is stored", which cannot
    *  tell "there isn't one" from "we don't know it". */
   noPassword?: boolean;
-  /** Path to a Flyway project's `flyway.toml`, when one is attached. The
-   *  path, never a copy of what is in it: the file lives in a repository and
-   *  changes with the branch. */
-  flywayProject?: string | null;
-  /** Which environment in that project this connection is. */
-  flywayEnvironment?: string | null;
-  /** Disagreements with that environment the user accepted with "Attach
-   *  anyway". The apply guard honours these and still refuses any other. */
-  flywayAccepted?: FlywayDisagreement[];
   /** Refuse statements that change data or schema on this connection.
    *
    *  A guard rail, not a boundary: whoever can open the connection can clear
@@ -354,26 +345,53 @@ export interface ConnInfo {
   capabilities: Capabilities;
 }
 
+/** A saved connection that a Flyway environment *is* — same host, port and
+ *  user. Computed by Rust every time, never stored (Stage 17 §3.2). */
+export interface FlywayMatch {
+  connectionId: string;
+  name: string;
+  colour: string;
+  readOnly: boolean;
+}
+
 /** One environment in a Flyway project. Carries no password: no type on the
  *  Rust side has a field for one. */
 export interface FlywayEnvironment {
   id: string;
   displayName: string | null;
+  /** Echoed back as `FlywayConfirmed` when a write is confirmed. */
+  url: string;
+  user: string | null;
+  /** `host:port`, or the URL when Rust could not read it. */
+  target: string;
+  /** Saved connections this environment is, in rail order. */
+  matches: FlywayMatch[];
+}
+
+/** One added project, as the file reads now. */
+export interface FlywayProjectView {
+  id: string;
+  path: string;
+  /** Last selected environment, else the file's own default. */
+  selected: string | null;
+  name: string | null;
+  outOfOrder: boolean;
+  environments: FlywayEnvironment[];
+  /** Why the file could not be read; the project stays listed. */
+  error: string | null;
+}
+
+export interface FlywayProjectList {
+  projects: FlywayProjectView[];
+  warning: string | null;
+}
+
+/** What the confirmation showed. Rust refuses the write if the file now says
+ *  something else. */
+export interface FlywayConfirmed {
   url: string;
   user: string | null;
 }
-
-export interface FlywayProject {
-  name: string | null;
-  databaseType: string | null;
-  environments: FlywayEnvironment[];
-  /** `[flyway] environment` — what the file currently targets, and so the
-   *  default offered at import. */
-  defaultEnvironment: string | null;
-  outOfOrder: boolean;
-}
-
-export type FlywayDisagreement = "host" | "port" | "user";
 
 /** One migration, in Flyway's own words. `state` is kept as Flyway sends it —
  *  an unknown state should reach the user as itself, not as "other". */
@@ -744,30 +762,52 @@ export const api = {
    */
   reorderProfiles: (ids: string[]) => invoke<void>("reorder_profiles", { ids }),
 
-  // --- Flyway (Stage 15). Everything here reads; nothing changes a database.
+  // --- Flyway (Stage 15, reshaped by Stage 17). Projects stand on their own;
+  // no connection needs to be open. Only migrate and repair change a database.
   /** The chosen path, or null if the picker was dismissed. */
   flywayPickProject: () => invoke<string | null>("flyway_pick_project"),
-  flywayReadProject: (path: string) => invoke<FlywayProject>("flyway_read_project", { path }),
-  /** Which fields disagree between an environment and a connection. Empty
-   *  means they agree; the decision on a disagreement is the user's. */
-  flywayCheck: (connectionId: string, path: string, environment: string) =>
-    invoke<FlywayDisagreement[]>("flyway_check", { connectionId, path, environment }),
-  /** What Flyway says about this connection's project. `program` empty means
-   *  whatever is on the PATH. */
-  /** `outOfOrder` is asked with the same flag an apply would use, so what is
-   *  reported as pending is what Flyway would actually run. */
-  flywayInfo: (connectionId: string, program: string, outOfOrder: boolean) =>
-    invoke<FlywayMigration[]>("flyway_info", { connectionId, program, outOfOrder }),
+  /** Every added project, re-read and matched against saved connections. */
+  flywayProjects: () => invoke<FlywayProjectList>("flyway_projects"),
+  /** Refuses a file that is not a readable project; the same file twice
+   *  returns the one already there. */
+  flywayAddProject: (path: string) => invoke<FlywayProjectView>("flyway_add_project", { path }),
+  /** Forget a project. The file is not touched. */
+  flywayRemoveProject: (id: string) => invoke<void>("flyway_remove_project", { id }),
+  /** Remember the selected environment. A preference only. */
+  flywaySelectEnvironment: (id: string, environment: string) =>
+    invoke<void>("flyway_select_environment", { id, environment }),
+  /** What Flyway says about one environment. `program` empty means whatever
+   *  is on the PATH. `outOfOrder` is asked with the same flag an apply would
+   *  use, so what is reported as pending is what Flyway would actually run. */
+  flywayInfo: (projectId: string, environment: string, program: string, outOfOrder: boolean) =>
+    invoke<FlywayMigration[]>("flyway_info", { projectId, environment, program, outOfOrder }),
 
-  /** Apply the pending migrations. Refuses a read-only connection, and
-   *  re-checks the environment guard before anything runs. */
-  flywayMigrate: (connectionId: string, program: string, outOfOrder: boolean) =>
-    invoke<FlywayApplied>("flyway_migrate", { connectionId, program, outOfOrder }),
+  /** Apply the pending migrations. Rust refuses if the target moved since
+   *  `confirmed` was shown, or if any matching connection is read-only. */
+  flywayMigrate: (
+    projectId: string,
+    environment: string,
+    confirmed: FlywayConfirmed,
+    program: string,
+    outOfOrder: boolean,
+  ) =>
+    invoke<FlywayApplied>("flyway_migrate", {
+      projectId,
+      environment,
+      confirmed,
+      program,
+      outOfOrder,
+    }),
 
   /** Rewrite the schema history so a failed migration stops blocking the rest.
    *  **Changes no data and undoes nothing** — same guards as an apply. */
-  flywayRepair: (connectionId: string, program: string) =>
-    invoke<FlywayRepaired>("flyway_repair", { connectionId, program }),
+  flywayRepair: (
+    projectId: string,
+    environment: string,
+    confirmed: FlywayConfirmed,
+    program: string,
+  ) =>
+    invoke<FlywayRepaired>("flyway_repair", { projectId, environment, confirmed, program }),
 
   /** The whole diagnostic report — build, Flyway probe, log tail — as text
    *  meant to be pasted where somebody can read it. */

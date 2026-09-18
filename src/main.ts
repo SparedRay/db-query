@@ -24,8 +24,9 @@ import {
   type HttpAuth,
   type FlywayApplyFailed,
   type FlywayGroup,
-  type FlywayProject,
-  type FlywayDisagreement,
+  type FlywayEnvironment,
+  type FlywayMatch,
+  type FlywayProjectView,
   type FlywayMigration,
 } from "./api";
 import { copyText } from "./clipboard";
@@ -77,6 +78,8 @@ const els = {
   migrationsPane: $("migrations-pane"),
   migTitle: $("mig-title"),
   migEnv: $("mig-env"),
+  migProjects: $("mig-projects"),
+  btnMigAdd: $<HTMLButtonElement>("btn-mig-add"),
   migList: $("mig-list"),
   btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
   btnMigApply: $<HTMLButtonElement>("btn-mig-apply"),
@@ -233,17 +236,6 @@ let connected = false;
 // threw on every boot before this moved.
 let schemaOpen = true;
 let migrationsOpen = false;
-/**
- * Which connection the migrations pane is showing, so a switch can be noticed.
- *
- * Declared **here**, with the other pane state, and not beside the migrations
- * code at the foot of this file. `refreshMigrationsButton` runs from
- * `syncConnLabel` while this module is still initialising, so a `let` down
- * there is in its temporal dead zone and every boot throws before a single
- * test runs. That is exactly how `migrationsOpen` broke in Stage 15, and this
- * is the second time — see the note in the tracker.
- */
-let migrationsShowing: string | null = null;
 let activeDb: string | null = null;
 
 /**
@@ -626,20 +618,6 @@ els.form.addEventListener("submit", async (e) => {
     kind,
     url,
     auth,
-    // The form has no Flyway fields, and building the profile from the form
-    // alone detached the project on every edit — including the edit somebody
-    // makes to fix the very field an apply was refused over.
-    flywayProject: editing?.profile.flywayProject ?? null,
-    flywayEnvironment: editing?.profile.flywayEnvironment ?? null,
-    // An accepted disagreement was accepted about *this* host, port and user.
-    // Change one and the question has to be asked again.
-    flywayAccepted:
-      editing &&
-      editing.profile.host === host &&
-      editing.profile.port === Number(fd.get("port") ?? 3306) &&
-      editing.profile.user === String(fd.get("user") ?? "").trim()
-        ? (editing.profile.flywayAccepted ?? [])
-        : [],
   };
   // Kept out of the profile on purpose — see ConnProfile's doc comment.
   const typed = String(fd.get("password") ?? "");
@@ -2931,31 +2909,19 @@ function elem(tag: string, cls: string, text?: string): HTMLElement {
   return e;
 }
 
-/** Can this connection host a Flyway project? A capability, never a name. */
-function canHaveMigrations(): boolean {
-  const a = conns?.active();
-  return !!a && !!capsFor(a.profile.id)?.migrations;
-}
-
+/**
+ * The migrations toggle is always offered (Stage 17 §3.1).
+ *
+ * It used to follow the active connection — shown only on an engine Flyway can
+ * drive, and redrawn on every switch — because a project was attached to a
+ * connection. A project stands on its own now, and a pane that changed with
+ * the connection you clicked implied that connection was the one being
+ * migrated, which it never was.
+ */
 function refreshMigrationsButton() {
-  const show = canHaveMigrations();
-  els.btnMigrations.hidden = !show;
-  if (!show && migrationsOpen) toggleMigrations(false);
+  els.btnMigrations.hidden = false;
   els.btnMigrations.setAttribute("aria-pressed", String(migrationsOpen));
   els.btnMigrations.classList.toggle("on", migrationsOpen);
-
-  // **A switch has to redraw the pane.** This runs on every connection change,
-  // and without it the pane kept showing the previous connection's migrations
-  // — under the new connection's name, beside the new connection's schema.
-  // Every one of those rows was an invitation to apply something to a database
-  // it did not belong to.
-  const id = conns?.active()?.profile.id ?? null;
-  if (migrationsOpen && id !== migrationsShowing) {
-    migrationsShowing = id;
-    void renderMigrations();
-  } else if (!migrationsOpen) {
-    migrationsShowing = null;
-  }
 }
 
 function toggleMigrations(open: boolean) {
@@ -2965,10 +2931,7 @@ function toggleMigrations(open: boolean) {
   els.msplit.hidden = !open;
   els.btnMigrations.setAttribute("aria-pressed", String(open));
   els.btnMigrations.classList.toggle("on", open);
-  if (open) {
-    migrationsShowing = conns?.active()?.profile.id ?? null;
-    void renderMigrations();
-  }
+  if (open) void renderMigrations();
 }
 
 /**
@@ -3001,6 +2964,7 @@ els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
 els.btnMigRefresh.onclick = () => void renderMigrations();
 els.btnMigApply.onclick = () => void applyMigrations();
 els.btnMigRepair.onclick = () => void repairMigrations();
+els.btnMigAdd.onclick = () => void addFlywayProject();
 
 /** An empty pane that says what to do next, rather than an empty pane. */
 function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
@@ -3026,18 +2990,18 @@ function migrationsMessage(text: string, action?: { label: string; run: () => vo
 const migrationsCollapsed = new Set<FlywayGroup>(["done"]);
 
 /**
- * Out-of-order, per connection, for this session. Defaulted from each
+ * Out-of-order, per project environment, for this session. Defaulted from each
  * project file.
  *
- * **Keyed by connection and not a single flag**, because it decides what an
- * apply will run. One variable would carry the choice made on a dev connection
- * onto a UAT one the moment you clicked across — silently changing which
- * migrations the next confirmation would name.
+ * **Keyed by environment and not a single flag**, because it decides what an
+ * apply will run. One variable would carry the choice made on dev onto UAT the
+ * moment you clicked across — silently changing which migrations the next
+ * confirmation would name. See `selKey`.
  */
 const migrationsOutOfOrder = new Map<string, boolean>();
 
 /**
- * Connections where Flyway has asked for a repair but nothing is *failed*.
+ * Environments where Flyway has asked for a repair but nothing is *failed*.
  *
  * The case is a migration edited after it ran: `info` still reports it as
  * `Success`, so the list looks healthy, and the only sign is `migrate`
@@ -3083,144 +3047,278 @@ const GROUP_LABELS: Record<FlywayGroup, { title: string; hint: string }> = {
   },
 };
 
-async function renderMigrations() {
-  const active = conns?.active();
-  if (!active) return migrationsMessage("Connect to a database to see its migrations.");
+/**
+ * Every added project, as last read. Re-read when the pane opens and on
+ * Refresh, never remembered across either: the files change with the branch.
+ */
+let flywayProjects: FlywayProjectView[] = [];
 
-  const { flywayProject, flywayEnvironment } = active.profile;
-  els.migEnv.hidden = !flywayProject;
+/**
+ * Which project environment the list below is about. For this session; each
+ * project's own `selected` seeds it.
+ */
+let migSelected: { projectId: string; environment: string } | null = null;
+
+/** One key for everything held per environment. */
+function selKey(projectId: string, environment: string): string {
+  return `${projectId}\u0000${environment}`;
+}
+
+function selectedKey(): string {
+  return migSelected ? selKey(migSelected.projectId, migSelected.environment) : "";
+}
+
+function selectedTarget(): { project: FlywayProjectView; env: FlywayEnvironment } | null {
+  const sel = migSelected;
+  if (!sel) return null;
+  const project = flywayProjects.find((p) => p.id === sel.projectId);
+  const env = project?.environments.find((e) => e.id === sel.environment);
+  return project && env ? { project, env } : null;
+}
+
+/** Keep the selection if it still exists, else the first project's own. */
+function validSelection(
+  sel: { projectId: string; environment: string } | null,
+): { projectId: string; environment: string } | null {
+  const ok =
+    sel &&
+    flywayProjects.some(
+      (p) => p.id === sel.projectId && p.environments.some((e) => e.id === sel.environment),
+    );
+  if (ok) return sel;
+  for (const p of flywayProjects) {
+    const env = p.selected ?? p.environments[0]?.id;
+    if (env && p.environments.some((e) => e.id === env)) {
+      return { projectId: p.id, environment: env };
+    }
+  }
+  return null;
+}
+
+/** Re-read every project, and the matches, without asking Flyway anything. */
+async function loadFlywayProjects(): Promise<boolean> {
+  try {
+    const listed = await api.flywayProjects();
+    flywayProjects = listed.projects;
+    if (listed.warning) results.setMessage(listed.warning);
+    return true;
+  } catch (err) {
+    migrationsMessage(String(err));
+    return false;
+  }
+}
+
+/**
+ * Draw the pane: the projects, then what Flyway says about the selected
+ * environment.
+ *
+ * **Needs no connection.** Flyway connects with the project file's own
+ * settings, so nothing here asks which connection is active (Stage 17 §2).
+ */
+async function renderMigrations() {
   els.btnMigApply.hidden = true;
   els.btnMigRepair.hidden = true;
-  if (!flywayProject || !flywayEnvironment) {
-    els.migTitle.textContent = "Migrations";
+  if (!(await loadFlywayProjects())) return;
+
+  if (!flywayProjects.length) {
+    migSelected = null;
+    els.migProjects.replaceChildren();
+    els.migEnv.hidden = true;
     return migrationsMessage(
-      "No Flyway project is attached to this connection. Import the flyway.toml " +
-        "you open with Flyway Desktop, and this connection will show what it has " +
-        "applied and what is pending.",
-      { label: "Import a project\u2026", run: () => void importFlywayProject() },
+      "No Flyway projects yet. Add the flyway.toml you open with Flyway Desktop " +
+        "to see what each of its environments has applied and what is pending. " +
+        "No connection needs to be open — Flyway connects by itself.",
+      { label: "Add a project…", run: () => void addFlywayProject() },
     );
   }
 
-  els.migTitle.textContent = "Migrations";
+  migSelected = validSelection(migSelected);
+  drawProjects();
+  await showSelected();
+}
 
-  // Re-read the project file every time rather than remembering it. It lives
-  // in a repository and changes with the branch — which is the whole workflow
-  // this was built for — so its name, its environments and its out-of-order
-  // default are only true as of now.
-  let project: FlywayProject | null = null;
+/** The project list: each file, and each of its environments. */
+function drawProjects() {
+  els.migProjects.replaceChildren(
+    ...flywayProjects.map((p) => {
+      const box = elem("div", "mig-project");
+      box.dataset.project = p.id;
+
+      const file = p.path.split(/[\\/]/).pop() ?? p.path;
+      const head = elem("div", "mig-project-head");
+      const name = elem("span", "mig-project-name", p.name || file);
+      name.title = p.path;
+      const more = elem("button", "mini mig-project-more", "⋯") as HTMLButtonElement;
+      more.title = "Remove this project from the list";
+      more.onclick = () => void projectMenu(p);
+      head.append(name, more);
+      box.append(head);
+
+      if (p.error) {
+        // Listed, with the reason. A branch without the file is something to
+        // say, not a reason to forget the project.
+        box.append(elem("div", "mig-project-error", p.error));
+        return box;
+      }
+      box.append(...p.environments.map((e) => environmentRow(p, e)));
+      return box;
+    }),
+  );
+}
+
+function environmentRow(p: FlywayProjectView, e: FlywayEnvironment): HTMLElement {
+  const row = elem("button", "mig-envrow") as HTMLButtonElement;
+  row.dataset.env = e.id;
+  const on = migSelected?.projectId === p.id && migSelected.environment === e.id;
+  row.classList.toggle("selected", on);
+  row.setAttribute("aria-pressed", String(on));
+  row.append(
+    elem("span", "mig-env-id", e.id),
+    elem("span", "mig-env-target", e.target),
+    matchBadge(e),
+  );
+  row.title =
+    `${e.displayName ? `${e.displayName} (${e.id})` : e.id} — ${e.target}` +
+    `${e.user ? ` as ${e.user}` : ""}\n${matchSentence(e)}`;
+  row.onclick = () => void selectEnvironment(p, e);
+  return row;
+}
+
+/**
+ * Which of the user's connections this environment is: its colour and name,
+ * or that it is none of them. This is what says "this is prod" before anybody
+ * presses Apply (Stage 17 §3.2).
+ */
+function matchBadge(e: FlywayEnvironment): HTMLElement {
+  const badge = elem("span", "mig-match");
+  if (!e.matches.length) {
+    badge.classList.add("none");
+    badge.textContent = "no saved connection";
+    return badge;
+  }
+  const dot = elem("span", "conn-dot");
+  dot.style.background = e.matches[0].colour;
+  badge.append(
+    dot,
+    elem(
+      "span",
+      "mig-match-name",
+      e.matches[0].name + (e.matches.length > 1 ? ` +${e.matches.length - 1}` : ""),
+    ),
+  );
+  if (readOnlyMatch(e)) badge.append(elem("span", "chip ro", "read-only"));
+  return badge;
+}
+
+function matchSentence(e: FlywayEnvironment): string {
+  if (!e.matches.length) return "This is not one of your saved connections.";
+  const names = e.matches.map((m) => `“${m.name}”`).join(", ");
+  return e.matches.length === 1
+    ? `This is your connection ${names}.`
+    : `This is your connections ${names}.`;
+}
+
+/** Any read-only match makes the environment read-only: two profiles for one
+ *  database that disagree about writes get the safe answer. */
+function readOnlyMatch(e: FlywayEnvironment): FlywayMatch | undefined {
+  return e.matches.find((m) => m.readOnly);
+}
+
+async function selectEnvironment(p: FlywayProjectView, e: FlywayEnvironment) {
+  if (migSelected?.projectId === p.id && migSelected.environment === e.id) return;
+  migSelected = { projectId: p.id, environment: e.id };
+  drawProjects();
+  // A preference, remembered for next launch. Losing it costs a click.
+  void api.flywaySelectEnvironment(p.id, e.id).catch(() => {});
+  await showSelected();
+}
+
+/**
+ * Ask Flyway about the selected environment.
+ *
+ * **An answer for an environment you have since left is dropped.** Flyway
+ * takes ten seconds on a real server, which is plenty of time to click
+ * another environment — and a late answer drawn under the new one would put
+ * the old one's migrations beside the new one's Apply button.
+ */
+async function showSelected() {
+  els.btnMigApply.hidden = true;
+  els.btnMigRepair.hidden = true;
+  const t = selectedTarget();
+  if (!t) {
+    els.migEnv.hidden = true;
+    return migrationsMessage("Choose an environment above.");
+  }
+  const key = selKey(t.project.id, t.env.id);
+  if (!migrationsOutOfOrder.has(key)) migrationsOutOfOrder.set(key, t.project.outOfOrder);
+  showEnvironmentDetail(t.project, t.env);
+
+  migrationsMessage("Asking Flyway…");
   try {
-    project = await api.flywayReadProject(flywayProject);
-  } catch (err) {
-    showFlywayProject(active.profile.id, flywayProject, flywayEnvironment, null);
-    return migrationsMessage(
-      `This connection's project file could not be read.\n${String(err)}`,
-      { label: "Change project\u2026", run: () => void importFlywayProject() },
-    );
-  }
-  if (!migrationsOutOfOrder.has(active.profile.id)) {
-    migrationsOutOfOrder.set(active.profile.id, project.outOfOrder);
-  }
-  showFlywayProject(active.profile.id, flywayProject, flywayEnvironment, project);
-
-  migrationsMessage("Asking Flyway\u2026");
-  try {
-    const list = await api.flywayInfo(
-      active.profile.id,
-      settings.flywayPath,
-      outOfOrderFor(active.profile.id),
-    );
-    if (!list.length) {
-      return migrationsMessage("This project has no migrations.");
-    }
+    const list = await api.flywayInfo(t.project.id, t.env.id, settings.flywayPath, outOfOrderFor(key));
+    if (selectedKey() !== key) return;
+    if (!list.length) return migrationsMessage("This environment has no migrations.");
     renderMigrationGroups(list);
     showMigrationSource(list);
-    syncApplyButton(active.profile.readOnly ?? false, list);
+    syncApplyButton(t.env, list);
   } catch (err) {
+    if (selectedKey() !== key) return;
     // Flyway's own words. It explains itself well, and paraphrasing would
     // replace an instruction with a summary.
     migrationsMessage(String(err));
   }
 }
 
-/**
- * The project line: which file, which environment, and the way to change
- * either.
- *
- * It exists because there was no way to see any of it. A connection could be
- * pointed at a `flyway.toml` on some branch and the only evidence was the
- * migrations it listed.
- */
-function outOfOrderFor(connectionId: string): boolean {
-  return migrationsOutOfOrder.get(connectionId) ?? false;
+function outOfOrderFor(key: string): boolean {
+  return migrationsOutOfOrder.get(key) ?? false;
 }
 
-function showFlywayProject(
-  connectionId: string,
-  path: string,
-  environment: string,
-  project: FlywayProject | null,
-) {
-  const file = path.split(/[\\/]/).pop() ?? path;
-  const folder = path.slice(0, path.length - file.length - 1);
+/**
+ * The selected environment, said in full: where it points, as whom, which of
+ * your connections that is, and where the files are read from.
+ */
+function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironment) {
+  els.migEnv.hidden = false;
+  const file = project.path.split(/[\\/]/).pop() ?? project.path;
+  const folder = project.path.slice(0, project.path.length - file.length - 1);
 
-  const name = elem("span", "mig-proj-name", project?.name || file);
-  name.title = path;
+  const target = elem("div", "mig-proj-env");
+  target.append(
+    Object.assign(document.createElement("b"), { textContent: env.id }),
+    document.createTextNode(` · ${env.target}${env.user ? ` as ${env.user}` : ""}`),
+  );
 
-  const change = elem("button", "mini", "Change\u2026") as HTMLButtonElement;
-  change.title = "Change the project file or the environment, or detach it";
-  change.onclick = () => void changeFlywayProject(project);
+  const who = elem("div", "mig-proj-match", matchSentence(env));
+  who.classList.toggle("none", env.matches.length === 0);
 
-  const where = elem("div", "mig-proj-where", `Config \u00b7 ${file} in ${folder || "\u2014"}`);
-  where.title = path;
+  const where = elem("div", "mig-proj-where", `Config · ${file} in ${folder || "—"}`);
+  where.title = project.path;
 
   // Filled in by `showMigrationSource` once Flyway has answered, because the
-  // answer is the only honest source for it. Hidden until then rather than
-  // showing a guess.
+  // answer is the only honest source for it.
   const from = elem("div", "mig-proj-from");
   from.hidden = true;
 
-  // The environment is a button, not a caption. It decides which database
-  // every migration in this list would be applied to, and moving between a dev
-  // and a UAT one is what this pane gets used for most \u2014 it should not be
-  // two clicks deep inside "Change\u2026", which is where it was.
-  const env = elem("div", "mig-proj-env");
-  env.append(document.createTextNode("Environment "));
-  if (project) {
-    const swap = elem("button", "mig-proj-swap", environment) as HTMLButtonElement;
-    swap.title = "Switch this connection to another environment in this project";
-    swap.onclick = () => void changeFlywayEnvironment(project);
-    env.append(swap);
-  } else {
-    // The project file could not be read, so there is no list of environments
-    // to choose from. Name the one we are on anyway.
-    env.append(Object.assign(document.createElement("b"), { textContent: environment }));
-  }
-
-  const top = elem("div", "mig-proj-top");
-  top.append(name, change);
-
-  els.migEnv.replaceChildren(top, where, from, env);
+  els.migEnv.replaceChildren(target, who, where, from);
 
   // Out-of-order changes which migrations Flyway will run, so it belongs where
-  // the list is — toggling it re-asks and the answer visibly changes, rather
-  // than being a checkbox buried in a confirmation whose list it would alter.
-  if (project) {
-    const label = document.createElement("label");
-    label.className = "mig-ooo";
-    label.title =
-      "Apply a migration whose version is lower than one already applied. " +
-      "The default comes from the project file.";
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.id = "mig-out-of-order";
-    box.checked = migrationsOutOfOrder.get(connectionId) ?? project.outOfOrder;
-    box.onchange = () => {
-      migrationsOutOfOrder.set(connectionId, box.checked);
-      void renderMigrations();
-    };
-    label.append(box, document.createTextNode("Out of order"));
-    els.migEnv.append(label);
-  }
+  // the list is — toggling it re-asks and the answer visibly changes.
+  const key = selKey(project.id, env.id);
+  const label = document.createElement("label");
+  label.className = "mig-ooo";
+  label.title =
+    "Apply a migration whose version is lower than one already applied. " +
+    "The default comes from the project file.";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "mig-out-of-order";
+  box.checked = outOfOrderFor(key);
+  box.onchange = () => {
+    migrationsOutOfOrder.set(key, box.checked);
+    void showSelected();
+  };
+  label.append(box, document.createTextNode("Out of order"));
+  els.migEnv.append(label);
 }
 
 /**
@@ -3230,9 +3328,7 @@ function showFlywayProject(
  * setting can be relative to the working directory, can be a list, can name a
  * classpath entry and can be overridden per environment; re-implementing its
  * resolution would produce a path that is merely plausible, which is worse
- * than none at all. Every migration in the list carries the full path Flyway
- * actually read, so the folders are a fact rather than a reconstruction \u2014
- * the same reason `flyway.rs` refuses to parse `locations` at all.
+ * than none at all.
  */
 function showMigrationSource(list: FlywayMigration[]) {
   const el = els.migEnv.querySelector(".mig-proj-from") as HTMLElement | null;
@@ -3248,88 +3344,75 @@ function showMigrationSource(list: FlywayMigration[]) {
         }),
     ),
   ];
-  // A repeatable-only project, or a Flyway that reported no paths: say nothing
-  // rather than "Migrations \u00b7".
   el.hidden = folders.length === 0;
   if (!folders.length) return;
-  el.textContent = `Migrations \u00b7 ${folders.join("  \u00b7  ")}`;
+  el.textContent = `Migrations · ${folders.join("  ·  ")}`;
   el.title =
     folders.length === 1
       ? `Flyway is reading migrations from ${folders[0]}`
       : `Flyway is reading migrations from:\n${folders.join("\n")}`;
 }
 
-/** Offer the three things that can be done to an attached project. */
-async function changeFlywayProject(project: FlywayProject | null) {
-  const active = conns?.active();
-  if (!active) return;
-  const what = await choose(
-    "This connection's Flyway project",
-    active.profile.flywayProject ?? "",
-    [
-      { value: "environment", label: "Change environment\u2026", primary: !!project },
-      { value: "project", label: "Change project file\u2026" },
-      { value: "detach", label: "Detach", danger: true },
-    ],
-  );
-  if (what === "project") return void importFlywayProject();
-  if (what === "environment") return void changeFlywayEnvironment(project);
-  if (what === "detach") {
-    const profile = {
-      ...active.profile,
-      flywayProject: null,
-      flywayEnvironment: null,
-      flywayAccepted: [],
-    };
-    const outcome = await api.saveProfile(profile, null);
-    active.profile = { ...profile, ...outcome.profile };
-    conns.upsert(active);
-    // Nothing is attached any more, so the next project's own default should
-    // win rather than this one's leftover choice.
-    migrationsOutOfOrder.delete(active.profile.id);
-    await renderMigrations();
-  }
-}
-
-/**
- * Pick a different environment in the project already attached.
- *
- * Goes through the same guard as an import, because it is the same risk: the
- * environment decides which database Flyway connects to, and picking the wrong
- * one means watching this connection while changing another.
- */
-async function changeFlywayEnvironment(project: FlywayProject | null) {
-  const active = conns?.active();
-  if (!active || !project || !active.profile.flywayProject) return;
-  const path = active.profile.flywayProject;
+/** What can be done to a project from its row. The file is never touched. */
+async function projectMenu(p: FlywayProjectView) {
+  const what = await choose(p.name || "Flyway project", p.path, [
+    { value: "cancel", label: "Cancel", primary: true },
+    { value: "remove", label: "Remove from list", danger: true },
+  ]);
+  if (what !== "remove") return;
   try {
-    const chosen = await choose(
-      project.name ? `Environment in "${project.name}"` : "Which environment?",
-      "A Flyway environment is a database. This connection is one of them, and " +
-        "that is what migrations will be applied to.",
-      project.environments.map((e) => ({
-        value: e.id,
-        label: e.displayName ? `${e.displayName} (${e.id})` : e.id,
-        primary: e.id === active.profile.flywayEnvironment,
-      })),
-    );
-    if (!chosen || chosen === active.profile.flywayEnvironment) return;
-    const accepted = await agreedOrOverridden(active.profile.id, path, chosen);
-    if (!accepted) return;
-
-    const profile = {
-      ...active.profile,
-      flywayProject: path,
-      flywayEnvironment: chosen,
-      flywayAccepted: accepted,
-    };
-    const outcome = await api.saveProfile(profile, null);
-    active.profile = { ...profile, ...outcome.profile };
-    conns.upsert(active);
+    await api.flywayRemoveProject(p.id);
+    for (const key of [...migrationsOutOfOrder.keys()]) {
+      if (key.startsWith(`${p.id}\u0000`)) migrationsOutOfOrder.delete(key);
+    }
+    if (migSelected?.projectId === p.id) migSelected = null;
     await renderMigrations();
   } catch (err) {
     results.setMessage(String(err));
   }
+}
+
+/**
+ * Add a project. **Asks nothing about connections**: which of them each
+ * environment is gets worked out from the file, every time it is read.
+ */
+async function addFlywayProject() {
+  try {
+    const path = await api.flywayPickProject();
+    if (!path) return;
+    const added = await api.flywayAddProject(path);
+    const env = added.selected ?? added.environments[0]?.id;
+    if (env) migSelected = { projectId: added.id, environment: env };
+    await renderMigrations();
+  } catch (err) {
+    results.setMessage(String(err));
+  }
+}
+
+/**
+ * Drop the cached schema of every open connection this environment is, so the
+ * tree and autocomplete show what the apply just made (F6).
+ *
+ * Every database of the connection, not only the URL's: a migration names
+ * whichever schemas it likes, and the URL's database is only Flyway's default.
+ * Dropping a cache is free; the next expand fetches again.
+ */
+async function refreshMatchedSchemas(env: FlywayEnvironment): Promise<string[]> {
+  const refreshed: string[] = [];
+  for (const m of env.matches) {
+    const entry = conns?.get(m.connectionId);
+    if (!entry?.connected) continue;
+    await Promise.all(
+      entry.databases.map((db) => api.refreshSchema(entry.profile.id, db).catch(() => {})),
+    );
+    refreshed.push(m.name);
+    if (conns?.active()?.profile.id === entry.profile.id) {
+      renderDatabases(entry.profile.id, entry.databases);
+      schemaMapFor = "";
+      void loadCompletionSchema();
+    }
+  }
+  return refreshed;
 }
 
 /** Draw the three groups, each collapsible, each counted. */
@@ -3393,15 +3476,17 @@ function migrationRow(m: FlywayMigration): HTMLElement {
  * Offer Apply, or say why not.
  *
  * **Three states, and the difference between them is the point.** Hidden when
- * there is no project. Disabled with a reason when there is nothing to run,
- * when the connection is read-only, or when a failure is blocking everything:
+ * nothing is selected. Disabled with a reason when there is nothing to run,
+ * when a matching connection is read-only, or when a failure is blocking everything:
  * a button that is simply missing makes people wonder whether the feature
  * exists, and one that is enabled and then refuses wastes a confirmation.
  *
  * The refusal is repeated in Rust, which is where it counts \u2014 this is the
  * courtesy, not the guard.
  */
-function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
+function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
+  const ro = readOnlyMatch(env);
+  const readOnly = !!ro;
   const pending = list.filter((m) => m.group === "pending");
   const failed = list.filter((m) => m.group === "failed");
 
@@ -3417,7 +3502,7 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
   // What keeps it safe is the confirmation, not the hiding: it names what will
   // be rewritten and what will not be undone, and it differs between the two
   // situations.
-  const asked = migrationsRepairAsked.has(conns?.active()?.profile.id ?? "");
+  const asked = migrationsRepairAsked.has(selectedKey());
   els.btnMigRepair.hidden = false;
   els.btnMigRepair.disabled = readOnly;
   // Available always, urged only when something has actually asked for it \u2014
@@ -3425,7 +3510,8 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
   // an apply.
   els.btnMigRepair.classList.toggle("urge", !readOnly && (failed.length > 0 || asked));
   els.btnMigRepair.title = readOnly
-    ? "This connection is marked read-only. Editing the schema history is a write."
+    ? `This is your connection “${ro.name}”, which is marked read-only. ` +
+      "Editing the schema history is a write."
     : failed.length
       ? `Clear the failed entry for ${failed.map((m) => m.version ?? "?").join(", ")}`
       : asked
@@ -3439,7 +3525,8 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
     : "Apply\u2026";
 
   const reason = readOnly
-    ? "This connection is marked read-only. Edit it and clear \u201cRead-only\u201d to allow writes."
+    ? `This is your connection “${ro.name}”, which is marked read-only. ` +
+      "Edit it and clear “Read-only” to allow writes."
     : failed.length
       ? `Version ${failed[0].version ?? "?"} failed, and Flyway will not apply anything until it is repaired.`
       : pending.length === 0
@@ -3464,41 +3551,51 @@ function syncApplyButton(readOnly: boolean, list: FlywayMigration[]) {
  * about which changes.
  */
 async function applyMigrations() {
-  const active = conns?.active();
-  if (!active) return;
-  const outOfOrder = outOfOrderFor(active.profile.id);
+  const target = await freshTarget();
+  if (!target) return;
+  const { project, env } = target;
+  const key = selKey(project.id, env.id);
+  const outOfOrder = outOfOrderFor(key);
   const list = await api
-    .flywayInfo(active.profile.id, settings.flywayPath, outOfOrder)
+    .flywayInfo(project.id, env.id, settings.flywayPath, outOfOrder)
     .catch(() => null);
-  if (!list) return void renderMigrations();
+  if (!list) return void showSelected();
 
   const pending = list.filter((m) => m.group === "pending");
-  if (!pending.length) return void renderMigrations();
+  if (!pending.length) return void showSelected();
 
   const named = pending
     .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
     .join("\n");
   const go = await choose(
     `Apply ${pending.length} migration${pending.length === 1 ? "" : "s"}?`,
-    `Flyway will run these against "${active.profile.flywayEnvironment}" ` +
-      `(${active.profile.name}), in this order:\n\n${named}\n\n` +
+    `Flyway will run these against ${describeTarget(env)}\n\nIn this order:\n\n${named}\n\n` +
       (outOfOrder ? "Out of order is on.\n\n" : "") +
       "This changes the database. It cannot be undone from here.",
     [
       { value: "cancel", label: "Cancel", primary: true },
-      { value: "go", label: `Apply to ${active.profile.flywayEnvironment}`, danger: true },
+      { value: "go", label: `Apply to ${env.id}`, danger: true },
     ],
   );
   if (go !== "go") return;
 
   els.btnMigApply.disabled = true;
-  migrationsMessage("Flyway is applying\u2026");
+  migrationsMessage("Flyway is applying…");
   try {
-    const out = await api.flywayMigrate(active.profile.id, settings.flywayPath, outOfOrder);
+    const out = await api.flywayMigrate(
+      project.id,
+      env.id,
+      { url: env.url, user: env.user },
+      settings.flywayPath,
+      outOfOrder,
+    );
+    const refreshed = await refreshMatchedSchemas(env);
     results.setMessage(
-      `Flyway applied ${out.executed} migration${out.executed === 1 ? "" : "s"}` +
-        (out.target ? ` \u00b7 now at ${out.target}` : "") +
-        ". The schema tree may need a refresh.",
+      `Flyway applied ${out.executed} migration${out.executed === 1 ? "" : "s"} to ${env.id}` +
+        (out.target ? ` · now at ${out.target}` : "") +
+        (refreshed.length
+          ? ` · refreshed the schema of ${refreshed.join(", ")}.`
+          : ". The schema tree may need a refresh."),
     );
   } catch (err) {
     // Flyway's own words, verbatim. It names the file, the line and the SQL
@@ -3508,9 +3605,39 @@ async function applyMigrations() {
     // And if Flyway said the way out is a repair, make one reachable. It is
     // the only signal for a checksum mismatch, which shows up nowhere in the
     // list.
-    if (failure.suggestsRepair) migrationsRepairAsked.add(active.profile.id);
+    if (failure.suggestsRepair) migrationsRepairAsked.add(key);
   }
-  await renderMigrations();
+  await showSelected();
+}
+
+/**
+ * The selected environment as the file reads **now**.
+ *
+ * A confirmation is a description of a database, and it must describe the one
+ * that will be written to. So the projects are re-read before every dialog —
+ * and Rust checks the same URL and user again when the button is pressed.
+ */
+async function freshTarget(): Promise<{ project: FlywayProjectView; env: FlywayEnvironment } | null> {
+  const before = selectedKey();
+  if (!before || !(await loadFlywayProjects())) return null;
+  const t = selectedTarget();
+  if (!t || selectedKey() !== before) {
+    await renderMigrations();
+    return null;
+  }
+  drawProjects();
+  return t;
+}
+
+/**
+ * `"uat" — uat.example.com:3306 as cftconn_uat_app.` and which of the user's
+ * connections that is. Every write dialog opens with it.
+ */
+function describeTarget(env: FlywayEnvironment): string {
+  return (
+    `“${env.id}” — ${env.target}${env.user ? ` as ${env.user}` : ""}.\n` +
+    matchSentence(env)
+  );
 }
 
 /**
@@ -3535,21 +3662,24 @@ async function applyMigrations() {
  * have been applied.
  */
 async function repairMigrations() {
-  const active = conns?.active();
-  if (!active) return;
+  const target = await freshTarget();
+  if (!target) return;
+  const { project, env } = target;
+  const key = selKey(project.id, env.id);
 
   const list = await api
-    .flywayInfo(active.profile.id, settings.flywayPath, outOfOrderFor(active.profile.id))
+    .flywayInfo(project.id, env.id, settings.flywayPath, outOfOrderFor(key))
     .catch(() => null);
-  if (!list) return void renderMigrations();
+  if (!list) return void showSelected();
   const failed = list.filter((m) => m.group === "failed");
 
   const named = failed
     .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
     .join("\n");
   const go = await choose(
-    `Repair the schema history of "${active.profile.flywayEnvironment}"?`,
-    failed.length
+    `Repair the schema history of “${env.id}”?`,
+    `${describeTarget(env)}\n\n` +
+    (failed.length
       ? `Flyway will remove the failed entry from this environment's schema ` +
         `history:\n\n${named}\n\n` +
         "It does not undo anything the migration already did. If it ran some of " +
@@ -3572,10 +3702,10 @@ async function repairMigrations() {
         "tables. An edited migration stays applied exactly as it was first " +
         "executed \u2014 the edit is recorded as though it had always been " +
         "there, not applied to the database.\n\n" +
-        "You will be told what it changed.",
+        "You will be told what it changed."),
     [
       { value: "cancel", label: "Cancel", primary: true },
-      { value: "go", label: `Repair ${active.profile.flywayEnvironment}`, danger: true },
+      { value: "go", label: `Repair ${env.id}`, danger: true },
     ],
   );
   if (go !== "go") return;
@@ -3583,8 +3713,13 @@ async function repairMigrations() {
   els.btnMigRepair.disabled = true;
   migrationsMessage("Flyway is repairing\u2026");
   try {
-    const out = await api.flywayRepair(active.profile.id, settings.flywayPath);
-    migrationsRepairAsked.delete(active.profile.id);
+    const out = await api.flywayRepair(
+      project.id,
+      env.id,
+      { url: env.url, user: env.user },
+      settings.flywayPath,
+    );
+    migrationsRepairAsked.delete(key);
     const touched = [...out.removed, ...out.deleted, ...out.aligned];
     results.setMessage(
       touched.length === 0
@@ -3600,7 +3735,7 @@ async function repairMigrations() {
     // Flyway's own words, verbatim.
     results.setMessage(String(err));
   }
-  await renderMigrations();
+  await showSelected();
 }
 
 /**
@@ -3618,95 +3753,17 @@ async function openMigration(m: import("./api").FlywayMigration) {
   }
   try {
     const f = await api.readFile(m.filepath);
+    const title = `${m.version ? `V${m.version}` : ""} ${m.description}`.trim();
+    // A tab belongs to a connection, and projects no longer need one open
+    // (Stage 17). With nothing connected there is still something to read, so
+    // it opens in the viewer, which never runs or saves anything either.
+    if (!conns?.active()) return showValue(title, f.contents);
     const tab = tabs.create({
       contents: f.contents,
-      title: `${m.version ? `V${m.version}` : ""} ${m.description}`.trim(),
+      title,
       origin: "migration",
     });
     tabs.activate(tab.id);
-  } catch (err) {
-    results.setMessage(String(err));
-  }
-}
-
-/**
- * Does this environment agree with the connection \u2014 and if not, does the
- * user insist?
- *
- * Shared by importing a project and by changing the environment on one already
- * attached, because they carry exactly the same risk: the environment decides
- * which database Flyway connects to, and `migrate` uses the project's own URL
- * rather than this connection's.
- */
-async function agreedOrOverridden(
-  connectionId: string,
-  path: string,
-  environment: string,
-): Promise<FlywayDisagreement[] | null> {
-  const disagree = await api.flywayCheck(connectionId, path, environment);
-  if (!disagree.length) return [];
-
-  const fields = disagree.join(", ");
-  const go = await choose(
-    "This environment points somewhere else",
-    `"${environment}" and this connection disagree about the ${fields}. Flyway ` +
-      `connects using the project's own settings, so migrations would be ` +
-      `applied to the environment's ${fields}, not to this connection's. ` +
-      `Attach it anyway only if you know the two are the same database.`,
-    [
-      { value: "cancel", label: "Cancel", primary: true },
-      { value: "go", label: "Attach anyway", danger: true },
-    ],
-  );
-  // What was accepted is *saved*, and the apply guard reads it. It used to be
-  // forgotten on the spot, so the apply straight after "Attach anyway" refused
-  // with "re-attach it first" — which asked again and forgot again.
-  return go === "go" ? disagree : null;
-}
-
-/**
- * Attach a Flyway project to this connection.
- *
- * The guard is the point: `flyway migrate -environment=x` connects to the URL
- * *in the TOML*, not to this connection, so attaching the wrong environment
- * would mean watching one database while changing another. A disagreement is
- * reported field by field and can be overridden — deliberately, once, in front
- * of the evidence — because a connection may legitimately be stored with a
- * different account from the migration user.
- */
-async function importFlywayProject() {
-  const active = conns?.active();
-  if (!active) return;
-  try {
-    const path = await api.flywayPickProject();
-    if (!path) return;
-
-    const project = await api.flywayReadProject(path);
-    const chosen = await choose(
-      project.name ? `Environment in "${project.name}"` : "Which environment?",
-      "A Flyway environment is a database. This connection is one of them, and " +
-        "that is what migrations will be applied to.",
-      project.environments.map((e) => ({
-        value: e.id,
-        label: e.displayName ? `${e.displayName} (${e.id})` : e.id,
-        primary: e.id === project.defaultEnvironment,
-      })),
-    );
-    if (!chosen) return;
-
-    const accepted = await agreedOrOverridden(active.profile.id, path, chosen);
-    if (!accepted) return;
-
-    const profile = {
-      ...active.profile,
-      flywayProject: path,
-      flywayEnvironment: chosen,
-      flywayAccepted: accepted,
-    };
-    const outcome = await api.saveProfile(profile, null);
-    active.profile = { ...profile, ...outcome.profile };
-    conns.upsert(active);
-    await renderMigrations();
   } catch (err) {
     results.setMessage(String(err));
   }

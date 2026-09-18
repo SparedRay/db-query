@@ -232,7 +232,7 @@ impl Disagreement {
     }
 }
 
-/// What a connection is about to be asked to do. Only the read-only sentence
+/// What is about to be done to an environment. Only the refusal's sentence
 /// differs, and it differs in the one word that says what was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Write {
@@ -249,77 +249,155 @@ impl Write {
     }
 }
 
+/// A saved connection that an environment points at.
+///
+/// **Computed, never stored** (Stage 17 §3.2). The file changes with the
+/// branch, so a remembered match would be a claim about whatever was checked
+/// out when it was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Match {
+    pub connection_id: String,
+    pub name: String,
+    pub colour: String,
+    pub read_only: bool,
+}
+
+/// Every saved connection this environment is — same host, port and user.
+///
+/// Only MySQL profiles are candidates: an Elasticsearch profile has no host in
+/// the sense a JDBC URL means, and a match against one would be a coincidence.
+/// In the order the rail shows them, so "the first match" is the one the user
+/// would find first.
+pub fn matches(env: &Environment, profiles: &[crate::session::ConnProfile]) -> Vec<Match> {
+    profiles
+        .iter()
+        .filter(|p| p.kind == crate::session::EngineKind::Mysql)
+        .filter(|p| disagreements(env, p).is_empty())
+        .map(|p| Match {
+            connection_id: p.id.clone(),
+            name: p.name.clone(),
+            colour: p.colour.clone(),
+            read_only: p.read_only,
+        })
+        .collect()
+}
+
+/// What the user was shown, and agreed to, in the confirmation.
+///
+/// Handed back to the command so it can refuse if the file now says something
+/// else. The dialog is built from the file as it read when the dialog opened; a
+/// branch switched before the button was pressed would otherwise make the
+/// confirmation a description of a different database.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Confirmed {
+    pub url: String,
+    pub user: Option<String>,
+}
+
 /// Why a write must not go ahead, or `None`.
 ///
 /// Shared by apply and repair. Repair writes less than apply does — one table
-/// rather than a schema — but it writes to the *wrong* database just as
-/// easily, so it is asked the same two questions.
+/// rather than a schema — but to the same database, so it is asked the same
+/// questions.
 ///
-/// **Extracted from the commands so the guards are testable without a running
-/// app.** Each of these is the difference between changing the database you
-/// are looking at and changing a different one, and none of them should be
-/// reachable only through a Tauri handle.
+/// Three refusals, in this order:
 ///
-/// The order matters. Read-only is a decision the user made and can unmake, so
-/// it is said first and on its own terms; a disagreement is a fact about two
-/// files that drifted apart, and it names the fields.
+///   1. **The environment is gone** — renamed or removed on this branch.
+///   2. **The target moved** since the confirmation was shown.
+///   3. **A matching connection is read-only.** If *any* is, this is: two
+///      profiles for the same server and account that disagree about whether
+///      writes are allowed get the safe answer, not the convenient one.
+///
+/// An environment that matches no saved connection is **not** refused. That is
+/// often the migration account, which people do not browse with, and refusing
+/// it would rebuild the dead end Stage 16 §17.2 removed. The confirmation says
+/// plainly that the target is not one of your connections.
 pub fn write_refusal(
     project: &Project,
-    profile: &crate::session::ConnProfile,
     environment: &str,
+    confirmed: &Confirmed,
+    profiles: &[crate::session::ConnProfile],
     what: Write,
 ) -> Option<String> {
-    if profile.read_only {
+    let Some(env) = project.environment(environment) else {
         return Some(format!(
-            r#"This connection is marked read-only, so it will not {}. Edit the connection and clear "Read-only" to allow writes."#,
+            "This project no longer has an environment called \"{environment}\". \
+             It may have been renamed or removed on this branch."
+        ));
+    };
+
+    if env.url != confirmed.url || env.user != confirmed.user {
+        return Some(format!(
+            "\"{environment}\" changed in the project file after you confirmed \
+             \u{2014} it now points at {}{}. Nothing was run. Refresh and check the \
+             target again.",
+            describe_target(env),
+            env.user
+                .as_deref()
+                .map(|u| format!(" as {u}"))
+                .unwrap_or_default(),
+        ));
+    }
+
+    if let Some(ro) = matches(env, profiles).into_iter().find(|m| m.read_only) {
+        return Some(format!(
+            r#""{environment}" is your connection "{}", which is marked read-only, so this will not {}. Edit that connection and clear "Read-only" to allow writes."#,
+            ro.name,
             what.phrase()
         ));
     }
-
-    let Some(env) = project.environment(environment) else {
-        return Some(format!(
-            "This project no longer has an environment called \"{environment}\".              It may have been renamed or removed since it was attached."
-        ));
-    };
-
-    // Checked **again**, not only at import. The TOML lives in a repository
-    // and changes with the branch — which is the actual workflow this was
-    // built for — so the file that was checked is not necessarily the file
-    // about to be used.
-    //
-    // Minus what the user accepted when attaching. "Attach anyway" used to be
-    // forgotten the moment it was clicked, so the apply that followed refused
-    // with "re-attach it first" — and re-attaching asked the same question and
-    // forgot the answer again. What was accepted is remembered by *field*, so a
-    // file that later moves to another host is still refused.
-    let disagreements: Vec<Disagreement> = disagreements(env, profile)
-        .into_iter()
-        .filter(|d| !profile.flyway_accepted.contains(d))
-        .collect();
-    if disagreements.is_empty() {
-        return None;
-    }
-    let fields: Vec<&str> = disagreements.iter().map(|d| d.field()).collect();
-    let verb = if fields.len() == 1 {
-        "differs"
-    } else {
-        "differ"
-    };
-    let fields = fields.join(" and ");
-    Some(format!(
-        // "user differs" for one and "host and user differ" for two: a
-        // guard that cannot manage a plural reads as machine output, and
-        // this one is asking somebody to stop and check something.
-        r#""{environment}" no longer matches this connection: {fields} {verb}. The project file may have changed since it was attached. Re-attach it from the migrations pane first."#
-    ))
+    None
 }
 
-/// Compare an environment with the connection it is about to be attached to.
+/// `host:port`, or the raw URL when it cannot be read — never a guess.
+pub fn describe_target(env: &Environment) -> String {
+    match parse_jdbc(&env.url) {
+        Some(t) => format!("{}:{}", t.host, t.port),
+        None => env.url.clone(),
+    }
+}
+
+/// One environment as the pane shows it: where it points and what it is.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentView {
+    pub id: String,
+    pub display_name: Option<String>,
+    /// Echoed back in [`Confirmed`]. Carries no password — `Environment` has
+    /// no field for one.
+    pub url: String,
+    pub user: Option<String>,
+    /// `host:port`, or the URL when it could not be read.
+    pub target: String,
+    pub matches: Vec<Match>,
+}
+
+pub fn environment_views(
+    project: &Project,
+    profiles: &[crate::session::ConnProfile],
+) -> Vec<EnvironmentView> {
+    project
+        .environments
+        .iter()
+        .map(|e| EnvironmentView {
+            id: e.id.clone(),
+            display_name: e.display_name.clone(),
+            url: e.url.clone(),
+            user: e.user.clone(),
+            target: describe_target(e),
+            matches: matches(e, profiles),
+        })
+        .collect()
+}
+
+/// Compare an environment with a saved connection.
 ///
-/// **Why this exists.** `flyway migrate -environment=uat` connects to the URL
-/// *in the TOML*, not to our connection. Attach the wrong environment and you
-/// would be watching one database while changing another — the exact thing
-/// this app's colours, labels and read-only flag exist to prevent.
+/// **What it is for now.** `flyway migrate -environment=uat` connects to the
+/// URL *in the TOML*, not to any connection of ours. This decides which of the
+/// user's connections that URL *is* — [`matches`] — so the pane can name it,
+/// colour it, and honour its read-only flag.
 ///
 /// **The user is compared, not just the address.** Environments commonly share
 /// a server and differ only by account; comparing host and port alone would
@@ -438,9 +516,6 @@ ignoreNewlinesInTextObjects = "off"
             auth: Default::default(),
             no_password: false,
             read_only: false,
-            flyway_project: None,
-            flyway_environment: None,
-            flyway_accepted: Vec::new(),
         }
     }
 
@@ -577,7 +652,7 @@ ignoreNewlinesInTextObjects = "off"
 
     /// **The first real migration.** The project's URL names Flyway's history
     /// schema; the connection names the schema its user works in. Same server,
-    /// same account — and this used to refuse, every time, with no way through.
+    /// same account — the same database, and it has to match.
     #[test]
     fn a_different_default_schema_is_not_a_different_target() {
         let p = parse(REAL).unwrap();
@@ -589,25 +664,7 @@ ignoreNewlinesInTextObjects = "off"
             "cftconn_qa_app",
         );
         assert_eq!(disagreements(env, &conn), vec![]);
-        assert_eq!(write_refusal(&p, &conn, "qa", Write::Apply), None);
-    }
-
-    /// "Attach anyway" is remembered by the apply it was clicked for — and only
-    /// for the fields it was clicked about.
-    #[test]
-    fn an_accepted_disagreement_is_not_refused_but_a_new_one_is() {
-        let p = parse(REAL).unwrap();
-        let mut conn = profile("dev.example.com", 3306, None, "a_personal_account");
-        assert!(write_refusal(&p, &conn, "development", Write::Apply).is_some());
-
-        conn.flyway_accepted = vec![Disagreement::User];
-        assert_eq!(write_refusal(&p, &conn, "development", Write::Apply), None);
-        assert_eq!(write_refusal(&p, &conn, "development", Write::Repair), None);
-
-        // The file moves to another server: that was never accepted.
-        conn.host = "elsewhere.example.com".into();
-        let reason = write_refusal(&p, &conn, "development", Write::Apply).expect("refused");
-        assert!(reason.contains("host differs"), "{reason}");
+        assert_eq!(matches(env, &[conn]).len(), 1);
     }
 
     /// A connection pointed at the server rather than at one schema cannot
@@ -645,92 +702,164 @@ ignoreNewlinesInTextObjects = "off"
         assert_eq!(disagreements(&env, &conn), vec![]);
     }
 
-    // ------------------------------------------------- refusing to apply
+    // ------------------------------------------------------------ matching
 
-    /// The environment the real file's `development` points at.
-    fn agreeing() -> crate::session::ConnProfile {
-        profile("dev.example.com", 3306, Some("flyway"), "cftconn_dev_app")
+    fn named(mut p: crate::session::ConnProfile, id: &str) -> crate::session::ConnProfile {
+        p.id = id.into();
+        p.name = id.into();
+        p
     }
 
+    fn qa() -> crate::session::ConnProfile {
+        named(
+            profile(
+                "qa.example.com",
+                3306,
+                Some("maindatabase"),
+                "cftconn_qa_app",
+            ),
+            "QA",
+        )
+    }
+
+    fn confirmed(p: &Project, env: &str) -> Confirmed {
+        let e = p.environment(env).unwrap();
+        Confirmed {
+            url: e.url.clone(),
+            user: e.user.clone(),
+        }
+    }
+
+    /// F2. Only the connections that are this environment, in rail order.
     #[test]
-    fn an_agreeing_environment_is_not_refused() {
+    fn an_environment_matches_the_connections_that_are_it() {
+        let p = parse(REAL).unwrap();
+        let env = p.environment("qa").unwrap();
+        let other = named(
+            profile("dev.example.com", 3306, None, "cftconn_dev_app"),
+            "Dev",
+        );
+        let found = matches(env, &[other, qa()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "QA");
+    }
+
+    /// An Elasticsearch profile is never a Flyway target, whatever its host.
+    #[test]
+    fn only_mysql_connections_are_candidates() {
+        let p = parse(REAL).unwrap();
+        let env = p.environment("qa").unwrap();
+        let mut es = qa();
+        es.kind = crate::session::EngineKind::Elasticsearch;
+        assert!(matches(env, &[es]).is_empty());
+    }
+
+    // ------------------------------------------------- refusing to write
+
+    #[test]
+    fn a_writable_match_is_not_refused() {
         let p = parse(REAL).unwrap();
         assert_eq!(
-            write_refusal(&p, &agreeing(), "development", Write::Apply),
+            write_refusal(&p, "qa", &confirmed(&p, "qa"), &[qa()], Write::Apply),
             None
         );
     }
 
-    /// F7. Said in the connection's own terms — it is a choice the user made
-    /// and can unmake — and *before* anything else, because it is true
-    /// whatever the project file says.
+    /// F3. Stage 14's flag keeps its meaning: marking the connection read-only
+    /// stops this app writing to that database, migrations included. Said in
+    /// the connection's own name, so the user knows which one to edit.
     #[test]
-    fn a_read_only_connection_refuses_both_apply_and_repair() {
+    fn a_read_only_match_refuses_both_apply_and_repair() {
         let p = parse(REAL).unwrap();
-        let mut ro = agreeing();
+        let mut ro = qa();
         ro.read_only = true;
 
-        let reason = write_refusal(&p, &ro, "development", Write::Apply).expect("refused");
+        let reason = write_refusal(&p, "qa", &confirmed(&p, "qa"), &[ro.clone()], Write::Apply)
+            .expect("refused");
+        assert!(reason.contains("\"QA\""), "{reason}");
         assert!(reason.contains("read-only"), "{reason}");
         assert!(reason.contains("apply migrations"), "{reason}");
-        assert!(
-            reason.contains("Edit the connection"),
-            "it says how to undo it"
-        );
 
-        // A repair is not an apply, and the refusal says which was refused.
-        let repairing = write_refusal(&p, &ro, "development", Write::Repair).expect("refused");
-        assert!(repairing.contains("read-only"), "{repairing}");
+        let repairing =
+            write_refusal(&p, "qa", &confirmed(&p, "qa"), &[ro], Write::Repair).expect("refused");
         assert!(
             repairing.contains("repair the schema history"),
             "{repairing}"
         );
-
-        // And it refuses even when the environment would *also* have been
-        // wrong, so the user is not sent to fix the wrong thing first.
-        let mut wrong = ro.clone();
-        wrong.host = "somewhere.else".into();
-        assert!(write_refusal(&p, &wrong, "development", Write::Apply)
-            .unwrap()
-            .contains("read-only"));
     }
 
-    /// **The case this guard exists for.** The TOML is in a repository and
-    /// changes with the branch, so an environment that matched at import can
-    /// stop matching without anybody touching the connection.
+    /// F4. Two profiles for one database that disagree about writes get the
+    /// safe answer.
     #[test]
-    fn an_environment_that_has_drifted_since_import_refuses_and_names_the_fields() {
+    fn one_read_only_match_among_several_refuses() {
         let p = parse(REAL).unwrap();
-        let moved = profile("dev.example.com", 3306, Some("flyway"), "someone_else");
+        let writable = qa();
+        let mut ro = named(qa(), "QA (browse)");
+        ro.read_only = true;
+        let reason = write_refusal(
+            &p,
+            "qa",
+            &confirmed(&p, "qa"),
+            &[writable, ro],
+            Write::Apply,
+        )
+        .expect("refused");
+        assert!(reason.contains("QA (browse)"), "{reason}");
+    }
 
-        let reason = write_refusal(&p, &moved, "development", Write::Apply).expect("refused");
-        assert!(
-            reason.contains("user differs"),
-            "it names what differs: {reason}"
+    /// Unmatched is unlabelled, not forbidden — often the migration account.
+    #[test]
+    fn an_environment_matching_nothing_is_not_refused() {
+        let p = parse(REAL).unwrap();
+        assert_eq!(
+            write_refusal(&p, "uat", &confirmed(&p, "uat"), &[qa()], Write::Apply),
+            None
         );
-        assert!(!reason.contains("host"), "and not what does not: {reason}");
-        assert!(reason.contains("Re-attach"), "{reason}");
     }
 
+    /// F5. The confirmation described one database; the file now names
+    /// another. Nothing runs.
     #[test]
-    fn two_fields_that_differ_are_both_named() {
+    fn a_target_that_moved_after_confirming_is_refused() {
         let p = parse(REAL).unwrap();
-        // A connection pointed at dev, checked against the qa environment:
-        // both the server and the account are somebody else's.
-        let elsewhere = profile("dev.example.com", 3306, Some("flyway"), "cftconn_dev_app");
+        let shown = confirmed(&p, "development");
 
-        let reason = write_refusal(&p, &elsewhere, "qa", Write::Apply).expect("refused");
-        assert!(reason.contains("host and user differ"), "{reason}");
+        let moved = parse(&REAL.replace("dev.example.com", "prod.example.com")).unwrap();
+        let reason =
+            write_refusal(&moved, "development", &shown, &[], Write::Apply).expect("refused");
+        assert!(reason.contains("prod.example.com:3306"), "{reason}");
+        assert!(reason.contains("Nothing was run"), "{reason}");
+
+        // The account changing is the same thing.
+        let reuser = parse(&REAL.replace("cftconn_dev_app", "root")).unwrap();
+        assert!(write_refusal(&reuser, "development", &shown, &[], Write::Apply).is_some());
     }
 
-    /// An environment renamed out from under the connection is not a
-    /// disagreement — there is nothing to compare — and saying "host differs"
-    /// would send somebody looking at the wrong thing.
+    /// An environment renamed out from under the selection says so, rather
+    /// than reporting some other field as wrong.
     #[test]
     fn an_environment_that_no_longer_exists_says_so() {
         let p = parse(REAL).unwrap();
-        let reason = write_refusal(&p, &agreeing(), "staging", Write::Apply).expect("refused");
+        let reason =
+            write_refusal(&p, "staging", &confirmed(&p, "qa"), &[], Write::Apply).expect("refused");
         assert!(reason.contains("staging"), "{reason}");
         assert!(reason.contains("renamed or removed"), "{reason}");
+    }
+
+    /// What the pane is sent: every environment, its target, and its matches.
+    #[test]
+    fn the_pane_gets_every_environment_with_its_target() {
+        let p = parse(REAL).unwrap();
+        let views = environment_views(&p, &[qa()]);
+        assert_eq!(views.len(), 3);
+        let qa_view = views.iter().find(|v| v.id == "qa").unwrap();
+        assert_eq!(qa_view.target, "qa.example.com:3306");
+        assert_eq!(qa_view.matches.len(), 1);
+        assert!(views
+            .iter()
+            .find(|v| v.id == "uat")
+            .unwrap()
+            .matches
+            .is_empty());
     }
 }

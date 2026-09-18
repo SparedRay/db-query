@@ -321,6 +321,45 @@ body {
   margin-top: 6px; cursor: pointer; user-select: none;
 }
 
+/* The project list (Stage 17). Environments are rows, like databases in the
+   schema tree, and each says which saved connection it is — the colour is what
+   says "this is prod" before anybody presses Apply. Capped so a long list
+   cannot push the migrations off the pane. */
+.mig-projects {
+  max-height: 40%; overflow: auto; flex: 0 0 auto;
+  border-bottom: 1px solid var(--border); padding: 2px 0;
+}
+.mig-projects:empty { display: none; }
+.mig-project-head {
+  display: flex; align-items: center; gap: 6px; padding: 5px 9px 2px;
+}
+.mig-project-name {
+  flex: 1; min-width: 0; font-weight: 600; color: var(--fg); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mig-project-error {
+  padding: 2px 9px 6px 20px; color: var(--danger-fg); font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.mig-envrow {
+  display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  gap: 8px; align-items: center; width: 100%;
+  padding: 4px 9px 4px 20px; border: none; background: none; cursor: pointer;
+  color: var(--fg); font: inherit; font-size: 12px; text-align: left;
+}
+.mig-envrow:hover { background: var(--bg-hover); }
+.mig-envrow.selected { background: var(--sel-cell-bg); box-shadow: inset 2px 0 0 var(--accent); }
+.mig-env-id { font-weight: 600; white-space: nowrap; }
+.mig-env-target {
+  color: var(--fg-dim); font-family: var(--mono); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mig-match { display: flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
+.mig-match.none { color: var(--fg-dim); font-style: italic; }
+.mig-match .chip { font-size: 10px; }
+.mig-proj-match { margin-top: 3px; }
+.mig-proj-match.none { color: var(--warn-fg); }
+
 /* Groups, collapsible like the schema tree's. The chevron rotates rather than
    swapping glyph, so open and shut cannot drift apart. */
 .mig-group-head {

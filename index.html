@@ -17,7 +17,7 @@
         <button id="btn-schema" class="rail-cog" type="button"
                 title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
         <button id="btn-migrations" class="rail-cog" type="button"
-                title="Migrations" aria-pressed="false" hidden></button>
+                title="Migrations" aria-pressed="false"></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
       </div>
 
@@ -97,8 +97,12 @@
           <span id="mig-title">Migrations</span>
           <button id="btn-mig-repair" class="mini" hidden>Repair…</button>
           <button id="btn-mig-apply" class="mini" hidden>Apply…</button>
-          <button id="btn-mig-refresh" class="mini" title="Ask Flyway again">Refresh</button>
+          <button id="btn-mig-refresh" class="mini" title="Re-read the projects and ask Flyway again">Refresh</button>
+          <button id="btn-mig-add" class="mini" title="Add a flyway.toml">Add&hellip;</button>
         </div>
+        <!-- Projects stand on their own (Stage 17): each file, each of its
+             environments, and which saved connection each environment is. -->
+        <div id="mig-projects" class="mig-projects"></div>
         <div id="mig-env" class="mig-env" hidden></div>
         <div id="mig-list" class="mig-list"></div>
       </aside>
