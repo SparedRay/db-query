@@ -321,10 +321,66 @@ body {
   margin-top: 6px; cursor: pointer; user-select: none;
 }
 
+/* --- Stage 18: migrations in the sidebar, and the view they open --- */
+
+/* The sidebar section. Capped so a long project list cannot push the schema
+   tree off the pane; it scrolls within its own share. */
+.mig-side {
+  flex: 0 0 auto; max-height: 45%; display: flex; flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+.mig-side.collapsed { max-height: none; }
+.mig-side.collapsed .mig-side-body { display: none; }
+.mig-side-head { display: flex; align-items: center; padding: 2px 8px 2px 4px; }
+.mig-side-toggle {
+  flex: 1; display: flex; align-items: center; gap: 4px;
+  padding: 4px 2px; border: none; background: none; cursor: pointer;
+  color: var(--fg-dim); font: 600 10.5px/1.4 system-ui, sans-serif;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.mig-side-toggle:hover { color: var(--fg); }
+.mig-side-body { overflow: auto; padding-bottom: 4px; }
+/* Rows read as tree rows here: same size, same hover, indented under the file. */
+.mig-side .mig-project-head { padding: 3px 10px; }
+.mig-side .mig-project-name { font-weight: 600; font-size: 12.5px; }
+.mig-side .mig-envrow { padding: 3px 10px 3px 22px; font-size: 12.5px; }
+.mig-side .mig-env-target { display: none; }
+.mig-side .mig-project-more { opacity: 0; }
+.mig-side .mig-project-head:hover .mig-project-more { opacity: 1; }
+.mig-side .mig-empty { padding: 8px 10px; }
+
+/* The view. It gets the main area's width, which is the point: a migration
+   list is a table, and in the pane it had to drop the date and the state. */
+.mig-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.mig-view .mig-env { border-bottom: none; padding-bottom: 0; }
+.mig-view-actions {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 9px; border-bottom: 1px solid var(--border);
+}
+.mig-view .mig-list { padding: 0; }
+/* Four columns instead of three: the width is there, and "when did this run"
+   is one of the two questions people ask before applying. */
+.mig-view .mig { grid-template-columns: 56px 1fr 90px; padding: 5px 12px; }
+.mig-view .mig-when {
+  width: 160px; padding-right: 12px; color: var(--fg-dim);
+  font-size: 11px; font-family: var(--mono);
+}
+.mig-view .mig-group-head { padding: 6px 12px; }
+/* Quiet until wanted: a project with two hundred migrations should not be a
+   wall of buttons. Focus shows it too, so it is reachable by keyboard. */
+.mig-uptohere { font-family: system-ui, sans-serif; opacity: 0; }
+.mig-row:hover .mig-uptohere, .mig-uptohere:focus-visible { opacity: 1; }
+/* The pane is 340px wide: there is no room for either, and there never was. */
+#migrations-pane .mig-when { display: none; }
+
+.stab.stab-view .stab-origin { color: var(--fg-dim); opacity: 1; }
+
 /* The project list (Stage 17). Environments are rows, like databases in the
    schema tree, and each says which saved connection it is — the colour is what
    says "this is prod" before anybody presses Apply. Capped so a long list
    cannot push the migrations off the pane. */
+#editor[hidden] { display: none; }
+
 .mig-projects {
   max-height: 40%; overflow: auto; flex: 0 0 auto;
   border-bottom: 1px solid var(--border); padding: 2px 0;
@@ -383,13 +439,18 @@ body {
 .mig-group[data-group="failed"] .mig-group-head { color: var(--danger-fg); }
 .mig-group[data-group="pending"] .mig-group-head { color: var(--warn-fg); }
 
+/* A row is two controls: the button that opens the migration's SQL, and the
+   cell beside it — when it ran, or "Apply up to here" while it is pending.
+   Two elements because a button inside a button is invalid and unreachable by
+   keyboard. */
+.mig-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.mig-row:hover { background: var(--bg-hover); }
 .mig {
   display: grid; grid-template-columns: auto 1fr auto; gap: 8px;
   align-items: baseline;
   padding: 5px 9px; cursor: pointer; border: none; background: none;
   width: 100%; text-align: left; color: var(--fg); font: inherit;
 }
-.mig:hover { background: var(--bg-hover); }
 .mig .v { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .mig .d { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The state is Flyway's word, and the colour is ours: pending is work to do,

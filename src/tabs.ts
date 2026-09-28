@@ -9,11 +9,36 @@ import { createEditorState, STARTER_DOC } from "./editor";
 import { icon, type IconName } from "./icons";
 import { emptySelection, type GridSelection } from "./grid";
 
+/**
+ * What a tab *is*.
+ *
+ * `sql` is every tab there has ever been: an editor buffer with its own
+ * results. `migrations` is a view onto one Flyway project environment
+ * (Stage 18) — no buffer, no results of its own, and no connection.
+ */
+export type TabKind = "sql" | "migrations";
+
+/** Which project environment a `migrations` tab is looking at. */
+export interface MigrationsRef {
+  projectId: string;
+  environment: string;
+}
+
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
   id: string;
-  /** The connection this tab belongs to, for life. Tabs never migrate. */
-  connectionId: string;
+  /**
+   * The connection this tab belongs to, for life. Tabs never migrate.
+   *
+   * **`null` means it belongs to none of them** and is shown in every strip,
+   * including when nothing is connected. Only a `migrations` tab is global so
+   * far, because a Flyway project needs no connection open (Stage 17 §2) and a
+   * per-connection strip would have put it back behind one.
+   */
+  connectionId: string | null;
+  kind: TabKind;
+  /** Set for `migrations` tabs, `null` for `sql` ones. */
+  migrations: MigrationsRef | null;
   title: string;
   filePath: string | null;
   dialect: string;
@@ -275,7 +300,11 @@ export class TabManager {
 
   /** Tabs belonging to the connection currently on screen. */
   visible(): ScriptTab[] {
-    return this.tabs.filter((t) => t.connectionId === this.activeConnectionId);
+    // A global tab (`connectionId: null`) is in every strip, and is the only
+    // thing in it when nothing is connected.
+    return this.tabs.filter(
+      (t) => t.connectionId === null || t.connectionId === this.activeConnectionId,
+    );
   }
 
   forConnection(connectionId: string): ScriptTab[] {
@@ -299,11 +328,16 @@ export class TabManager {
     this.stash();
     if (this.activeId) {
       const current = this.tabs.find((t) => t.id === this.activeId);
-      if (current) this.lastActive.set(current.connectionId, current.id);
+      if (current?.connectionId != null) this.lastActive.set(current.connectionId, current.id);
     }
     this.activeConnectionId = connectionId;
 
-    const mine = this.visible();
+    // **This connection's own tabs**, not everything the strip shows. Global
+    // tabs (the migrations view) are in `visible()`, and using that here meant
+    // switching to a connection could land on the view instead of its SQL —
+    // and a connection with no tabs of its own would never get one, because
+    // the global tab made the list look non-empty.
+    const mine = this.forConnection(connectionId);
     if (mine.length === 0) {
       this.activeId = null;
       this.create({ connectionId });
@@ -337,6 +371,68 @@ export class TabManager {
     return n;
   }
 
+  /**
+   * Open the migrations view, or re-point the one already open.
+   *
+   * **One at a time.** The sidebar holds the choosing, so a second tab would
+   * only put two Apply buttons for two different databases on screen at once —
+   * the confusion Stage 17 set out to remove.
+   */
+  openMigrations(ref: MigrationsRef, title: string): ScriptTab {
+    const open = this.tabs.find((t) => t.kind === "migrations");
+    if (open) {
+      open.migrations = ref;
+      open.title = title;
+      if (this.activeId === open.id) {
+        // Already in front: `activate` would return early, and the caller still
+        // needs the strip redrawn and the view re-rendered.
+        this.render();
+        this.hooks.onActivate(open);
+      } else {
+        this.activate(open.id);
+      }
+      return open;
+    }
+
+    const state = createEditorState("");
+    const tab: ScriptTab = {
+      id: `t${++idSeq}`,
+      connectionId: null,
+      kind: "migrations",
+      migrations: ref,
+      title,
+      filePath: null,
+      dialect: "mysql",
+      encoding: "utf-8",
+      lineEnding: "lf",
+      mtimeMs: null,
+      baseline: state.doc,
+      state,
+      ...emptyResultState(),
+      sourceTable: null,
+      busy: false,
+      activeDb: null,
+      serverConnId: 0,
+      untitledNumber: null,
+      origin: "own",
+    };
+    this.tabs.push(tab);
+    // Deliberately not `onCreated`: that registers a backend session for a tab
+    // that will never run a statement.
+    this.activate(tab.id);
+    return tab;
+  }
+
+  /** The migrations tab, if one is open. */
+  migrationsTab(): ScriptTab | null {
+    return this.tabs.find((t) => t.kind === "migrations") ?? null;
+  }
+
+  closeMigrations() {
+    const open = this.migrationsTab();
+    if (open) void this.close(open.id);
+  }
+
   create(opts?: {
     connectionId?: string;
     contents?: string;
@@ -363,6 +459,8 @@ export class TabManager {
     const tab: ScriptTab = {
       id: `t${++idSeq}`,
       connectionId,
+      kind: "sql",
+      migrations: null,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
       // From the connection, not a constant. This field has been written to
@@ -402,7 +500,10 @@ export class TabManager {
 
     this.stash();
     this.activeId = id;
-    this.lastActive.set(next.connectionId, next.id);
+    // A global tab is not where any one connection was left, so it is not
+    // recorded as such: switching away and back would otherwise land on the
+    // migrations view instead of the SQL you were writing.
+    if (next.connectionId !== null) this.lastActive.set(next.connectionId, next.id);
     this.view.setState(next.state);
     this.render();
     this.hooks.onActivate(next);
@@ -421,8 +522,11 @@ export class TabManager {
     this.tabs.splice(idx, 1);
     this.hooks.onClosed(tab);
 
-    const siblings = this.forConnection(tab.connectionId);
-    if (siblings.length === 0) {
+    // Closing the global tab leaves the connection's own tabs alone; there is
+    // no workspace to keep non-empty.
+    const siblings =
+      tab.connectionId === null ? this.visible() : this.forConnection(tab.connectionId);
+    if (siblings.length === 0 && tab.connectionId !== null) {
       // Never zero tabs on a connection — its workspace would have nowhere to
       // type, and switching to it would show an empty pane.
       this.activeId = null;
@@ -430,9 +534,13 @@ export class TabManager {
       return;
     }
     if (this.activeId === id) {
+      // There may be nothing to fall back to: closing the migrations view with
+      // no connection open leaves the strip empty, and `siblings[-1]` was
+      // `undefined` — a crash on the way to reading its id.
       const neighbour = siblings[Math.min(idx, siblings.length - 1)];
       this.activeId = null; // force activate() past its early return
-      this.activate(neighbour.id);
+      if (neighbour) this.activate(neighbour.id);
+      else this.render();
     } else {
       this.render();
     }
@@ -488,6 +596,8 @@ export class TabManager {
       const tab: ScriptTab = {
         id: `t${++idSeq}`,
         connectionId,
+        kind: "sql",
+        migrations: null,
         title: spec.title,
         filePath: spec.filePath,
         dialect: spec.dialect,
@@ -598,8 +708,19 @@ export class TabManager {
         "stab" +
         (tab.id === this.activeId ? " active" : "") +
         (this.isDirty(tab) ? " dirty" : "") +
+        (tab.kind === "migrations" ? " stab-view" : "") +
         (tab.origin === "own" ? "" : " external");
       el.title = tab.filePath ?? tab.title;
+
+      if (tab.kind === "migrations") {
+        // The same icon as the sidebar section it was opened from, so the tab
+        // is recognisable as that view rather than as a file someone opened.
+        const mark = document.createElement("span");
+        mark.className = "stab-origin";
+        mark.dataset.origin = "migrations";
+        mark.append(icon("migrations"));
+        el.append(mark);
+      }
 
       if (tab.origin !== "own") {
         // Before the label, so it reads as a prefix on the tab rather than as

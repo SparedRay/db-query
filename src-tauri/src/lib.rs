@@ -1300,6 +1300,32 @@ async fn flyway_info(
     flywaycli::migrations(&out.stdout)
 }
 
+/// The `-target` flag for "apply up to here", or nothing.
+///
+/// **The only picking this edition of Flyway allows.** Measured against Flyway
+/// 13.5.0 Community on 2026-09-28: `-cherryPick=4` answers *"Upgrade required:
+/// Cherry pick is not supported by Community"*, while `-target=2` applied V1
+/// and V2 and left V3 and V4 pending. So a selection here is a stopping point,
+/// never a basket.
+///
+/// The value comes from Flyway's own `info` output and travels as its own
+/// argv entry, so there is no shell to escape from. It is still checked
+/// against the shape of a version: anything else — a value starting `-`, above
+/// all — would be read by Flyway as another flag, and a flag we did not mean
+/// to send is not something to pass on trust.
+fn target_flag(target: Option<&str>) -> Vec<String> {
+    let Some(t) = target.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Vec::new();
+    };
+    let shaped = t.starts_with(|c: char| c.is_ascii_digit())
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !shaped {
+        return Vec::new();
+    }
+    vec![format!("-target={t}")]
+}
+
 /// The `-outOfOrder` flag, or nothing.
 ///
 /// Passed only when true. Flyway's own default lives in the project file, and
@@ -1370,6 +1396,9 @@ async fn flyway_migrate(
     confirmed: flyway::Confirmed,
     program: String,
     out_of_order: bool,
+    // "Apply up to here": the last version to run. `None` runs everything
+    // pending, which is Flyway's own default.
+    target: Option<String>,
 ) -> Result<Applied, ApplyFailed> {
     let (path, project, profiles) = flyway_target(&app, &project_id).map_err(ApplyFailed::ours)?;
     if let Some(reason) = flyway::write_refusal(
@@ -1383,16 +1412,21 @@ async fn flyway_migrate(
         return Err(ApplyFailed::ours(reason));
     }
 
+    let mut flags = out_of_order_flag(out_of_order);
+    flags.extend(target_flag(target.as_deref()));
     logbook::info(
         "flyway",
-        format!("applying {environment}, out-of-order {out_of_order}"),
+        format!(
+            "applying {environment}, out-of-order {out_of_order}, target {}",
+            target.as_deref().unwrap_or("(all pending)")
+        ),
     );
     let out = flywaycli::run(
         &program_or_default(program),
         std::path::Path::new(&path),
         &environment,
         "migrate",
-        out_of_order_flag(out_of_order),
+        flags,
     )
     .await
     .map_err(ApplyFailed::ours)?;
@@ -1941,4 +1975,49 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **What reaches Flyway when a row says "apply up to here".**
+    #[test]
+    fn a_version_becomes_a_target_flag() {
+        assert_eq!(target_flag(Some("4")), ["-target=4"]);
+        assert_eq!(target_flag(Some("2.1.3")), ["-target=2.1.3"]);
+        assert_eq!(target_flag(Some(" 4 ")), ["-target=4"], "trimmed");
+    }
+
+    /// No target means Flyway's own default: every pending migration.
+    #[test]
+    fn no_target_sends_no_flag() {
+        assert!(target_flag(None).is_empty());
+        assert!(target_flag(Some("")).is_empty());
+        assert!(target_flag(Some("   ")).is_empty());
+    }
+
+    /// The value comes from Flyway's own output and travels as its own argv
+    /// entry — but a value that could be read as *another flag* is refused
+    /// rather than passed on trust. `latest` and `current` are Flyway's own
+    /// keywords and are deliberately not accepted: this button means "up to
+    /// this row", and anything else would be a different promise.
+    #[test]
+    fn anything_that_is_not_a_version_sends_nothing() {
+        for odd in [
+            "-outOfOrder=true",
+            "--help",
+            "latest",
+            "current",
+            "4; rm -rf /",
+            "4 5",
+            "$(whoami)",
+            "../../etc/passwd",
+        ] {
+            assert!(
+                target_flag(Some(odd)).is_empty(),
+                "{odd:?} must not become a flag"
+            );
+        }
+    }
 }

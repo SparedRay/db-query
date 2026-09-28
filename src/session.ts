@@ -72,10 +72,15 @@ export function createSessionPersistence(deps: {
 
     // Live tabs first, in tab-strip order.
     for (const tab of tabs.all()) {
-      let ws = byConnection.get(tab.connectionId);
+      // Only buffers. A `migrations` tab belongs to no connection and holds
+      // nothing that is not already on disk — it is reopened from the sidebar,
+      // not restored (Stage 18 §3.2).
+      if (tab.kind !== "sql" || tab.connectionId === null) continue;
+      const connectionId = tab.connectionId;
+      let ws = byConnection.get(connectionId);
       if (!ws) {
-        ws = { connectionId: tab.connectionId, tabs: [], activeIndex: 0 };
-        byConnection.set(tab.connectionId, ws);
+        ws = { connectionId, tabs: [], activeIndex: 0 };
+        byConnection.set(connectionId, ws);
       }
       const dirty = tabs.isDirty(tab);
       ws.tabs.push({
