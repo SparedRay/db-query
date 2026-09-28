@@ -1,8 +1,20 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, commandNames, connect, installBackend, schemaBackend } from "./harness";
+import {
+  calls,
+  commandNames,
+  connect,
+  installBackend,
+  schemaBackend,
+  withSettings,
+} from "./harness";
 
 /**
  * The migrations pane.
+ *
+ * **The pane layout** (Stage 17), kept behind `migrationsLayout: "pane"` while
+ * Stage 18's sidebar-and-tab shape is tried. Every claim here is about
+ * behaviour the two layouts share, so when one is deleted these move rather
+ * than disappear.
  *
  * **Stage 17: projects stand on their own.** A project used to be attached to
  * a connection, and the pane followed whichever connection was active — which
@@ -19,6 +31,10 @@ test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
     throw new Error(`uncaught page error: ${e.message}`);
   });
+  // **This file is the pane layout's spec.** Stage 18 made the sidebar layout
+  // the default and kept this one behind a setting until a hands-on pass
+  // decides between them; `migrations-tree.spec.ts` covers the other.
+  await withSettings(page, { migrationsLayout: "pane" });
 });
 
 const PATH = "/p/flyway.toml";
@@ -494,7 +510,7 @@ test("Apply names the versions and the target, and runs nothing until confirmed"
   await withProject(page, { flyway_info: () => [MIGRATIONS[0], ...PENDING_ONLY] });
 
   await expect(page.locator("#btn-mig-apply")).toBeEnabled();
-  await expect(page.locator("#btn-mig-apply")).toHaveText("Apply 1…");
+  await expect(page.locator("#btn-mig-apply")).toHaveText("Apply 1 pending");
   await page.click("#btn-mig-apply");
 
   const ask = page.locator("dialog.ask");
@@ -554,6 +570,8 @@ test("the confirmation describes the file as it reads now, and sends that target
     confirmed: { url: "jdbc:mysql://uat2.example.com:3306/flyway", user: "uat_app" },
     program: "",
     outOfOrder: false,
+    // No row asked for a stopping point, so Flyway runs every pending one.
+    target: null,
   });
 });
 

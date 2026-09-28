@@ -36,6 +36,7 @@ import { createTheme, type ThemePref } from "./theme";
 import {
   AI_PRESETS, EDITOR_THEMES, FONTS, applyAppearance, load as loadSettings,
   type EditorTheme,
+  type MigrationsLayout,
   save as saveSettings,
 } from "./settings";
 import { contextMenu } from "./menu";
@@ -79,6 +80,19 @@ const els = {
   migTitle: $("mig-title"),
   migEnv: $("mig-env"),
   migProjects: $("mig-projects"),
+  migSide: $("mig-side"),
+  migSideBody: $("mig-side-body"),
+  migSideToggle: $<HTMLButtonElement>("mig-side-toggle"),
+  btnMigSideAdd: $<HTMLButtonElement>("btn-mig-side-add"),
+  migView: $("mig-view"),
+  editorHead: $("editor-head"),
+  editorHost: $("editor"),
+  migViewEnv: $("mig-view-env"),
+  migViewList: $("mig-view-list"),
+  migViewActions: $("mig-view-actions"),
+  btnMigViewApply: $<HTMLButtonElement>("btn-mig-view-apply"),
+  btnMigViewRepair: $<HTMLButtonElement>("btn-mig-view-repair"),
+  btnMigViewRefresh: $<HTMLButtonElement>("btn-mig-view-refresh"),
   btnMigAdd: $<HTMLButtonElement>("btn-mig-add"),
   migList: $("mig-list"),
   btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
@@ -137,6 +151,7 @@ const els = {
   setMcpOn: $<HTMLInputElement>("set-mcp-on"),
   setMcpPort: $<HTMLInputElement>("set-mcp-port"),
   setFlywayPath: $<HTMLInputElement>("set-flyway-path"),
+  setMigLayout: $<HTMLSelectElement>("set-mig-layout"),
   setFlywayNote: $("set-flyway-note"),
   setDiagnosticsNote: $("set-diagnostics-note"),
   btnDiagnostics: $<HTMLButtonElement>("btn-diagnostics"),
@@ -403,8 +418,9 @@ function refreshFileNote() {
 function syncBusy() {
   const tab = tabs?.active();
   const busy = tab?.busy ?? false;
-  els.btnRun.disabled = busy || !connected;
-  els.btnRunAll.disabled = busy || !connected;
+  const runnable = !!tab && tab.kind === "sql";
+  els.btnRun.disabled = busy || !connected || !runnable;
+  els.btnRunAll.disabled = busy || !connected || !runnable;
   els.btnCancel.hidden = !busy;
   syncConnLabel();
 }
@@ -1554,7 +1570,11 @@ function showResultsInner(tab: ScriptTab) {
   }
   if (!tab.result) {
     results.setMessage(
-      connected ? "No results yet. Ctrl+Enter to run." : "Not connected.",
+      tab.kind === "migrations"
+        ? "What Flyway did will appear here."
+        : connected
+          ? "No results yet. Ctrl+Enter to run."
+          : "Not connected.",
     );
     return;
   }
@@ -1609,6 +1629,8 @@ function closeAllResults(tab: ScriptTab) {
 
 async function run(sql: string) {
   const tab = activeTab();
+  // A view has no buffer to run, and its tab belongs to no connection.
+  if (tab.kind !== "sql") return;
   if (!connected || tab.busy || !sql.trim()) return;
   tab.error = null;
   setBusy(tab, true);
@@ -1674,7 +1696,9 @@ function markActiveDb(db: string | null) {
 async function loadCompletionSchema() {
   const tab = tabs?.active();
   const db = tab?.activeDb ?? null;
-  const key = tab && db ? `${tab.connectionId}\u0000${db}` : "";
+  // A `migrations` tab has no connection and no editor to complete in.
+  const connectionId = tab?.connectionId ?? null;
+  const key = connectionId && db ? `${connectionId}\u0000${db}` : "";
   if (key === schemaMapFor) return;
 
   schemaMapFor = key;
@@ -1682,10 +1706,10 @@ async function loadCompletionSchema() {
     delete (schemaMap as Record<string, string[]>)[name];
   }
   setSchema(view, schemaMap);
-  if (!key || !tab || !db) return;
+  if (!key || !tab || !db || !connectionId) return;
 
   try {
-    const names = await api.schemaNames(tab.connectionId, db);
+    const names = await api.schemaNames(connectionId, db);
     // The user may have moved to another database while this was in flight,
     // and a late answer must not overwrite the one that is current.
     if (schemaMapFor !== key) return;
@@ -1780,6 +1804,7 @@ els.msplit.addEventListener("mousedown", (e) => {
  * **Nothing is run.** Formatting is a text edit, and one undo puts it back.
  */
 async function formatBuffer() {
+  if (migrationsViewActive()) return;
   const sel = view.state.selection.main;
   const whole = sel.empty;
   const source = whole ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to);
@@ -1967,6 +1992,9 @@ tabs = new TabManager($("script-tabs"), view, {
   // unconditionally.
   dialectForActiveConnection: () => conns.active()?.capabilities?.engine ?? null,
   onCreated: (tab) => {
+    // Only buffers get here: `openMigrations` deliberately skips this hook,
+    // because a view will never run a statement and needs no backend session.
+    if (tab.connectionId === null) return;
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
     void api.openTab(tab.connectionId, tab.id);
@@ -1983,6 +2011,22 @@ tabs = new TabManager($("script-tabs"), view, {
     session.schedule();
   },
   onActivate: (tab) => {
+    // A view, not a buffer: the main area shows the migrations list instead of
+    // the editor, and the editor keeps whatever state it had for when you come
+    // back. Everything below is about an editor tab.
+    showMigrationsView(tab.kind === "migrations");
+    if (tab.kind === "migrations" && tab.migrations) {
+      migSelected = {
+        projectId: tab.migrations.projectId,
+        environment: tab.migrations.environment,
+      };
+      drawProjects();
+      syncBusy();
+      // Only when it would show something else: switching back to a list you
+      // were already looking at must not start a JVM.
+      if (migViewShowing !== selectedKey()) void showSelected();
+      return;
+    }
     // Compartment contents live in the EditorState, so a swapped-in state has
     // whatever config it was born with. Re-apply both after every switch.
     setDialect(view, tab.dialect);
@@ -1998,8 +2042,16 @@ tabs = new TabManager($("script-tabs"), view, {
     view.focus();
     session.schedule();
   },
-  canClose: (tab) => files.confirmClose(tab),
+  canClose: (tab) => (tab.kind === "migrations" ? Promise.resolve(true) : files.confirmClose(tab)),
   onClosed: (tab) => {
+    if (tab.kind === "migrations") {
+      // Nothing to release: it never held a backend session. With no other tab
+      // to activate — no connection open — nothing else would put the editor
+      // back, so it is done here.
+      migViewShowing = "";
+      showMigrationsView(false);
+      return;
+    }
     // Releases that tab's MySQL connection; leaving it would leak until
     // disconnect.
     void api.closeTab(tab.id);
@@ -2075,6 +2127,7 @@ function applySettings() {
   // Via the existing helper, which owns the debounce bucket — reconfiguring
   // the linter behind its back would leave `appliedLintDelay` lying.
   applyLintSetting(true);
+  applyMigrationsLayout();
 }
 
 for (const f of FONTS) {
@@ -2334,6 +2387,7 @@ function openSettings() {
   els.setBrowse.value = String(settings.browseLimit);
   els.setMcpPort.value = String(mcpPort());
   els.setFlywayPath.value = settings.flywayPath;
+  els.setMigLayout.value = settings.migrationsLayout;
   els.setFlywayNote.textContent = "";
   els.setUpdateNote.hidden = true;
   // Ask the backend rather than trusting the stored preference: the server can
@@ -2348,6 +2402,7 @@ function openSettings() {
  *  makes you guess what a font looks like before you can see it. */
 function commit() {
   settings.flywayPath = els.setFlywayPath.value.trim();
+  settings.migrationsLayout = els.setMigLayout.value as MigrationsLayout;
   settings.fontFamily = els.setFont.value;
   settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
   settings.editorTheme = els.setEditorColours.value as EditorTheme;
@@ -2363,7 +2418,7 @@ function commit() {
 for (const el of [
   els.setFont, els.setFontSize, els.setEditorColours,
   els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
-  els.setFlywayPath,
+  els.setFlywayPath, els.setMigLayout,
 ]) {
   el.onchange = commit;
 }
@@ -2820,7 +2875,7 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "s" || e.key === "S") {
     e.preventDefault();
     const t = tabs.active();
-    if (!t) return;
+    if (!t || t.kind !== "sql") return;
     void (e.shiftKey ? files.saveAs(t) : files.save(t));
   }
 });
@@ -2913,6 +2968,34 @@ function elem(tag: string, cls: string, text?: string): HTMLElement {
 }
 
 /**
+ * Put the chosen migrations layout on screen.
+ *
+ * Runs on boot and on every settings change. Switching closes whatever the
+ * other layout had open: two lists of the same projects, one of them stale, is
+ * worse than one.
+ */
+function applyMigrationsLayout() {
+  const pane = settings.migrationsLayout === "pane";
+  els.migSide.hidden = pane;
+  els.btnMigrations.title = pane ? "Migrations" : "Migrations (in the sidebar)";
+  if (pane) {
+    tabs?.closeMigrations();
+  } else if (migrationsOpen) {
+    toggleMigrations(false);
+  }
+  // The sidebar list is cheap — it reads the project files and the saved
+  // connections, and asks Flyway nothing — so it can be filled at boot.
+  if (!pane) void renderMigrations();
+}
+
+/** Collapse or expand the sidebar section. */
+function toggleMigrationsSection(open: boolean) {
+  els.migSide.classList.toggle("collapsed", !open);
+  els.migSideToggle.setAttribute("aria-expanded", String(open));
+  els.migSideToggle.querySelector(".twisty")?.classList.toggle("open", open);
+}
+
+/**
  * The migrations toggle is always offered (Stage 17 §3.1).
  *
  * It used to follow the active connection — shown only on an engine Flyway can
@@ -2963,13 +3046,80 @@ function toggleSchema(open: boolean) {
 els.btnSchema.onclick = () => toggleSchema(!schemaOpen);
 els.btnSchema.classList.add("on");
 
-els.btnMigrations.onclick = () => toggleMigrations(!migrationsOpen);
+els.btnMigrations.onclick = () => {
+  if (settings.migrationsLayout === "pane") return toggleMigrations(!migrationsOpen);
+  // In the sidebar layout there is no pane to toggle: show the section, with
+  // the schema pane opened if it was collapsed, because that is where it lives.
+  if (!schemaOpen) toggleSchema(true);
+  toggleMigrationsSection(true);
+  els.migSide.scrollIntoView({ block: "nearest" });
+};
+els.migSideToggle.onclick = () =>
+  toggleMigrationsSection(els.migSide.classList.contains("collapsed"));
+els.btnMigSideAdd.onclick = () => void addFlywayProject();
+els.btnMigViewRefresh.onclick = () => void renderMigrations();
+els.btnMigViewApply.onclick = () => void applyMigrations();
+els.btnMigViewRepair.onclick = () => void repairMigrations();
 els.btnMigRefresh.onclick = () => void renderMigrations();
 els.btnMigApply.onclick = () => void applyMigrations();
 els.btnMigRepair.onclick = () => void repairMigrations();
 els.btnMigAdd.onclick = () => void addFlywayProject();
 
-/** An empty pane that says what to do next, rather than an empty pane. */
+/**
+ * Where the migrations UI draws, for the layout that is on.
+ *
+ * **Two layouts, one implementation** (Stage 18 §3.3). Everything below asks
+ * this rather than naming an element, so the pane and the sidebar-plus-tab
+ * shape cannot drift into two behaviours — only two sets of elements.
+ */
+interface MigUi {
+  /** Project and environment rows. */
+  projects: HTMLElement;
+  /** The selected environment: target, match, file, out-of-order. */
+  detail: HTMLElement;
+  /** Groups, rows and messages. */
+  list: HTMLElement;
+  apply: HTMLButtonElement;
+  repair: HTMLButtonElement;
+}
+
+function migUi(): MigUi {
+  return settings.migrationsLayout === "pane"
+    ? {
+        projects: els.migProjects,
+        detail: els.migEnv,
+        list: els.migList,
+        apply: els.btnMigApply,
+        repair: els.btnMigRepair,
+      }
+    : {
+        projects: els.migSideBody,
+        detail: els.migViewEnv,
+        list: els.migViewList,
+        apply: els.btnMigViewApply,
+        repair: els.btnMigViewRepair,
+      };
+}
+
+/**
+ * Swap the main area between the editor and the migrations view.
+ *
+ * The editor keeps its state and its scroll position; it is hidden, not
+ * rebuilt. The run controls go with it — they belong to the buffer, and a Run
+ * button over a list of migrations would be a control with nothing to act on.
+ */
+function showMigrationsView(on: boolean) {
+  els.migView.hidden = !on;
+  els.editorHost.hidden = on;
+  els.editorHead.hidden = on;
+}
+
+/** Is the migrations view the thing in front? */
+function migrationsViewActive(): boolean {
+  return tabs?.active()?.kind === "migrations";
+}
+
+/** An empty list that says what to do next, rather than an empty list. */
 function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
   const box = elem("div", "mig-empty", text);
   if (action) {
@@ -2977,7 +3127,7 @@ function migrationsMessage(text: string, action?: { label: string; run: () => vo
     b.onclick = action.run;
     box.append(document.createElement("br"), b);
   }
-  els.migList.replaceChildren(box);
+  migUi().list.replaceChildren(box);
 }
 
 /**
@@ -3062,6 +3212,13 @@ let flywayProjects: FlywayProjectView[] = [];
  */
 let migSelected: { projectId: string; environment: string } | null = null;
 
+/**
+ * Which environment the view last drew, so activating its tab does not start a
+ * JVM to re-ask a question already on screen. Cleared by anything that makes
+ * the list stale.
+ */
+let migViewShowing = "";
+
 /** One key for everything held per environment. */
 function selKey(projectId: string, environment: string): string {
   return `${projectId}\u0000${environment}`;
@@ -3119,14 +3276,15 @@ async function loadFlywayProjects(): Promise<boolean> {
  * settings, so nothing here asks which connection is active (Stage 17 §2).
  */
 async function renderMigrations() {
-  els.btnMigApply.hidden = true;
-  els.btnMigRepair.hidden = true;
+  const ui = migUi();
+  ui.apply.hidden = true;
+  ui.repair.hidden = true;
   if (!(await loadFlywayProjects())) return;
 
   if (!flywayProjects.length) {
     migSelected = null;
-    els.migProjects.replaceChildren();
-    els.migEnv.hidden = true;
+    ui.projects.replaceChildren();
+    ui.detail.hidden = true;
     return migrationsMessage(
       "No Flyway projects yet. Add the flyway.toml you open with Flyway Desktop " +
         "to see what each of its environments has applied and what is pending. " +
@@ -3137,12 +3295,15 @@ async function renderMigrations() {
 
   migSelected = validSelection(migSelected);
   drawProjects();
-  await showSelected();
+  // In the sidebar layout the list is only asked for when a view is open: a
+  // JVM start per launch, for a project nobody clicked, is not a cost to pay
+  // on somebody's behalf.
+  if (settings.migrationsLayout === "pane" || migrationsViewActive()) await showSelected();
 }
 
 /** The project list: each file, and each of its environments. */
 function drawProjects() {
-  els.migProjects.replaceChildren(
+  migUi().projects.replaceChildren(
     ...flywayProjects.map((p) => {
       const box = elem("div", "mig-project");
       box.dataset.project = p.id;
@@ -3228,11 +3389,21 @@ function readOnlyMatch(e: FlywayEnvironment): FlywayMatch | undefined {
 }
 
 async function selectEnvironment(p: FlywayProjectView, e: FlywayEnvironment) {
-  if (migSelected?.projectId === p.id && migSelected.environment === e.id) return;
+  const again = migSelected?.projectId === p.id && migSelected.environment === e.id;
   migSelected = { projectId: p.id, environment: e.id };
   drawProjects();
   // A preference, remembered for next launch. Losing it costs a click.
   void api.flywaySelectEnvironment(p.id, e.id).catch(() => {});
+
+  if (settings.migrationsLayout !== "pane") {
+    // One tab, re-pointed (Stage 18 §5.3). Clicking the environment already in
+    // front is how you bring the view back after looking at a query, so it is
+    // not treated as "nothing to do".
+    tabs.openMigrations({ projectId: p.id, environment: e.id }, `Migrations \u00b7 ${e.id}`);
+    if (!again || migViewShowing !== selectedKey()) await showSelected();
+    return;
+  }
+  if (again) return;
   await showSelected();
 }
 
@@ -3245,15 +3416,22 @@ async function selectEnvironment(p: FlywayProjectView, e: FlywayEnvironment) {
  * the old one's migrations beside the new one's Apply button.
  */
 async function showSelected() {
-  els.btnMigApply.hidden = true;
-  els.btnMigRepair.hidden = true;
+  const ui = migUi();
+  ui.apply.hidden = true;
+  ui.repair.hidden = true;
   const t = selectedTarget();
   if (!t) {
-    els.migEnv.hidden = true;
-    return migrationsMessage("Choose an environment above.");
+    ui.detail.hidden = true;
+    migViewShowing = "";
+    return migrationsMessage(
+      settings.migrationsLayout === "pane"
+        ? "Choose an environment above."
+        : "Choose an environment in the sidebar.",
+    );
   }
   const key = selKey(t.project.id, t.env.id);
   if (!migrationsOutOfOrder.has(key)) migrationsOutOfOrder.set(key, t.project.outOfOrder);
+  migViewShowing = key;
   showEnvironmentDetail(t.project, t.env);
 
   migrationsMessage("Asking Flyway…");
@@ -3281,7 +3459,9 @@ function outOfOrderFor(key: string): boolean {
  * your connections that is, and where the files are read from.
  */
 function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironment) {
-  els.migEnv.hidden = false;
+  const host = migUi().detail;
+  host.hidden = false;
+  els.migViewActions.querySelector(".mig-ooo")?.remove();
   const file = project.path.split(/[\\/]/).pop() ?? project.path;
   const folder = project.path.slice(0, project.path.length - file.length - 1);
 
@@ -3302,7 +3482,7 @@ function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironmen
   const from = elem("div", "mig-proj-from");
   from.hidden = true;
 
-  els.migEnv.replaceChildren(target, who, where, from);
+  host.replaceChildren(target, who, where, from);
 
   // Out-of-order changes which migrations Flyway will run, so it belongs where
   // the list is — toggling it re-asks and the answer visibly changes.
@@ -3321,7 +3501,10 @@ function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironmen
     void showSelected();
   };
   label.append(box, document.createTextNode("Out of order"));
-  els.migEnv.append(label);
+  // In the view it belongs with the buttons: it changes what Apply will run.
+  // In the pane there is no room for a fourth control on that line.
+  if (settings.migrationsLayout === "pane") host.append(label);
+  else els.migViewActions.append(label);
 }
 
 /**
@@ -3334,7 +3517,7 @@ function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironmen
  * than none at all.
  */
 function showMigrationSource(list: FlywayMigration[]) {
-  const el = els.migEnv.querySelector(".mig-proj-from") as HTMLElement | null;
+  const el = migUi().detail.querySelector(".mig-proj-from") as HTMLElement | null;
   if (!el) return;
   const folders = [
     ...new Set(
@@ -3425,7 +3608,7 @@ function renderMigrationGroups(list: FlywayMigration[]) {
     .map((g) => [g, list.filter((m) => m.group === g)] as const)
     .filter(([, rows]) => rows.length > 0)
     .map(([g, rows]) => migrationGroup(g, rows));
-  els.migList.replaceChildren(...boxes);
+  migUi().list.replaceChildren(...boxes);
 }
 
 function migrationGroup(group: FlywayGroup, rows: FlywayMigration[]): HTMLElement {
@@ -3458,7 +3641,16 @@ function migrationGroup(group: FlywayGroup, rows: FlywayMigration[]): HTMLElemen
   return box;
 }
 
+/**
+ * One migration: a button that opens its SQL, and — where the width allows —
+ * when it ran, or the one selection this edition of Flyway supports.
+ *
+ * **Two elements, not a button inside a button.** The row opens the file; the
+ * action applies up to it. Nesting the second inside the first is invalid
+ * markup and unreachable by keyboard, so the row is wrapped instead.
+ */
 function migrationRow(m: FlywayMigration): HTMLElement {
+  const wrap = elem("div", "mig-row");
   const row = elem("button", "mig") as HTMLButtonElement;
   row.dataset.state = m.state.toLowerCase();
   row.dataset.group = m.group;
@@ -3472,7 +3664,28 @@ function migrationRow(m: FlywayMigration): HTMLElement {
     m.filepath ?? "(no file)"
   }`;
   row.onclick = () => void openMigration(m);
-  return row;
+
+  // Shown only where there is width for it — see `.mig-when` in the stylesheet.
+  const cell = elem("span", "mig-when");
+  if (m.group === "pending" && m.version) {
+    // **The only picking Community Flyway allows.** Measured 2026-09-28
+    // against 13.5.0: `-cherryPick` answers "not supported by Community",
+    // while `-target=N` applies everything up to and including N. So this is
+    // a stopping point, not a basket of checkboxes — and it is offered only on
+    // a versioned migration, because a repeatable one cannot be a target.
+    const upto = elem("button", "mini mig-uptohere", "Apply up to here") as HTMLButtonElement;
+    upto.title = `Apply everything pending up to and including V${m.version}, in order`;
+    upto.onclick = (e) => {
+      e.stopPropagation();
+      void applyMigrations(m.version ?? undefined);
+    };
+    cell.append(upto);
+  } else if (m.installedOnUtc) {
+    cell.textContent = m.installedOnUtc.replace("T", " ").replace("Z", "");
+  }
+
+  wrap.append(row, cell);
+  return wrap;
 }
 
 /**
@@ -3488,6 +3701,7 @@ function migrationRow(m: FlywayMigration): HTMLElement {
  * courtesy, not the guard.
  */
 function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
+  const { apply: btnApply, repair: btnRepair } = migUi();
   const ro = readOnlyMatch(env);
   const readOnly = !!ro;
   const pending = list.filter((m) => m.group === "pending");
@@ -3506,13 +3720,13 @@ function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
   // be rewritten and what will not be undone, and it differs between the two
   // situations.
   const asked = migrationsRepairAsked.has(selectedKey());
-  els.btnMigRepair.hidden = false;
-  els.btnMigRepair.disabled = readOnly;
+  btnRepair.hidden = false;
+  btnRepair.disabled = readOnly;
   // Available always, urged only when something has actually asked for it \u2014
   // a failure blocking the list, or Flyway's own instruction after it refused
   // an apply.
-  els.btnMigRepair.classList.toggle("urge", !readOnly && (failed.length > 0 || asked));
-  els.btnMigRepair.title = readOnly
+  btnRepair.classList.toggle("urge", !readOnly && (failed.length > 0 || asked));
+  btnRepair.title = readOnly
     ? `This is your connection “${ro.name}”, which is marked read-only. ` +
       "Editing the schema history is a write."
     : failed.length
@@ -3522,10 +3736,13 @@ function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
         : "Make the schema history agree with the migration files \u2014 after one " +
           "was edited, deleted, or failed.";
 
-  els.btnMigApply.hidden = false;
-  els.btnMigApply.textContent = pending.length
-    ? `Apply ${pending.length}\u2026`
-    : "Apply\u2026";
+  btnApply.hidden = false;
+  // Spelled out. The trailing "\u2026" is a convention for "this opens a
+  // dialog", and it was read as a label cut short — which, in a 340px pane, is
+  // exactly what a label often is.
+  btnApply.textContent = pending.length
+    ? `Apply ${pending.length} pending`
+    : "Apply";
 
   const reason = readOnly
     ? `This is your connection “${ro.name}”, which is marked read-only. ` +
@@ -3536,8 +3753,8 @@ function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
         ? "Nothing is pending."
         : "";
 
-  els.btnMigApply.disabled = reason !== "";
-  els.btnMigApply.title = reason || `Apply ${pending.map((m) => m.version ?? "?").join(", ")}`;
+  btnApply.disabled = reason !== "";
+  btnApply.title = reason || `Apply ${pending.map((m) => m.version ?? "?").join(", ")}`;
 }
 
 /**
@@ -3553,7 +3770,19 @@ function syncApplyButton(env: FlywayEnvironment, list: FlywayMigration[]) {
  * migrations?" is a question about arithmetic; "V5, V6, V7" is a question
  * about which changes.
  */
-async function applyMigrations() {
+/**
+ * Apply, once the user has said so in front of the list.
+ *
+ * `upTo` is a version from a row's "Apply up to here": everything pending up
+ * to and including it runs, which is what Flyway's `-target` does. Without it,
+ * every pending migration runs — Flyway's own default.
+ *
+ * **The confirmation names what will run and nothing else.** An earlier draft
+ * also listed what would be left behind; the list underneath the dialog
+ * already says that, and a dialog that names migrations it will *not* touch
+ * invites reading the list as the thing being applied.
+ */
+async function applyMigrations(upTo?: string) {
   const target = await freshTarget();
   if (!target) return;
   const { project, env } = target;
@@ -3565,14 +3794,18 @@ async function applyMigrations() {
   if (!list) return void showSelected();
 
   const pending = list.filter((m) => m.group === "pending");
-  if (!pending.length) return void showSelected();
+  // Up to and including the row that asked, in the order Flyway reported.
+  const stop = upTo ? pending.findIndex((m) => m.version === upTo) : -1;
+  const running = stop === -1 ? pending : pending.slice(0, stop + 1);
+  if (!running.length) return void showSelected();
 
-  const named = pending
+  const named = running
     .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
     .join("\n");
   const go = await choose(
-    `Apply ${pending.length} migration${pending.length === 1 ? "" : "s"}?`,
-    `Flyway will run these against ${describeTarget(env)}\n\nIn this order:\n\n${named}\n\n` +
+    `Apply ${running.length} migration${running.length === 1 ? "" : "s"}?`,
+    `Flyway will run ${running.length === 1 ? "this" : "these"} against ${describeTarget(env)}` +
+      `\n\nIn this order:\n\n${named}\n\n` +
       (outOfOrder ? "Out of order is on.\n\n" : "") +
       "This changes the database. It cannot be undone from here.",
     [
@@ -3582,7 +3815,7 @@ async function applyMigrations() {
   );
   if (go !== "go") return;
 
-  els.btnMigApply.disabled = true;
+  migUi().apply.disabled = true;
   migrationsMessage("Flyway is applying…");
   try {
     const out = await api.flywayMigrate(
@@ -3591,6 +3824,9 @@ async function applyMigrations() {
       { url: env.url, user: env.user },
       settings.flywayPath,
       outOfOrder,
+      // Only when a row asked for it: no target means every pending migration,
+      // which is what Flyway does on its own.
+      stop === -1 ? null : (upTo ?? null),
     );
     const refreshed = await refreshMatchedSchemas(env);
     results.setMessage(
@@ -3713,7 +3949,7 @@ async function repairMigrations() {
   );
   if (go !== "go") return;
 
-  els.btnMigRepair.disabled = true;
+  migUi().repair.disabled = true;
   migrationsMessage("Flyway is repairing\u2026");
   try {
     const out = await api.flywayRepair(

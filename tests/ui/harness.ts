@@ -102,6 +102,27 @@ export const baseBackend: Backend = {
  */
 const handlers = new WeakMap<Page, Backend>();
 
+/**
+ * Pin a preference before the app boots.
+ *
+ * Settings live in localStorage and are read once, at module evaluation, so a
+ * test that wants a non-default one has to write it before `goto`. Stage 18's
+ * two migrations layouts are the first thing to need it.
+ */
+export async function withSettings(page: Page, settings: Record<string, unknown>) {
+  await page.addInitScript((s) => {
+    try {
+      const key = "db-query.settings";
+      const raw = window.localStorage.getItem(key);
+      const current = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      window.localStorage.setItem(key, JSON.stringify({ ...current, ...s }));
+    } catch {
+      // Storage can be unavailable; the test then runs on the defaults and
+      // fails on its own assertion rather than here.
+    }
+  }, settings);
+}
+
 export async function installBackend(page: Page, backend: Backend = {}) {
   const merged = { ...baseBackend, ...backend };
   const names = Object.keys(merged);

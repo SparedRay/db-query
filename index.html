@@ -35,6 +35,18 @@
           <span id="tree-filter-count" class="filter-count" hidden></span>
         </div>
         <div id="tree" class="tree"></div>
+        <!-- Stage 18: projects live where choosing happens. Hidden in the pane
+             layout, which keeps them on the other side of the window. -->
+        <section id="mig-side" class="mig-side" hidden>
+          <div class="mig-side-head">
+            <button id="mig-side-toggle" class="mig-side-toggle" type="button" aria-expanded="true">
+              <span class="twisty open"></span><span>Migrations</span>
+            </button>
+            <button id="btn-mig-side-add" class="mini" type="button"
+                    title="Add a flyway.toml">Add&hellip;</button>
+          </div>
+          <div id="mig-side-body" class="mig-side-body"></div>
+        </section>
       </aside>
 
       <div id="vsplit" class="splitter splitter-v" title="Drag to resize"></div>
@@ -51,7 +63,7 @@
             <button id="stab-right" class="stab-scroll" type="button"
                     title="Scroll tabs right" aria-label="Scroll tabs right" hidden>&rsaquo;</button>
           </div>
-          <div class="pane-head">
+          <div class="pane-head" id="editor-head">
             <button id="btn-run" class="mini" disabled>Run <kbd>Ctrl+Enter</kbd></button>
             <button id="btn-run-all" class="mini" disabled>Run all <kbd>Ctrl+Shift+Enter</kbd></button>
             <button id="btn-cancel" class="mini danger" hidden>Cancel</button>
@@ -70,6 +82,19 @@
             </label>
           </div>
           <div id="editor"></div>
+          <!-- The migrations view: shown in place of the editor while a
+               migrations tab is in front. Same strip, same window, so moving
+               between a migration and a query is a tab click. -->
+          <div id="mig-view" class="mig-view" hidden>
+            <div id="mig-view-env" class="mig-env"></div>
+            <div class="mig-view-actions" id="mig-view-actions">
+              <button id="btn-mig-view-apply" class="mini" hidden>Apply</button>
+              <button id="btn-mig-view-repair" class="mini" hidden>Repair schema history</button>
+              <button id="btn-mig-view-refresh" class="mini"
+                      title="Re-read the project and ask Flyway again">Refresh</button>
+            </div>
+            <div id="mig-view-list" class="mig-list"></div>
+          </div>
         </section>
 
         <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>
@@ -104,8 +129,8 @@
       <aside id="migrations-pane" hidden>
         <div class="pane-head">
           <span id="mig-title">Migrations</span>
-          <button id="btn-mig-repair" class="mini" hidden>Repair…</button>
-          <button id="btn-mig-apply" class="mini" hidden>Apply…</button>
+          <button id="btn-mig-repair" class="mini" hidden>Repair schema history</button>
+          <button id="btn-mig-apply" class="mini" hidden>Apply</button>
           <button id="btn-mig-refresh" class="mini" title="Re-read the projects and ask Flyway again">Refresh</button>
           <button id="btn-mig-add" class="mini" title="Add a flyway.toml">Add&hellip;</button>
         </div>
@@ -264,6 +289,16 @@
                      autocomplete="off" spellcheck="false" />
             </label>
             <p class="hint" id="set-flyway-note"></p>
+            <label>Layout
+              <select id="set-mig-layout">
+                <option value="tree">In the sidebar, with a tab (new)</option>
+                <option value="pane">In a pane of its own (previous)</option>
+              </select>
+            </label>
+            <p class="hint">Both do the same work. The sidebar layout puts
+              projects where databases are and gives the list the width of the
+              main area; the pane is what earlier versions had. Switching takes
+              effect immediately.</p>
             <p class="hint">If it will not start, <strong>About → Diagnostics</strong>
               shows every path that was searched and what Flyway said when it ran.</p>
           </section>

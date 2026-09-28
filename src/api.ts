@@ -784,12 +784,17 @@ export const api = {
 
   /** Apply the pending migrations. Rust refuses if the target moved since
    *  `confirmed` was shown, or if any matching connection is read-only. */
+  /** `target` is a version from "Apply up to here": everything pending up to
+   *  and including it runs. `null` runs every pending migration, which is
+   *  Flyway's own default. Arbitrary selection (`-cherryPick`) is a paid
+   *  feature — measured against 13.5.0 Community on 2026-09-28. */
   flywayMigrate: (
     projectId: string,
     environment: string,
     confirmed: FlywayConfirmed,
     program: string,
     outOfOrder: boolean,
+    target: string | null,
   ) =>
     invoke<FlywayApplied>("flyway_migrate", {
       projectId,
@@ -797,6 +802,7 @@ export const api = {
       confirmed,
       program,
       outOfOrder,
+      target,
     }),
 
   /** Rewrite the schema history so a failed migration stops blocking the rest.
