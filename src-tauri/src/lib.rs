@@ -1006,20 +1006,33 @@ fn clipboard_text(result: export::ResultSet, options: export::CsvOptions) -> Str
 
 // ------------------------------------------------------------------- stateless
 
+/// The statement under the cursor, and where it starts.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatementAt {
+    pub sql: String,
+    /// Byte offset of `sql` within the buffer that was sent. The caller keeps
+    /// it so a result can be traced back to the statement that produced it.
+    pub start: usize,
+}
+
 /// Statement under the cursor, resolved entirely in Rust. The frontend sends a
 /// BYTE offset and gets back the statement text — it never slices the buffer or
 /// reimplements the boundary rules, so execution and cursor detection cannot
 /// drift apart.
 #[tauri::command]
-fn statement_at_cursor(sql: String, cursor: usize) -> Result<Option<String>, String> {
+fn statement_at_cursor(sql: String, cursor: usize) -> Result<Option<StatementAt>, String> {
     let out = split::split(&sql);
     if out.delimiter_detected {
         // Terminator is user-defined; the whole buffer is the unit of work.
-        return Ok(Some(sql));
+        return Ok(Some(StatementAt { sql, start: 0 }));
     }
     Ok(split::statement_at(&out.statements, cursor)
         .and_then(|i| out.statements.get(i))
-        .map(|s| sql[s.start..s.end].to_string()))
+        .map(|s| StatementAt {
+            sql: sql[s.start..s.end].to_string(),
+            start: s.start,
+        }))
 }
 
 /// Lay SQL out, for the editor's Format action.
@@ -1995,6 +2008,41 @@ mod tests {
         assert!(target_flag(None).is_empty());
         assert!(target_flag(Some("")).is_empty());
         assert!(target_flag(Some("   ")).is_empty());
+    }
+
+    /// **Where the statement under the cursor sits**, not just what it says.
+    ///
+    /// The offset is what lets a result point back at the SQL that produced
+    /// it: the frontend keeps it, adds each statement's own span, and can then
+    /// select that statement in the editor.
+    #[test]
+    fn the_statement_under_the_cursor_says_where_it_starts() {
+        // The span is the statement's *code*: the terminator is not part of
+        // it, so what is offered — and what the editor will select — stops
+        // before the `;`.
+        let sql = "SELECT 1;\nSELECT 2;\n";
+        let first = statement_at_cursor(sql.into(), 0).unwrap().unwrap();
+        assert_eq!(first.sql, "SELECT 1");
+        assert_eq!(first.start, 0);
+
+        // A cursor inside the second statement gets the second statement, and
+        // the offset lands on it rather than near it.
+        let second = statement_at_cursor(sql.into(), 12).unwrap().unwrap();
+        assert_eq!(second.sql, "SELECT 2");
+        assert_eq!(
+            &sql[second.start..second.start + second.sql.len()],
+            "SELECT 2"
+        );
+    }
+
+    /// A `DELIMITER` block makes the whole buffer the unit of work, and it
+    /// starts at the beginning of it.
+    #[test]
+    fn a_delimiter_script_starts_at_zero() {
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n";
+        let at = statement_at_cursor(sql.into(), 30).unwrap().unwrap();
+        assert_eq!(at.start, 0);
+        assert_eq!(at.sql, sql);
     }
 
     /// The value comes from Flyway's own output and travels as its own argv

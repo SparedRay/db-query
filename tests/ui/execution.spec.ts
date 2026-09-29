@@ -27,7 +27,9 @@ function twoStatements() {
 
 test("Run sends the statement under the cursor; Run all sends the whole buffer", async ({ page }) => {
   await connect(page, {
-    statement_at_cursor: () => "SELECT 1",
+    // `{ sql, start }` since Stage 19: a result can point back at the SQL
+    // that produced it, which needs to know where it was.
+    statement_at_cursor: () => ({ sql: "SELECT 1", start: 0 }),
     run_script: () => rowsResult([{ name: "n" }], [["1"]]),
   });
 
@@ -144,7 +146,7 @@ test("a multi-statement script gets one result tab per statement", async ({ page
   await page.click("#btn-run-all");
   await expect(page.locator("#tabs .tab")).toHaveCount(2);
   // The last statement is the one shown, which is what "the answer" usually is.
-  await expect(page.locator("#tabs .tab.active")).toHaveText(/2 ·/);
+  await expect(page.locator("#tabs .tab.active")).toContainText("Result 2");
 });
 
 test("a single statement gets no result tabs, because they would be noise", async ({ page }) => {
@@ -207,7 +209,7 @@ test("result tabs switch back and forth, whichever result is the larger", async 
   // die, because the return trip is the one that shrinks.
   for (const i of [0, 1, 0, 1]) {
     await tabs.nth(i).click();
-    await expect(page.locator("#tabs .tab.active")).toHaveText(new RegExp(`^${i + 1} \\u00b7`));
+    await expect(page.locator("#tabs .tab.active")).toContainText(`Result ${i + 1}`);
     await expect(page.locator("th[data-col]")).toHaveCount(i === 0 ? 2 : 1);
   }
   expect(errors).toEqual([]);
@@ -366,7 +368,7 @@ test("the tab that opens is the last one with rows, not the last statement", asy
   await connect(page, { run_script: () => r });
   await page.click("#btn-run-all");
 
-  await expect(page.locator("#tabs .tab.active")).toHaveText(/^1 ·/);
+  await expect(page.locator("#tabs .tab.active")).toContainText("Result 1");
   await expect(page.locator("table.rs")).toBeVisible();
 });
 

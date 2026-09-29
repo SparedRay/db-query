@@ -470,6 +470,21 @@ export function selectedText(view: EditorView): string | null {
   return text.trim() ? text : null;
 }
 
+/**
+ * Select `from..to` and bring it into view.
+ *
+ * Here rather than in `main.ts` because CodeMirror's `EditorView` is a value
+ * only inside this module — everywhere else it is a type, which is what keeps
+ * the editor's API one surface instead of an import scattered through the app.
+ */
+export function selectRange(view: EditorView, from: number, to: number) {
+  view.dispatch({
+    selection: { anchor: from, head: to },
+    effects: EditorView.scrollIntoView(from, { y: "center" }),
+  });
+  view.focus();
+}
+
 export function docText(view: EditorView): string {
   return view.state.doc.toString();
 }

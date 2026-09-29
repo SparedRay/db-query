@@ -73,6 +73,16 @@ pub enum Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct StatementResult {
     pub sql: String,
+    /// Where this statement sat in the script that was submitted, in **bytes**
+    /// — the splitter's own span, which was being computed and thrown away.
+    ///
+    /// The frontend adds the offset of that script within the buffer (zero for
+    /// "run everything", the selection's start for a selection) and can then
+    /// show which statement a result came from. Bytes, not characters, because
+    /// that is what every other offset crossing this boundary is; the renderer
+    /// converts once, where it already does so for diagnostics.
+    pub start: usize,
+    pub end: usize,
     /// `Some` only when we rewrote the statement. The UI must surface this.
     pub effective_sql: Option<String>,
     pub kind: StatementKind,
@@ -404,6 +414,8 @@ pub(crate) async fn mysql_run_script(
         if let Some(why) = crate::engine::refusal(&tab.server.capabilities, kind) {
             statements.push(StatementResult {
                 sql: text.to_string(),
+                start: span.start,
+                end: span.end,
                 effective_sql: None,
                 kind,
                 outcome: Outcome::Error { message: why },
@@ -466,6 +478,8 @@ pub(crate) async fn mysql_run_script(
         let is_error = matches!(outcome, Outcome::Error { .. });
         statements.push(StatementResult {
             sql: text.to_string(),
+            start: span.start,
+            end: span.end,
             effective_sql: rewritten,
             kind,
             outcome,

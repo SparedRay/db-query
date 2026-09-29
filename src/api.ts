@@ -538,11 +538,22 @@ export type Outcome =
   | { type: "error"; message: string };
 
 export interface StatementResult {
+  /** Byte offsets of this statement inside the script that was submitted. Add
+   *  the script's own offset in the buffer to find it in the editor. */
+  start: number;
+  end: number;
   sql: string;
   effectiveSql: string | null;
   kind: StatementKind;
   outcome: Outcome;
   elapsedMs: number;
+}
+
+/** What `statement_at_cursor` answers. */
+export interface StatementAt {
+  sql: string;
+  /** Byte offset of `sql` within the buffer that was sent. */
+  start: number;
 }
 
 export interface ScriptResult {
@@ -975,8 +986,9 @@ export const api = {
     invoke<SavedFile | null>("save_file_dialog", { suggestedName, contents, lineEnding }),
 
   // --- stateless
+  /** The statement under the cursor, and where it starts in `sql`. */
   statementAtCursor: (sql: string, cursor: number) =>
-    invoke<string | null>("statement_at_cursor", { sql, cursor }),
+    invoke<StatementAt | null>("statement_at_cursor", { sql, cursor }),
   /** Lay SQL out. Rejects rather than returning something that means
    *  something else, so a failure is worth showing. */
   formatSql: (sql: string) => invoke<string>("format_sql", { sql }),

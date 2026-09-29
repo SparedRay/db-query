@@ -57,7 +57,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, replaceRange,
   selectedText,
-  setDialect, setEditorTheme, setLinting, setSchema,
+  selectRange, setDialect, setEditorTheme, setLinting, setSchema,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -1573,7 +1573,56 @@ function showResultsInner(tab: ScriptTab) {
     onScrolled: (top) => { tab.scrollTop = top; },
     onSelectionChanged: () => refreshExportBar(),
     onCloseStatement: (i) => closeStatement(tab, i),
+    onRevealStatement: (i) => revealStatement(tab, i),
   });
+}
+
+/** Byte offset of a character position in the current buffer. */
+function byteOffsetOf(pos: number): number {
+  return new TextEncoder().encode(view.state.sliceDoc(0, pos)).length;
+}
+
+/**
+ * Select, in the editor, the statement that produced result `index`.
+ *
+ * **The buffer may have moved on.** The offsets were true when the script ran,
+ * and the text has been editable ever since, so they are checked rather than
+ * trusted: if what sits there is no longer that statement, its text is searched
+ * for instead, and if that fails nothing is selected and the status line says
+ * so. Selecting the wrong lines and calling it the source would be worse than
+ * selecting nothing.
+ */
+function revealStatement(tab: ScriptTab, index: number) {
+  const statement = tab.result?.statements[index];
+  if (!statement) return;
+
+  const doc = view.state.doc.toString();
+  const toChar = makeByteToChar(doc);
+  const from = toChar(tab.resultBase + statement.start);
+  const to = toChar(tab.resultBase + statement.end);
+  const found =
+    doc.slice(from, to) === statement.sql
+      ? { from, to }
+      : locate(doc, statement.sql);
+  if (!found) {
+    results.setMessage(
+      `The statement behind result ${index + 1} is no longer in this tab. ` +
+        "It ran as:\n\n" +
+        statement.sql,
+    );
+    return;
+  }
+
+  selectRange(view, found.from, found.to);
+}
+
+/** Where `needle` sits in `haystack`, if it sits there exactly once. */
+function locate(haystack: string, needle: string): { from: number; to: number } | null {
+  const at = haystack.indexOf(needle);
+  // Ambiguous is as good as missing: two identical statements give no reason
+  // to prefer one, and highlighting the wrong one would be a confident lie.
+  if (at === -1 || haystack.indexOf(needle, at + 1) !== -1) return null;
+  return { from: at, to: at + needle.length };
 }
 
 /**
@@ -1612,11 +1661,20 @@ function closeAllResults(tab: ScriptTab) {
   showResults(tab);
 }
 
-async function run(sql: string) {
+/**
+ * Run `sql`, which came from `base` bytes into this tab's buffer.
+ *
+ * `base` is zero for the whole buffer, the selection's start for a selection,
+ * and the statement's own start for one statement. Held on the tab because it
+ * is what turns a result back into the SQL that produced it — see
+ * `revealStatement`.
+ */
+async function run(sql: string, base = 0) {
   const tab = activeTab();
   // A view has no buffer to run, and its tab belongs to no connection.
   if (tab.kind !== "sql") return;
   if (!connected || tab.busy || !sql.trim()) return;
+  tab.resultBase = base;
   tab.error = null;
   setBusy(tab, true);
   if (isFocused(tab)) showResults(tab);
@@ -1712,13 +1770,13 @@ async function loadCompletionSchema() {
 /** Ctrl+Enter: the selection if there is one, else the statement under the cursor. */
 async function runStatementUnderCursor() {
   const sel = selectedText(view);
-  if (sel) return run(sel);
+  if (sel) return run(sel, byteOffsetOf(view.state.selection.main.from));
 
   // Boundary rules live in exactly one place — the Rust splitter. This asks
   // for the statement text rather than reimplementing the scan here, so the
   // statement we run is by construction the one execution would pick.
   const stmt = await api.statementAtCursor(docText(view), cursorByteOffset(view));
-  if (stmt) await run(stmt);
+  if (stmt) await run(stmt.sql, stmt.start);
 }
 
 els.btnRun.onclick = () => void runStatementUnderCursor();
