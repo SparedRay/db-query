@@ -71,3 +71,66 @@ with the "exactly once" guard removed the ambiguous test fails.
 **390 Rust unit tests, 794 UI tests on both engines.** One UI test failed once
 during a full run and did not reproduce on a re-run; it is a flake, unidentified
 rather than fixed.
+
+## 5. Found in use — 2026-09-29
+
+Two bugs from the same report, neither about result sets.
+
+### 5.1 Cancel did nothing when the server could not be reached
+
+> *"cancel a query seems to be failing as it looks stuck (If for example I need
+> a VPN but tried the query before connecting clicking on cancel does nothing
+> until we reach a timeout)"*
+
+Cancel did two things: set a flag the script reads **between** statements, and
+`KILL QUERY` from the connection's killer. Both assume the server answers. With
+the VPN down there is nothing to kill and nothing between statements — the wait
+is inside the socket, either in the statement or in opening the connection —
+so Cancel did nothing at all until the operating system gave up.
+
+It now also **wakes everything waiting on that tab**, through a per-tab
+`Notify`:
+
+* `session::cancellable` wraps the connect and the `CONNECTION_ID()` round trip
+  in `ensure_exec`, which is where a VPN-down query actually sits.
+* `exec::await_query` races the statement against it.
+
+**Dropping a query future abandons its connection mid-protocol**, so it stays
+the last resort. On a cancel — and on the existing timeout — the server is asked
+to stop and the future is given `CANCEL_GRACE` (two seconds, a round trip plus
+room) to unwind on its own. That is the good path: the query stops server-side,
+the connection is still good, and the tab keeps its session. Only when nothing
+comes back is the future dropped, and then the connection is discarded and the
+next run opens another.
+
+`Cancel` itself is now bounded too: `KILL` needs the killer connection, and
+opening one to an unreachable server is exactly as slow as the query being
+cancelled, so the attempt gets two seconds and its failure is not reported. The
+waiters are already awake by then, which is what stops the wait.
+
+Six tests. Three unit tests on `cancellable` (a cancelled wait stops, a cancel
+that arrived first is not lost, an ordinary wait still returns), three on
+`await_query` (returns, unwinds in time, never returns), and a live one:
+**a temporary table created before a cancelled query is still there afterwards**
+— the session survived, so the connection was not thrown away needlessly. With
+`CANCEL_GRACE` set to zero that live test fails.
+
+### 5.2 A new tab forgot which schema you were in
+
+> *"On new tab opening we are loosing the selected schema. We can mantain either
+> the default of the connection or the same as last opened tab"*
+
+A new tab took the connection's own database — where its session starts — and
+nothing else. So opening a tab while working in another schema dropped you back
+on the default, and the first unqualified name you wrote meant something else.
+
+It now inherits the database of the tab you were on (`create` calls `onCreated`
+before it activates the new tab, so that is still the previous one), falling
+back to the connection's. When the inherited one differs, the tab's session is
+moved with a `USE` — one round trip, and only then; the case where they agree
+costs nothing, which the existing test still pins.
+
+**396 Rust unit tests, 78 live MySQL, 798 UI on both engines.** The tab-scroll
+test that flaked in the last two runs was the strip's smooth scrolling being
+measured mid-animation; it now waits for the scroll to settle and passed three
+runs in a row.

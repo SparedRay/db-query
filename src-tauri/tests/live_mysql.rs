@@ -486,6 +486,58 @@ async fn m5_cancel_kills_a_slow_query_promptly() {
     assert!(r.cancelled, "script was not reported as cancelled: {r:?}");
 }
 
+/// **A cancel the server answered keeps the connection.**
+///
+/// Cancel can now stop *waiting* — it drops the statement's future and throws
+/// the connection away when nothing comes back, which is what makes Cancel mean
+/// something on a server that cannot be reached. Reachable is the common case,
+/// and there the `KILL` lands, the statement unwinds, and the connection is
+/// still good: the tab must keep working without a reconnect.
+#[tokio::test]
+#[ignore]
+async fn a_cancelled_query_leaves_the_tab_usable() {
+    use std::time::Duration;
+    let state = std::sync::Arc::new(connected().await);
+
+    // **Before** the cancel: a temporary table lives in the session, so it is
+    // gone the moment the connection is. Created afterwards it would prove
+    // nothing — a replacement connection would hold it just as well.
+    exec::run_script(
+        &state,
+        T,
+        "CREATE TEMPORARY TABLE before_cancel (id INT)",
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let killer = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        session::cancel_query(&killer, T).await.ok();
+    });
+    let cancelled = exec::run_script(&state, T, "SELECT SLEEP(30)", true, None)
+        .await
+        .unwrap();
+    assert!(cancelled.cancelled);
+
+    let r = exec::run_script(
+        &state,
+        T,
+        "SELECT COUNT(*) AS n FROM before_cancel",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(r.statements[0].outcome, Outcome::Rows { .. }),
+        "the connection did not survive the cancel: {:?}",
+        r.statements[0].outcome
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn m5_cancel_abandons_the_rest_of_the_script() {

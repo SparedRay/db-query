@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
@@ -358,10 +359,21 @@ pub struct TabSession {
     pub current_db: Mutex<Option<String>>,
     pub running: AtomicBool,
     pub cancel_requested: AtomicBool,
+    /// Woken when this tab is cancelled.
+    ///
+    /// **The flag alone was not enough.** It is read between statements, so a
+    /// cancel could only take effect once the current one returned — and the
+    /// whole point of Cancel is the statement that is not going to return. The
+    /// server is asked to `KILL` the query, which works whenever the server can
+    /// be reached; this is what lets everything that is *waiting* stop waiting
+    /// when it cannot. Opening the connection waits on it too: with the server
+    /// unreachable — a VPN that is not up yet — that is exactly where the wait
+    /// is, and Cancel did nothing at all until the operating system gave up.
+    pub cancelled: tokio::sync::Notify,
 }
 
 impl TabSession {
-    fn new(server: Arc<ServerConn>) -> Self {
+    pub(crate) fn new(server: Arc<ServerConn>) -> Self {
         // **A new tab starts on the profile's database, so it says so.**
         //
         // `options()` puts `profile.database` on every exec connection this tab
@@ -381,6 +393,7 @@ impl TabSession {
             current_db: Mutex::new(current_db),
             running: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
+            cancelled: tokio::sync::Notify::new(),
         }
     }
 }
@@ -707,13 +720,22 @@ pub async fn ensure_exec(
         profile.database = want_db;
     }
 
-    let mut c = open(&profile, &tab.server.password).await?;
-    let id: u64 = sqlx::query("SELECT CONNECTION_ID() AS id")
-        .fetch_one(&mut c)
-        .await
-        .map_err(|e| friendly(&e))?
-        .try_get("id")
-        .map_err(|e| friendly(&e))?;
+    let mut c = match cancellable(tab, open(&profile, &tab.server.password)).await {
+        Some(c) => c?,
+        None => return Err(CANCELLED.to_string()),
+    };
+    let id: u64 = match cancellable(
+        tab,
+        sqlx::query("SELECT CONNECTION_ID() AS id").fetch_one(&mut c),
+    )
+    .await
+    {
+        Some(r) => r
+            .map_err(|e| friendly(&e))?
+            .try_get("id")
+            .map_err(|e| friendly(&e))?,
+        None => return Err(CANCELLED.to_string()),
+    };
 
     tab.conn_id.store(id, Ordering::SeqCst);
     *guard = Some(c);
@@ -756,17 +778,67 @@ async fn kill_on(server: &ServerConn, conn_id: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// What a cancelled wait reports. Not an error the user did anything about.
+pub const CANCELLED: &str = "Cancelled.";
+
+/// How long `Cancel` itself will spend asking the server to stop.
+///
+/// `KILL` needs the killer connection, and opening one to a server that cannot
+/// be reached is exactly as slow as the query we are trying to cancel. Cancel
+/// must answer in a moment whatever the network is doing, so the attempt is
+/// bounded and its failure is not reported: the waiters have already been
+/// woken by then, which is what actually stops the wait.
+const KILL_DEADLINE: Duration = Duration::from_secs(2);
+
 /// Cancel the query running in one tab, and only that tab.
 ///
-/// Takes that tab's connection's killer lock and the tab's `conn_id`. It never
-/// takes the tab's `exec` lock — the query being killed is holding it.
+/// Two halves, and the second is the one added after a report of Cancel doing
+/// nothing on a server behind a VPN that was not up:
+///
+///   1. **Ask the server**, with `KILL QUERY` on the connection's killer. This
+///      is the good outcome: the query stops server-side, the statement's own
+///      future unwinds, and the connection stays usable.
+///   2. **Wake everything waiting on this tab.** Whoever is waiting gives the
+///      server a moment to answer and then stops waiting regardless — see
+///      `exec::await_query`. A connection abandoned mid-protocol is thrown
+///      away, which costs a reconnect and is what "cancel" has to mean when
+///      the other end is not there.
+///
+/// Never takes the tab's `exec` lock: the query being cancelled is holding it.
 pub(crate) async fn mysql_cancel_query(state: &AppState, tab_id: &str) -> Result<(), String> {
     let Some(tab) = tab_if_open(state, tab_id).await else {
         return Ok(());
     };
     // Flag first: even if KILL races the query finishing, the script stops.
     tab.cancel_requested.store(true, Ordering::SeqCst);
-    kill_on(&tab.server, tab.conn_id.load(Ordering::SeqCst)).await
+    tab.cancelled.notify_waiters();
+    // Bounded, and its failure is not the caller's problem: the waiters are
+    // already awake.
+    let _ = tokio::time::timeout(
+        KILL_DEADLINE,
+        kill_on(&tab.server, tab.conn_id.load(Ordering::SeqCst)),
+    )
+    .await;
+    Ok(())
+}
+
+/// Await `fut`, or `None` if this tab is cancelled while it runs.
+///
+/// The `Notified` future is armed **before** the flag is read, which is the
+/// documented way to use `Notify` without losing a wake-up that lands in the
+/// gap between the two.
+pub async fn cancellable<F: std::future::Future>(tab: &TabSession, fut: F) -> Option<F::Output> {
+    let notified = tab.cancelled.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if tab.cancel_requested.load(Ordering::SeqCst) {
+        return None;
+    }
+    tokio::pin!(fut);
+    tokio::select! {
+        out = &mut fut => Some(out),
+        _ = notified => None,
+    }
 }
 
 // ------------------------------------------------------------ engine dispatch
@@ -856,7 +928,7 @@ async fn connect_elastic(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn sample() -> ConnProfile {
@@ -875,6 +947,60 @@ mod tests {
             no_password: false,
             read_only: false,
         }
+    }
+
+    /// A tab whose server is never reached: enough to test what waiting on it
+    /// does, which is all these two tests are about.
+    pub(crate) fn offline_tab() -> TabSession {
+        let profile = sample();
+        let engine =
+            crate::elastic::ElasticEngine::new("http://127.0.0.1:1", Default::default(), None);
+        let capabilities = engine.capabilities().clone();
+        TabSession::new(Arc::new(ServerConn {
+            profile,
+            password: String::new(),
+            killer: None,
+            meta: None,
+            schema_cache: Mutex::new(HashMap::new()),
+            engine: Box::new(engine),
+            server_version: "test".into(),
+            capabilities,
+            introspection_count: AtomicU64::new(0),
+        }))
+    }
+
+    /// **What Cancel has to mean when the other end is not there.** A query
+    /// against a server behind a VPN that is not up sits in the socket; the
+    /// flag is only read between statements, and `KILL` cannot arrive. So the
+    /// wait itself is interruptible.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_wait_stops_waiting() {
+        let tab = offline_tab();
+        let waiting = cancellable(&tab, std::future::pending::<()>());
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tab.cancel_requested.store(true, Ordering::SeqCst);
+            tab.cancelled.notify_waiters();
+        };
+        let (out, ()) = tokio::join!(waiting, cancel);
+        assert!(out.is_none(), "a cancelled wait must not still be waiting");
+    }
+
+    /// The wake-up that lands *before* anybody waits must not be lost — the
+    /// reason `Notified` is armed before the flag is read.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_that_arrived_first_is_not_lost() {
+        let tab = offline_tab();
+        tab.cancel_requested.store(true, Ordering::SeqCst);
+        assert!(cancellable(&tab, std::future::pending::<()>())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_uncancelled_wait_returns_what_it_waited_for() {
+        let tab = offline_tab();
+        assert_eq!(cancellable(&tab, async { 7 }).await, Some(7));
     }
 
     /// The regression test for the bug where every remembered password looked

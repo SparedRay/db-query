@@ -2025,17 +2025,28 @@ tabs = new TabManager($("script-tabs"), view, {
     if (tab.connectionId === null) return;
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
-    void api.openTab(tab.connectionId, tab.id);
-    // **The connection already knows which database it is on** — the profile
-    // named one, or the server has a default — and `connect` has reported it
-    // since Stage 2 with nothing reading it. A new tab\'s session starts on
-    // that database, so saying it has none was never true; it was just never
-    // contradicted until autocomplete needed a schema to describe and found
-    // nothing until somebody clicked a database in the tree.
+    const registered = api.openTab(tab.connectionId, tab.id);
+    void registered.catch(() => {});
+    // **A new tab opens on the schema you were just in.**
     //
-    // `??=`: a restored tab arrives here with the database it was left on, and
-    // that one wins.
-    tab.activeDb ??= conns?.get(tab.connectionId)?.currentDatabase ?? null;
+    // The connection's own database is where a tab's *session* starts (the
+    // profile named one, or the server has a default), and that used to be all
+    // a new tab knew. So opening a tab while working in another schema dropped
+    // you back on the default one, and every unqualified name in the first
+    // statement you wrote meant something else.
+    //
+    // `tabs.active()` is still the tab you were on: `create` calls this hook
+    // before it activates the new one. A restored tab arrives with the database
+    // it was left on, and `??=` lets that win over both.
+    const startsOn = conns?.get(tab.connectionId)?.currentDatabase ?? null;
+    tab.activeDb ??= tabs?.active()?.activeDb ?? startsOn;
+    // The session has to agree. It starts on the connection's database, so
+    // anything else is a `USE` — one round trip, and only when they differ.
+    if (tab.activeDb && tab.activeDb !== startsOn) {
+      const db = tab.activeDb;
+      // After the tab exists, or the session it should switch does not yet.
+      void registered.then(() => api.useDatabase(tab.id, db)).catch(() => {});
+    }
     session.schedule();
   },
   onActivate: (tab) => {

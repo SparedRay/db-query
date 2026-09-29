@@ -282,17 +282,34 @@ test("the arrows walk the strip back to the first tab and forward again", async 
   const first = "#script-tabs .stab:first-child";
   expect(await inView(page, first)).toBe(false);
 
-  for (let i = 0; i < 20 && !(await inView(page, first)); i++) {
+  // Each press scrolls smoothly, so the strip is still moving when the click
+  // returns: wait for it to *settle* rather than for a fixed delay, or the next
+  // press is measured mid-animation. That was this test's one flake.
+  const scrollLeft = () =>
+    page.evaluate(() => document.getElementById("script-tabs")!.scrollLeft);
+  const settled = async () => {
+    let last = -1;
+    await expect
+      .poll(async () => {
+        const now = await scrollLeft();
+        const same = now === last;
+        last = now;
+        return same;
+      })
+      .toBe(true);
+    return last;
+  };
+
+  for (let i = 0; i < 20; i++) {
+    if ((await settled()) === 0) break;
     await page.click("#stab-left");
-    await page.waitForTimeout(250);
   }
+  expect(await scrollLeft(), "the arrows never reached the start").toBe(0);
   expect(await inView(page, first), "the arrows never reached the first tab").toBe(true);
   await expect(page.locator("#stab-left")).toBeDisabled();
 
   await page.click("#stab-right");
-  await expect
-    .poll(() => page.evaluate(() => document.getElementById("script-tabs")!.scrollLeft))
-    .toBeGreaterThan(0);
+  await expect.poll(scrollLeft).toBeGreaterThan(0);
 });
 
 /** Scrolling to look must not be undone by the strip re-rendering. */

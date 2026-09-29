@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
-  CONN_INFO, commandNames, connect, installBackend, openDatabase, schemaBackend,
+  CONN_INFO, calls, commandNames, connect, installBackend, openDatabase, schemaBackend,
 } from "./harness";
 
 /**
@@ -232,4 +232,51 @@ test("a failed expansion clears the spinner and shows why", async ({ page }) => 
   g.fail(new Error("SELECT command denied"));
   await expect(page.locator(".node.table.loading")).toHaveCount(0);
   await expect(page.locator(".children .empty")).toContainText("SELECT command denied");
+});
+
+// ------------------------------------------------ a new tab's schema
+
+/**
+ * **A new tab opens on the schema you were in.**
+ *
+ * A tab's session starts on the connection's own database, and that used to be
+ * all a new tab knew — so opening one while working in another schema dropped
+ * you back on the default, and the first unqualified name you typed meant
+ * something else.
+ */
+test("a new tab keeps the database the last one was on", async ({ page }) => {
+  await connect(page, {
+    ...schemaBackend,
+    connect: () => ({ ...CONN_INFO, databases: ["poc", "warehouse"] }),
+    use_database: () => null,
+  });
+
+  await page.locator('.node.db:has-text("warehouse")').click();
+  await page.locator('.node.group:has-text("Tables")').waitFor();
+  await expect(page.locator(".node.db.db-active")).toHaveText(/warehouse/);
+
+  await page.click(".stab-add");
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
+
+  // The tree still points at it, and the new tab's *session* was moved to it:
+  // a `USE` for the new tab's id, not the old one's.
+  await expect(page.locator(".node.db.db-active")).toHaveText(/warehouse/);
+  const uses = (await calls(page))
+    .filter((c) => c.cmd === "use_database")
+    .map((c) => c.args.tabId as string);
+  const opened = (await calls(page))
+    .filter((c) => c.cmd === "open_tab")
+    .map((c) => c.args.tabId as string);
+  expect(uses).toContain(opened[opened.length - 1]);
+});
+
+/** And the connection's own database still costs no round trip. */
+test("a new tab on the connection's own database issues no USE", async ({ page }) => {
+  await connect(page, { ...schemaBackend, use_database: () => null });
+  await page.locator('.node.db:has-text("poc")').click();
+  await page.locator('.node.group:has-text("Tables")').waitFor();
+
+  await page.click(".stab-add");
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
+  expect(await commandNames(page)).not.toContain("use_database");
 });
