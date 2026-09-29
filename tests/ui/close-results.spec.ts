@@ -65,10 +65,14 @@ test("one statement can be closed, leaving the others", async ({ page }) => {
   await page.locator("#tabs .tab").nth(1).locator(".tab-close").click();
 
   await expect(page.locator("#tabs .tab")).toHaveCount(2);
-  const labels = await page.locator("#tabs .tab").allInnerTexts();
-  expect(labels.join(" ")).toContain("SELECT 1");
-  expect(labels.join(" ")).toContain("SELECT 3");
-  expect(labels.join(" ")).not.toContain("SELECT 2");
+  // Which statement each tab belongs to is on its tooltip: the label is the
+  // result's number (Stage 19), which renumbers when one is closed.
+  const titles = await page
+    .locator("#tabs .tab")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("title") ?? ""));
+  expect(titles.join(" ")).toContain("SELECT 1");
+  expect(titles.join(" ")).toContain("SELECT 3");
+  expect(titles.join(" ")).not.toContain("SELECT 2");
 });
 
 test("the strip disappears once one statement is left, and the button finishes it", async ({
@@ -99,7 +103,7 @@ test("closing a statement does not select the one being closed", async ({ page }
   // still be the same statement, not whatever slid into its index.
   await page.locator("#tabs .tab").nth(2).click();
   await page.locator("#tabs .tab").first().locator(".tab-close").click();
-  await expect(page.locator("#tabs .tab.active")).toContainText("SELECT 3");
+  await expect(page.locator("#tabs .tab.active")).toHaveAttribute("title", /SELECT 3/);
 });
 
 test("the cell menu closes the result", async ({ page }) => {

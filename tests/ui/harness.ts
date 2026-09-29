@@ -275,12 +275,18 @@ export async function logNotes(
 export function rowsResult(
   columns: Array<{ name: string; sqlType?: string }>,
   rows: unknown[][],
-  opts?: { truncated?: boolean; sql?: string },
+  opts?: { truncated?: boolean; sql?: string; start?: number },
 ) {
+  const sql = opts?.sql ?? "SELECT 1";
   return {
     statements: [
       {
-        sql: opts?.sql ?? "SELECT 1",
+        sql,
+        // Byte offsets within the submitted script, as Rust reports them. The
+        // default suits a one-statement run; a multi-statement fixture sets
+        // `start` so the offsets describe where each one really sits.
+        start: opts?.start ?? 0,
+        end: (opts?.start ?? 0) + sql.length,
         // `string | null`: a test that pins the auto-LIMIT chip sets this.
         effectiveSql: null as string | null,
         kind: "select",

@@ -473,6 +473,8 @@ impl crate::engine::Engine for ElasticEngine {
             let is_error = matches!(outcome, crate::exec::Outcome::Error { .. });
             statements.push(StatementResult {
                 sql: text.to_string(),
+                start: span.start,
+                end: span.end,
                 // Never rewritten: the row cap is a request field, not a LIMIT
                 // appended to what the user typed.
                 effective_sql: None,

@@ -61,6 +61,8 @@ export interface ResultsFor {
    * one means, including what happens when it was the last.
    */
   onCloseStatement: (index: number) => void;
+  /** Show the caller which statement produced result `index`. */
+  onRevealStatement: (index: number) => void;
 }
 
 export class ResultView {
@@ -75,6 +77,7 @@ export class ResultView {
   private selection: GridSelection = emptySelection();
   private onSelectionChanged: () => void = () => {};
   private onCloseStatement: (index: number) => void = () => {};
+  private onRevealStatement: (index: number) => void = () => {};
   /** Anchors for shift-click ranges. */
   private lastCol: number | null = null;
   private lastRow: number | null = null;
@@ -118,6 +121,7 @@ export class ResultView {
     this.onSelect = () => {};
     this.onScrolled = () => {};
     this.onCloseStatement = () => {};
+    this.onRevealStatement = () => {};
     this.selection = emptySelection();
     this.tabsEl.replaceChildren();
     this.gridEl.replaceChildren(el("div", "empty", text));
@@ -131,6 +135,7 @@ export class ResultView {
     this.onScrolled = opts.onScrolled;
     this.onSelectionChanged = opts.onSelectionChanged;
     this.onCloseStatement = opts.onCloseStatement;
+    this.onRevealStatement = opts.onRevealStatement;
     this.widths = opts.widths;
     this.selection = opts.selection;
 
@@ -170,7 +175,12 @@ export class ResultView {
     }
     const nodes = r.statements.map((s, i) => {
       const t = el("button", "tab");
-      t.textContent = `${i + 1} · ${firstLine(s.sql)}`;
+      // **Numbered, not quoted.** The label used to be the statement's first
+      // line, which is the same forty characters for every result of a script
+      // that selects from the same table — and unreadable once truncated. The
+      // SQL is a keystroke away (double-click) and on the tooltip.
+      t.textContent = `Result ${i + 1}`;
+      t.title = `${firstLine(s.sql)}\nDouble-click to select this statement in the editor`;
       const badge = el("span", "badge");
       if (s.outcome.type === "rows") {
         badge.textContent = `${s.outcome.rows.length}`;
@@ -198,6 +208,10 @@ export class ResultView {
       t.append(close);
 
       if (i === this.active) t.classList.add("active");
+      // Double-click reveals the statement that produced this result. Its own
+      // gesture rather than a second control, because selecting the tab is
+      // what a single click already means.
+      t.ondblclick = () => this.onRevealStatement(i);
       t.onclick = () => {
         this.active = i;
         // A different statement has different rows and columns, so indices from

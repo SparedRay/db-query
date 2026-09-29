@@ -66,6 +66,15 @@ export interface ScriptTab {
   result: ScriptResult | null;
   /** Last failure for this tab. Held as state so it survives a tab switch. */
   error: string | null;
+  /**
+   * Byte offset, within this tab's buffer, of the script that produced
+   * `result`.
+   *
+   * Zero for "run everything"; the selection's start when a selection was run;
+   * the statement's start when one statement was. With each statement's own
+   * span, this is what lets a result point back at the SQL that made it.
+   */
+  resultBase: number;
   activeResultIndex: number;
   colWidths: Map<string, number>;
   /**
@@ -194,6 +203,7 @@ export function emptyResultState() {
   return {
     result: null as ScriptResult | null,
     error: null as string | null,
+    resultBase: 0,
     activeResultIndex: 0,
     colWidths: new Map<string, number>(),
     colSelection: emptySelection(),
