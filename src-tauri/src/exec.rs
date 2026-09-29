@@ -209,46 +209,82 @@ pub async fn stream_to_file(
     }
 }
 
-/// Await a query, optionally KILLing it after `timeout_secs`.
+/// What became of a statement we were waiting on.
+pub enum Waited<T> {
+    /// It came back — with rows, or with the server's error. Either way the
+    /// connection unwound properly and stays usable.
+    Done(Result<T, sqlx::Error>),
+    /// It was cancelled and never came back, so we stopped waiting. The
+    /// connection is mid-protocol and has to be thrown away.
+    Abandoned,
+}
+
+/// How long a cancelled statement is given to unwind before it is abandoned.
 ///
-/// On expiry we do NOT drop the future — that would abandon a connection
-/// mid-protocol and leave it unusable for the rest of the session. Instead we
-/// KILL from the idle control connection and then let the original future
-/// unwind normally, which is what keeps the exec connection reusable.
-async fn await_with_timeout<F, T>(
+/// The good path — `KILL QUERY` reaches the server, the query stops, the future
+/// returns an error — takes a round trip. This is that round trip plus room,
+/// and it is the whole cost of keeping a connection reusable when the server is
+/// reachable. Past it, the server is not answering and no amount of waiting is
+/// going to make Cancel mean anything.
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// Await a query, KILLing it after `timeout_secs` and giving up on it if the
+/// user cancels and the server does not answer.
+///
+/// **Dropping a query future abandons the connection mid-protocol**, so it is
+/// the last resort rather than the first: on a timeout, and on a cancel, the
+/// server is asked to stop and the future is allowed to unwind on its own. Only
+/// when that produces nothing within [`CANCEL_GRACE`] is the future dropped —
+/// which is the case a user on a VPN that is not up yet has, where Cancel used
+/// to do nothing at all until the operating system gave up on the socket.
+async fn await_query<F, T>(
     fut: F,
     timeout_secs: Option<u64>,
     state: &AppState,
+    tab: &session::TabSession,
     tab_id: &str,
     timed_out: &mut bool,
-) -> Result<T, sqlx::Error>
+) -> Waited<T>
 where
     F: Future<Output = Result<T, sqlx::Error>>,
 {
     tokio::pin!(fut);
 
-    let mut expired = false;
-    let early = match timeout_secs.filter(|s| *s > 0) {
-        Some(secs) => tokio::select! {
-            r = &mut fut => Some(r),
-            _ = tokio::time::sleep(Duration::from_secs(secs)) => {
-                expired = true;
-                None
-            }
-        },
-        None => None,
-    };
+    // Armed before the flag is read, so a cancel that lands in between is not
+    // lost. See `session::cancellable`, which does the same for connecting.
+    let notified = tab.cancelled.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
 
-    if let Some(r) = early {
-        return r;
+    let mut expired = false;
+    let mut asked_to_stop = tab.cancel_requested.load(Ordering::SeqCst);
+    if !asked_to_stop {
+        match timeout_secs.filter(|s| *s > 0) {
+            Some(secs) => tokio::select! {
+                r = &mut fut => return Waited::Done(r),
+                _ = &mut notified => asked_to_stop = true,
+                _ = tokio::time::sleep(Duration::from_secs(secs)) => expired = true,
+            },
+            None => tokio::select! {
+                r = &mut fut => return Waited::Done(r),
+                _ = &mut notified => asked_to_stop = true,
+            },
+        }
     }
+
     if expired {
         *timed_out = true;
         // Also sets this tab's cancel_requested, so the rest of its script is
         // abandoned. Other tabs are untouched.
         session::cancel_query(state, tab_id).await.ok();
     }
-    fut.await
+
+    // Asked to stop, one way or the other. Give the server its round trip.
+    let _ = asked_to_stop;
+    match tokio::time::timeout(CANCEL_GRACE, &mut fut).await {
+        Ok(r) => Waited::Done(r),
+        Err(_) => Waited::Abandoned,
+    }
 }
 
 /// First bare word of the statement, uppercased, read from the masked text so
@@ -391,6 +427,9 @@ pub(crate) async fn mysql_run_script(
     let mut statements = Vec::new();
     let mut aborted_at = None;
     let mut cancelled = false;
+    // Set when a statement was cancelled and never came back: its connection
+    // is mid-protocol and cannot be reused.
+    let mut abandoned = false;
     let mut timed_out = false;
     let mut new_db: Option<String> = None;
     let mut rows_budget = MAX_SCRIPT_ROWS;
@@ -433,8 +472,13 @@ pub(crate) async fn mysql_run_script(
         let started = Instant::now();
         let outcome = if returns_rows(kind) {
             let fut = (&mut *conn).fetch_all(raw(to_run));
-            match await_with_timeout(fut, timeout_secs, state, tab_id, &mut timed_out).await {
-                Ok(rows) => {
+            match await_query(fut, timeout_secs, state, &tab, tab_id, &mut timed_out).await {
+                Waited::Abandoned => {
+                    cancelled = true;
+                    abandoned = true;
+                    break;
+                }
+                Waited::Done(Ok(rows)) => {
                     let columns = rows.first().map(columns_of).unwrap_or_default();
                     // Spend from the script-wide budget before decoding, so a
                     // long script cannot balloon memory one statement at a time.
@@ -454,14 +498,19 @@ pub(crate) async fn mysql_run_script(
                         truncated,
                     }
                 }
-                Err(e) => Outcome::Error {
+                Waited::Done(Err(e)) => Outcome::Error {
                     message: friendly(&e),
                 },
             }
         } else {
             let fut = (&mut *conn).execute(raw(to_run));
-            match await_with_timeout(fut, timeout_secs, state, tab_id, &mut timed_out).await {
-                Ok(r) => {
+            match await_query(fut, timeout_secs, state, &tab, tab_id, &mut timed_out).await {
+                Waited::Abandoned => {
+                    cancelled = true;
+                    abandoned = true;
+                    break;
+                }
+                Waited::Done(Ok(r)) => {
                     if let Some(db) = used_database(text) {
                         new_db = Some(db);
                     }
@@ -469,7 +518,7 @@ pub(crate) async fn mysql_run_script(
                         rows: r.rows_affected(),
                     }
                 }
-                Err(e) => Outcome::Error {
+                Waited::Done(Err(e)) => Outcome::Error {
                     message: friendly(&e),
                 },
             }
@@ -502,6 +551,15 @@ pub(crate) async fn mysql_run_script(
     let cancelled = cancelled || tab.cancel_requested.load(Ordering::SeqCst);
 
     tab.running.store(false, Ordering::SeqCst);
+    // **A statement we stopped waiting for takes its connection with it.** The
+    // future was dropped mid-protocol, so whatever is still on the wire would
+    // be read as the answer to the *next* statement. Dropping it here costs a
+    // reconnect on the next run — `ensure_exec` opens one — and is the price of
+    // Cancel meaning something when the server cannot be reached.
+    if abandoned {
+        *guard = None;
+        tab.conn_id.store(0, Ordering::SeqCst);
+    }
     drop(guard);
 
     // A bare `USE somedb;` in the script moves THIS tab's active database, and
@@ -540,6 +598,79 @@ pub async fn run_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::session::tests::offline_tab;
+
+    /// A statement that comes back on its own keeps its connection.
+    #[tokio::test(start_paused = true)]
+    async fn a_statement_that_returns_is_not_abandoned() {
+        let tab = offline_tab();
+        let state = AppState::default();
+        let mut timed_out = false;
+        let waited = await_query(
+            async { Ok::<u8, sqlx::Error>(7) },
+            None,
+            &state,
+            &tab,
+            "t1",
+            &mut timed_out,
+        )
+        .await;
+        assert!(matches!(waited, Waited::Done(Ok(7))));
+        assert!(!timed_out);
+    }
+
+    /// **Cancelled, and the server answered.** `KILL` reached it, the query
+    /// stopped, the future unwound — so the connection is still good and is
+    /// kept. This is the path that must not regress now that abandoning one is
+    /// possible at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_statement_that_unwinds_in_time_keeps_its_connection() {
+        let tab = offline_tab();
+        let state = AppState::default();
+        let mut timed_out = false;
+
+        tab.cancel_requested.store(true, Ordering::SeqCst);
+        let waited = await_query(
+            async {
+                // The round trip a KILL costs, well inside the grace period.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Err::<u8, sqlx::Error>(sqlx::Error::RowNotFound)
+            },
+            None,
+            &state,
+            &tab,
+            "t1",
+            &mut timed_out,
+        )
+        .await;
+        assert!(
+            matches!(waited, Waited::Done(Err(_))),
+            "it came back, so it is not abandoned"
+        );
+    }
+
+    /// **Cancelled, and nothing came back.** The server is not reachable, so
+    /// waiting longer buys nothing: the future is dropped and the caller throws
+    /// the connection away.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_statement_that_never_returns_is_abandoned() {
+        let tab = offline_tab();
+        let state = AppState::default();
+        let mut timed_out = false;
+
+        tab.cancel_requested.store(true, Ordering::SeqCst);
+        let waited = await_query(
+            std::future::pending::<Result<u8, sqlx::Error>>(),
+            None,
+            &state,
+            &tab,
+            "t1",
+            &mut timed_out,
+        )
+        .await;
+        assert!(matches!(waited, Waited::Abandoned));
+    }
 
     #[test]
     fn session_statements_are_not_confused_with_modifications() {

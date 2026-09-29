@@ -152,6 +152,10 @@ base64 = "0.23"
 # runtime; it is a dev-dependency, so it reaches no shipped binary, and it adds
 # no crate — this is the same `tauri` already compiled above.
 tauri = { version = "2", features = ["test"] }
+# `test-util` is tokio's clock control: a test for "cancel does not wait" that
+# really waits two seconds is a test nobody runs. Dev-only, and the same tokio
+# already compiled above — no new crate.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = ["custom-protocol"]
