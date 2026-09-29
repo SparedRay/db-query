@@ -212,8 +212,7 @@ body {
   padding: 7px;
   gap: 0;
   grid-template-columns:
-    48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr)
-    var(--mig-gap, 0px) var(--mig-w, 0px);
+    48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr);
   /* The row must be pinned, not implicit. An implicit row is `auto`, which
      sizes to its tallest child — so a schema with more tables than fit made the
      row taller than the window, pushed the results grid below the fold, and
@@ -238,7 +237,7 @@ body {
    a region of one flat screen — the same move the settings fieldsets make.
    `overflow: hidden` is what keeps a sticky table header or a long tree from
    painting over the rounded corner. */
-.railbar, #sidebar, #editor-pane, #results-pane, #migrations-pane {
+.railbar, #sidebar, #editor-pane, #results-pane {
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
@@ -249,8 +248,6 @@ body {
 #app.schema-closed .railbar { border-right: 1px solid var(--border); border-radius: 9px; }
 #sidebar { border-left: none; border-radius: 0 9px 9px 0; }
 
-/* Open: the splitter's 7px and the pane's own width become real tracks. */
-#app.migrations-open { --mig-gap: 7px; --mig-w: var(--mig-pane-w, 340px); }
 
 /* Collapsed: the schema's track and its splitter go to nothing, and the width
    the user dragged is left alone in `--sidebar-w` so reopening restores it
@@ -268,19 +265,6 @@ body {
 #app > #vsplit { grid-column: 3; }
 #app > #main { grid-column: 4; }
 #app > #msplit { grid-column: 5; }
-#app > #migrations-pane { grid-column: 6; }
-
-#migrations-pane {
-  display: flex; flex-direction: column;
-  min-width: 0; min-height: 0;
-  background: var(--bg-raised);
-}
-/* The head reuses `.pane-head`, which the sidebar and the editor toolbar also
-   wear. Its own wants — a section label's weight, and a title that takes the
-   slack so Refresh sits hard right — are therefore scoped to this pane. Once
-   they were not, and `.pane-head > :first-child { flex: 1 }` reached the
-   sidebar's colour dot and the editor's Run button and stretched both. */
-#migrations-pane .pane-head { font-weight: 600; color: var(--fg-strong); }
 #mig-title {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -339,6 +323,11 @@ body {
   text-transform: uppercase; letter-spacing: .4px;
 }
 .mig-side-toggle:hover { color: var(--fg); }
+/* The same caret the tree uses, rotating rather than swapping glyph, so open
+   and shut cannot drift apart. */
+.mig-side-toggle .twisty { display: flex; align-items: center; color: var(--fg-dim); }
+.mig-side-toggle .twisty svg { width: 12px; height: 12px; transition: transform .12s ease; }
+.mig-side-toggle .twisty.open svg { transform: rotate(90deg); }
 .mig-side-body { overflow: auto; padding-bottom: 4px; }
 /* Rows read as tree rows here: same size, same hover, indented under the file. */
 .mig-side .mig-project-head { padding: 3px 10px; }
@@ -370,8 +359,6 @@ body {
    wall of buttons. Focus shows it too, so it is reachable by keyboard. */
 .mig-uptohere { font-family: system-ui, sans-serif; opacity: 0; }
 .mig-row:hover .mig-uptohere, .mig-uptohere:focus-visible { opacity: 1; }
-/* The pane is 340px wide: there is no room for either, and there never was. */
-#migrations-pane .mig-when { display: none; }
 
 .stab.stab-view .stab-origin { color: var(--fg-dim); opacity: 1; }
 

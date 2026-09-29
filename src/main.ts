@@ -36,7 +36,6 @@ import { createTheme, type ThemePref } from "./theme";
 import {
   AI_PRESETS, EDITOR_THEMES, FONTS, applyAppearance, load as loadSettings,
   type EditorTheme,
-  type MigrationsLayout,
   save as saveSettings,
 } from "./settings";
 import { contextMenu } from "./menu";
@@ -74,15 +73,10 @@ const els = {
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
   btnSchema: $<HTMLButtonElement>("btn-schema"),
-  btnMigrations: $<HTMLButtonElement>("btn-migrations"),
-  msplit: $("msplit"),
-  migrationsPane: $("migrations-pane"),
-  migTitle: $("mig-title"),
-  migEnv: $("mig-env"),
-  migProjects: $("mig-projects"),
   migSide: $("mig-side"),
   migSideBody: $("mig-side-body"),
   migSideToggle: $<HTMLButtonElement>("mig-side-toggle"),
+  migSideCaret: $("mig-side-caret"),
   btnMigSideAdd: $<HTMLButtonElement>("btn-mig-side-add"),
   migView: $("mig-view"),
   editorHead: $("editor-head"),
@@ -93,11 +87,6 @@ const els = {
   btnMigViewApply: $<HTMLButtonElement>("btn-mig-view-apply"),
   btnMigViewRepair: $<HTMLButtonElement>("btn-mig-view-repair"),
   btnMigViewRefresh: $<HTMLButtonElement>("btn-mig-view-refresh"),
-  btnMigAdd: $<HTMLButtonElement>("btn-mig-add"),
-  migList: $("mig-list"),
-  btnMigRefresh: $<HTMLButtonElement>("btn-mig-refresh"),
-  btnMigApply: $<HTMLButtonElement>("btn-mig-apply"),
-  btnMigRepair: $<HTMLButtonElement>("btn-mig-repair"),
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
@@ -151,7 +140,6 @@ const els = {
   setMcpOn: $<HTMLInputElement>("set-mcp-on"),
   setMcpPort: $<HTMLInputElement>("set-mcp-port"),
   setFlywayPath: $<HTMLInputElement>("set-flyway-path"),
-  setMigLayout: $<HTMLSelectElement>("set-mig-layout"),
   setFlywayNote: $("set-flyway-note"),
   setDiagnosticsNote: $("set-diagnostics-note"),
   btnDiagnostics: $<HTMLButtonElement>("btn-diagnostics"),
@@ -250,7 +238,6 @@ let connected = false;
 // and a `let` further down is in its temporal dead zone until then — which
 // threw on every boot before this moved.
 let schemaOpen = true;
-let migrationsOpen = false;
 let activeDb: string | null = null;
 
 /**
@@ -445,7 +432,6 @@ function syncConnLabel() {
   els.btnConnect.classList.toggle("danger", isLive);
   // Whether this connection can host a Flyway project is a property of the
   // connection, so the toggle follows it rather than being switched on once.
-  refreshMigrationsButton();
 
   if (!active) {
     els.connLabel.textContent = "No connection";
@@ -884,7 +870,6 @@ for (const [el, name] of [
   [els.btnAssistant, "assistant"],
   [els.btnHistory, "history"],
   [els.btnSchema, "sidebar"],
-  [els.btnMigrations, "migrations"],
   [els.btnSettings, "settings"],
 ] as const) {
   el.append(icon(name));
@@ -1777,21 +1762,6 @@ draggable(els.hsplit, "y");
 
 // The migrations pane grows from the right, so its splitter measures the other
 // way — the pointer's distance from the window edge, not from the origin.
-els.msplit.addEventListener("mousedown", (e) => {
-  e.preventDefault();
-  els.msplit.classList.add("dragging");
-  const move = (ev: MouseEvent) => {
-    const w = Math.min(Math.max(220, window.innerWidth - ev.clientX), window.innerWidth - 420);
-    document.documentElement.style.setProperty("--mig-pane-w", `${w}px`);
-  };
-  const up = () => {
-    els.msplit.classList.remove("dragging");
-    document.removeEventListener("mousemove", move);
-    document.removeEventListener("mouseup", up);
-  };
-  document.addEventListener("mousemove", move);
-  document.addEventListener("mouseup", up);
-});
 
 /**
  * Lay the buffer out — the selection if there is one, otherwise the whole tab.
@@ -2079,6 +2049,11 @@ void session.boot().then((warning) => {
   if (warning) results.setMessage(warning);
 });
 
+// The sidebar's migrations section, filled at boot. It reads the project files
+// and the saved connections and asks Flyway nothing, so it costs a file read —
+// and a project nobody can see is a project nobody remembers they added.
+void renderMigrations();
+
 // One source of truth for the numbers the backend owns, so the UI asks rather
 // than repeating them.
 let appDefaults: AppDefaults = { browseLimit: 1000, maxRows: 0, mcpPort: 0 };
@@ -2127,7 +2102,6 @@ function applySettings() {
   // Via the existing helper, which owns the debounce bucket — reconfiguring
   // the linter behind its back would leave `appliedLintDelay` lying.
   applyLintSetting(true);
-  applyMigrationsLayout();
 }
 
 for (const f of FONTS) {
@@ -2387,7 +2361,6 @@ function openSettings() {
   els.setBrowse.value = String(settings.browseLimit);
   els.setMcpPort.value = String(mcpPort());
   els.setFlywayPath.value = settings.flywayPath;
-  els.setMigLayout.value = settings.migrationsLayout;
   els.setFlywayNote.textContent = "";
   els.setUpdateNote.hidden = true;
   // Ask the backend rather than trusting the stored preference: the server can
@@ -2402,7 +2375,6 @@ function openSettings() {
  *  makes you guess what a font looks like before you can see it. */
 function commit() {
   settings.flywayPath = els.setFlywayPath.value.trim();
-  settings.migrationsLayout = els.setMigLayout.value as MigrationsLayout;
   settings.fontFamily = els.setFont.value;
   settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
   settings.editorTheme = els.setEditorColours.value as EditorTheme;
@@ -2418,7 +2390,7 @@ function commit() {
 for (const el of [
   els.setFont, els.setFontSize, els.setEditorColours,
   els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
-  els.setFlywayPath, els.setMigLayout,
+  els.setFlywayPath,
 ]) {
   el.onchange = commit;
 }
@@ -2967,57 +2939,11 @@ function elem(tag: string, cls: string, text?: string): HTMLElement {
   return e;
 }
 
-/**
- * Put the chosen migrations layout on screen.
- *
- * Runs on boot and on every settings change. Switching closes whatever the
- * other layout had open: two lists of the same projects, one of them stale, is
- * worse than one.
- */
-function applyMigrationsLayout() {
-  const pane = settings.migrationsLayout === "pane";
-  els.migSide.hidden = pane;
-  els.btnMigrations.title = pane ? "Migrations" : "Migrations (in the sidebar)";
-  if (pane) {
-    tabs?.closeMigrations();
-  } else if (migrationsOpen) {
-    toggleMigrations(false);
-  }
-  // The sidebar list is cheap — it reads the project files and the saved
-  // connections, and asks Flyway nothing — so it can be filled at boot.
-  if (!pane) void renderMigrations();
-}
-
-/** Collapse or expand the sidebar section. */
+/** Collapse or expand the sidebar's migrations section. */
 function toggleMigrationsSection(open: boolean) {
   els.migSide.classList.toggle("collapsed", !open);
   els.migSideToggle.setAttribute("aria-expanded", String(open));
-  els.migSideToggle.querySelector(".twisty")?.classList.toggle("open", open);
-}
-
-/**
- * The migrations toggle is always offered (Stage 17 §3.1).
- *
- * It used to follow the active connection — shown only on an engine Flyway can
- * drive, and redrawn on every switch — because a project was attached to a
- * connection. A project stands on its own now, and a pane that changed with
- * the connection you clicked implied that connection was the one being
- * migrated, which it never was.
- */
-function refreshMigrationsButton() {
-  els.btnMigrations.hidden = false;
-  els.btnMigrations.setAttribute("aria-pressed", String(migrationsOpen));
-  els.btnMigrations.classList.toggle("on", migrationsOpen);
-}
-
-function toggleMigrations(open: boolean) {
-  migrationsOpen = open;
-  document.getElementById("app")!.classList.toggle("migrations-open", open);
-  els.migrationsPane.hidden = !open;
-  els.msplit.hidden = !open;
-  els.btnMigrations.setAttribute("aria-pressed", String(open));
-  els.btnMigrations.classList.toggle("on", open);
-  if (open) void renderMigrations();
+  els.migSideCaret.classList.toggle("open", open);
 }
 
 /**
@@ -3046,36 +2972,30 @@ function toggleSchema(open: boolean) {
 els.btnSchema.onclick = () => toggleSchema(!schemaOpen);
 els.btnSchema.classList.add("on");
 
-els.btnMigrations.onclick = () => {
-  if (settings.migrationsLayout === "pane") return toggleMigrations(!migrationsOpen);
-  // In the sidebar layout there is no pane to toggle: show the section, with
-  // the schema pane opened if it was collapsed, because that is where it lives.
-  if (!schemaOpen) toggleSchema(true);
-  toggleMigrationsSection(true);
-  els.migSide.scrollIntoView({ block: "nearest" });
-};
+// The caret, from the app's own icon set, so the section reads as something
+// that opens and shuts — like every group in the schema tree. Without it the
+// header looked like a label nobody could do anything with.
+els.migSideCaret.append(icon("chevron"));
 els.migSideToggle.onclick = () =>
   toggleMigrationsSection(els.migSide.classList.contains("collapsed"));
 els.btnMigSideAdd.onclick = () => void addFlywayProject();
 els.btnMigViewRefresh.onclick = () => void renderMigrations();
 els.btnMigViewApply.onclick = () => void applyMigrations();
 els.btnMigViewRepair.onclick = () => void repairMigrations();
-els.btnMigRefresh.onclick = () => void renderMigrations();
-els.btnMigApply.onclick = () => void applyMigrations();
-els.btnMigRepair.onclick = () => void repairMigrations();
-els.btnMigAdd.onclick = () => void addFlywayProject();
 
 /**
- * Where the migrations UI draws, for the layout that is on.
+ * Where the migrations UI draws.
  *
- * **Two layouts, one implementation** (Stage 18 §3.3). Everything below asks
- * this rather than naming an element, so the pane and the sidebar-plus-tab
- * shape cannot drift into two behaviours — only two sets of elements.
+ * A function rather than four constants because the elements are read before
+ * `els` is fully initialised in some paths, and because this was the seam
+ * between two layouts while Stage 18's shape was compared against the pane it
+ * replaced. The pane is gone; the seam is not worth keeping open any wider
+ * than this.
  */
 interface MigUi {
   /** Project and environment rows. */
   projects: HTMLElement;
-  /** The selected environment: target, match, file, out-of-order. */
+  /** The selected environment: target, match, file. */
   detail: HTMLElement;
   /** Groups, rows and messages. */
   list: HTMLElement;
@@ -3084,21 +3004,13 @@ interface MigUi {
 }
 
 function migUi(): MigUi {
-  return settings.migrationsLayout === "pane"
-    ? {
-        projects: els.migProjects,
-        detail: els.migEnv,
-        list: els.migList,
-        apply: els.btnMigApply,
-        repair: els.btnMigRepair,
-      }
-    : {
-        projects: els.migSideBody,
-        detail: els.migViewEnv,
-        list: els.migViewList,
-        apply: els.btnMigViewApply,
-        repair: els.btnMigViewRepair,
-      };
+  return {
+    projects: els.migSideBody,
+    detail: els.migViewEnv,
+    list: els.migViewList,
+    apply: els.btnMigViewApply,
+    repair: els.btnMigViewRepair,
+  };
 }
 
 /**
@@ -3120,14 +3032,18 @@ function migrationsViewActive(): boolean {
 }
 
 /** An empty list that says what to do next, rather than an empty list. */
-function migrationsMessage(text: string, action?: { label: string; run: () => void }) {
+function migrationsMessage(
+  text: string,
+  action?: { label: string; run: () => void },
+  host: HTMLElement = migUi().list,
+) {
   const box = elem("div", "mig-empty", text);
   if (action) {
     const b = elem("button", "mini", action.label) as HTMLButtonElement;
     b.onclick = action.run;
     box.append(document.createElement("br"), b);
   }
-  migUi().list.replaceChildren(box);
+  host.replaceChildren(box);
 }
 
 /**
@@ -3283,22 +3199,24 @@ async function renderMigrations() {
 
   if (!flywayProjects.length) {
     migSelected = null;
-    ui.projects.replaceChildren();
     ui.detail.hidden = true;
+    // **In the sidebar, not the view.** With no projects there is no view open
+    // and nothing to open one from, so a message drawn in the view's list
+    // would be a message nobody could see.
     return migrationsMessage(
       "No Flyway projects yet. Add the flyway.toml you open with Flyway Desktop " +
         "to see what each of its environments has applied and what is pending. " +
         "No connection needs to be open — Flyway connects by itself.",
       { label: "Add a project…", run: () => void addFlywayProject() },
+      ui.projects,
     );
   }
 
   migSelected = validSelection(migSelected);
   drawProjects();
-  // In the sidebar layout the list is only asked for when a view is open: a
-  // JVM start per launch, for a project nobody clicked, is not a cost to pay
-  // on somebody's behalf.
-  if (settings.migrationsLayout === "pane" || migrationsViewActive()) await showSelected();
+  // Only when a view is open: a JVM start per launch, for a project nobody
+  // clicked, is not a cost to pay on somebody's behalf.
+  if (migrationsViewActive()) await showSelected();
 }
 
 /** The project list: each file, and each of its environments. */
@@ -3395,16 +3313,11 @@ async function selectEnvironment(p: FlywayProjectView, e: FlywayEnvironment) {
   // A preference, remembered for next launch. Losing it costs a click.
   void api.flywaySelectEnvironment(p.id, e.id).catch(() => {});
 
-  if (settings.migrationsLayout !== "pane") {
-    // One tab, re-pointed (Stage 18 §5.3). Clicking the environment already in
-    // front is how you bring the view back after looking at a query, so it is
-    // not treated as "nothing to do".
-    tabs.openMigrations({ projectId: p.id, environment: e.id }, `Migrations \u00b7 ${e.id}`);
-    if (!again || migViewShowing !== selectedKey()) await showSelected();
-    return;
-  }
-  if (again) return;
-  await showSelected();
+  // One tab, re-pointed (Stage 18 §5.3). Clicking the environment already in
+  // front is how you bring the view back after looking at a query, so it is
+  // not treated as "nothing to do".
+  tabs.openMigrations({ projectId: p.id, environment: e.id }, `Migrations \u00b7 ${e.id}`);
+  if (!again || migViewShowing !== selectedKey()) await showSelected();
 }
 
 /**
@@ -3423,11 +3336,7 @@ async function showSelected() {
   if (!t) {
     ui.detail.hidden = true;
     migViewShowing = "";
-    return migrationsMessage(
-      settings.migrationsLayout === "pane"
-        ? "Choose an environment above."
-        : "Choose an environment in the sidebar.",
-    );
+    return migrationsMessage("Choose an environment in the sidebar.");
   }
   const key = selKey(t.project.id, t.env.id);
   if (!migrationsOutOfOrder.has(key)) migrationsOutOfOrder.set(key, t.project.outOfOrder);
@@ -3501,10 +3410,8 @@ function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironmen
     void showSelected();
   };
   label.append(box, document.createTextNode("Out of order"));
-  // In the view it belongs with the buttons: it changes what Apply will run.
-  // In the pane there is no room for a fourth control on that line.
-  if (settings.migrationsLayout === "pane") host.append(label);
-  else els.migViewActions.append(label);
+  // With the buttons: it changes what Apply will run.
+  els.migViewActions.append(label);
 }
 
 /**
@@ -3568,8 +3475,14 @@ async function addFlywayProject() {
     if (!path) return;
     const added = await api.flywayAddProject(path);
     const env = added.selected ?? added.environments[0]?.id;
-    if (env) migSelected = { projectId: added.id, environment: env };
     await renderMigrations();
+    // Land on it. Adding a project is asking to look at one, and the sidebar
+    // row you would click next is the one the file already names.
+    if (env) {
+      const chosen = flywayProjects.find((p) => p.id === added.id);
+      const row = chosen?.environments.find((e) => e.id === env);
+      if (chosen && row) await selectEnvironment(chosen, row);
+    }
   } catch (err) {
     results.setMessage(String(err));
   }

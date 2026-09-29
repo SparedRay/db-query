@@ -1,20 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  calls,
-  commandNames,
-  connect,
-  installBackend,
-  schemaBackend,
-  withSettings,
-} from "./harness";
+import { calls, commandNames, connect, installBackend, schemaBackend } from "./harness";
 
 /**
  * The migrations pane.
- *
- * **The pane layout** (Stage 17), kept behind `migrationsLayout: "pane"` while
- * Stage 18's sidebar-and-tab shape is tried. Every claim here is about
- * behaviour the two layouts share, so when one is deleted these move rather
- * than disappear.
  *
  * **Stage 17: projects stand on their own.** A project used to be attached to
  * a connection, and the pane followed whichever connection was active — which
@@ -23,18 +11,16 @@ import {
  * and their environments, and says which saved connection each environment
  * *is*, worked out from the file every time.
  *
- * A pane on the right rather than a section of the schema tree, so the database
- * structure stays visible while a migration is being read.
+ * **Stage 18: and they live in the app's own flow.** Projects are a section of
+ * the schema sidebar; choosing an environment opens the list as a tab in the
+ * main area, where it has the width to be a table. The pane both of these
+ * stages started from is gone, and every claim it carried is here.
  */
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
     throw new Error(`uncaught page error: ${e.message}`);
   });
-  // **This file is the pane layout's spec.** Stage 18 made the sidebar layout
-  // the default and kept this one behind a setting until a hands-on pass
-  // decides between them; `migrations-tree.spec.ts` covers the other.
-  await withSettings(page, { migrationsLayout: "pane" });
 });
 
 const PATH = "/p/flyway.toml";
@@ -95,6 +81,13 @@ const MIGRATIONS = [
   },
 ];
 
+/** Two pending, nothing failed — the state in which Apply is offered. */
+const TWO_PENDING = [
+  MIGRATIONS[0],
+  { ...MIGRATIONS[1], version: "4", description: "add colour" },
+  { ...MIGRATIONS[1], version: "5", description: "index on orders" },
+];
+
 const PENDING_ONLY = [
   { version: "5", description: "add index", state: "Pending", category: "Versioned",
     kind: "SQL", filepath: "/p/V5.sql", installedOnUtc: null, installedBy: null,
@@ -133,60 +126,37 @@ function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
   };
 }
 
-async function openPane(page: Page) {
-  await page.click("#btn-migrations");
-  await expect(page.locator("#migrations-pane")).toBeVisible();
-}
-
-/** The app with one project added, **nothing connected**, on the list. */
-async function withProject(page: Page, extra: Record<string, unknown> = {}) {
+/** The sidebar section, with nothing connected and no environment opened. */
+async function openApp(page: Page, extra: Record<string, unknown> = {}) {
   await installBackend(page, flyway([project()], extra));
   await page.goto("/");
-  await openPane(page);
+  await expect(page.locator("#mig-side")).toBeVisible();
+}
+
+/** …and `uat` opened as a tab, which is where the list lives. */
+async function withProject(page: Page, extra: Record<string, unknown> = {}) {
+  await openApp(page, extra);
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
   await page.locator(".mig").first().waitFor();
 }
 
 /** The last element, without `Array.prototype.at` (the tests target ES2020). */
 const last = <T>(xs: T[]): T | undefined => xs[xs.length - 1];
 
+const migrateCalls = async (page: Page) =>
+  (await calls(page)).filter((c) => c.cmd === "flyway_migrate").map((c) => c.args);
+
 const infoCalls = async (page: Page) =>
   (await calls(page)).filter((c) => c.cmd === "flyway_info").map((c) => c.args);
 
 // ------------------------------------------------ standing on their own (F1)
 
-/**
- * **The point of the stage.** Flyway connects with the project file's own
- * settings, so nothing about a project needs a connection open — and a pane
- * that followed the active connection implied that connection was the one
- * being migrated.
- */
-test("the pane is offered, and works, with nothing connected", async ({ page }) => {
-  await installBackend(page, flyway([project()]));
-  await page.goto("/");
-  await expect(page.locator("#btn-migrations")).toBeVisible();
-  await openPane(page);
 
-  await page.locator(".mig").first().waitFor();
-  expect(await commandNames(page)).not.toContain("connect");
-  expect(await infoCalls(page)).toEqual([
-    { projectId: "fp1", environment: "uat", program: "", outOfOrder: false },
-  ]);
-});
 
-test("the pane opens beside the schema tree, not instead of it", async ({ page }) => {
-  await connect(page, flyway([project()]));
-  await openPane(page);
-  await expect(page.locator("#sidebar")).toBeVisible();
-  await expect(page.locator("#editor")).toBeVisible();
-
-  await page.click("#btn-migrations");
-  await expect(page.locator("#migrations-pane")).toBeHidden();
-});
-
-test("with no projects the pane says what to do, and asks Flyway nothing", async ({ page }) => {
+test("with no projects the sidebar says what to do, and asks Flyway nothing", async ({ page }) => {
   await installBackend(page, flyway([]));
   await page.goto("/");
-  await openPane(page);
+  await expect(page.locator("#mig-side")).toBeVisible();
 
   await expect(page.locator(".mig-empty")).toContainText(/No Flyway projects yet/);
   await expect(page.locator(".mig-empty")).toContainText(/No connection needs to be open/);
@@ -197,8 +167,7 @@ test("with no projects the pane says what to do, and asks Flyway nothing", async
 test("adding a project stores its path and lands on its environment", async ({ page }) => {
   await installBackend(page, flyway([]));
   await page.goto("/");
-  await openPane(page);
-  await page.click(".mig-empty button");
+  await page.click("#mig-side .mig-empty button");
 
   await page.locator(".mig").first().waitFor();
   const added = (await calls(page)).find((c) => c.cmd === "flyway_add_project")!;
@@ -210,17 +179,16 @@ test("adding a project stores its path and lands on its environment", async ({ p
   expect(last(await infoCalls(page))).toMatchObject({ projectId: "fp1", environment: "uat" });
 });
 
-test("the header's Add button adds a project too", async ({ page }) => {
+test("the section's Add button adds a project too", async ({ page }) => {
   await installBackend(page, flyway([]));
   await page.goto("/");
-  await openPane(page);
-  await page.click("#btn-mig-add");
-  await expect(page.locator(".mig-envrow")).toHaveCount(2);
+  await page.click("#btn-mig-side-add");
+  await expect(page.locator("#mig-side .mig-envrow")).toHaveCount(2);
 });
 
 test("a project can be removed, and the file is not touched", async ({ page }) => {
   await withProject(page);
-  await page.click(".mig-project-more");
+  await page.click("#mig-side .mig-project-more");
   await expect(page.locator("dialog.ask")).toContainText(PATH);
   await page.locator('dialog.ask button:has-text("Remove from list")').click();
 
@@ -243,10 +211,10 @@ test("a project whose file cannot be read stays listed and says why", async ({ p
     ]),
   );
   await page.goto("/");
-  await openPane(page);
+  await expect(page.locator("#mig-side")).toBeVisible();
 
   await expect(page.locator(".mig-project-error")).toContainText("No such file or directory");
-  await expect(page.locator(".mig-project-name")).toHaveText("flyway.toml");
+  await expect(page.locator("#mig-side .mig-project-name")).toHaveText("flyway.toml");
   expect(await commandNames(page)).not.toContain("flyway_info");
 });
 
@@ -260,16 +228,16 @@ test("a project whose file cannot be read stays listed and says why", async ({ p
 test("each environment names the saved connection it is, or says it is none", async ({ page }) => {
   await withProject(page);
 
-  const uat = page.locator('.mig-envrow[data-env="uat"]');
+  const uat = page.locator('#mig-side .mig-envrow[data-env="uat"]');
   await expect(uat.locator(".mig-env-target")).toHaveText("uat.example.com:3306");
   await expect(uat.locator(".mig-match-name")).toHaveText("UAT");
   await expect(uat.locator(".conn-dot")).toHaveCSS("background-color", "rgb(239, 68, 68)");
 
-  const dev = page.locator('.mig-envrow[data-env="development"]');
+  const dev = page.locator('#mig-side .mig-envrow[data-env="development"]');
   await expect(dev.locator(".mig-match")).toHaveText("no saved connection");
 
   // The selected one is said in full above the list.
-  await expect(page.locator("#mig-env")).toContainText("uat.example.com:3306 as uat_app");
+  await expect(page.locator("#mig-view-env")).toContainText("uat.example.com:3306 as uat_app");
   await expect(page.locator(".mig-proj-match")).toHaveText("This is your connection “UAT”.");
 });
 
@@ -291,21 +259,21 @@ test("an environment matching several connections shows the first and how many m
       warning: null,
     }),
   });
-  await expect(page.locator(".mig-match-name")).toHaveText("UAT +1");
+  await expect(page.locator("#mig-side .mig-match-name")).toHaveText("UAT +1");
 });
 
 // --------------------------------------------------- choosing an environment
 
 test("choosing another environment asks Flyway about it, and is remembered", async ({ page }) => {
   await withProject(page);
-  await page.click('.mig-envrow[data-env="development"]');
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
 
-  await expect(page.locator('.mig-envrow[data-env="development"]')).toHaveClass(/selected/);
-  await expect(page.locator('.mig-envrow[data-env="uat"]')).not.toHaveClass(/selected/);
+  await expect(page.locator('#mig-side .mig-envrow[data-env="development"]')).toHaveClass(/selected/);
+  await expect(page.locator('#mig-side .mig-envrow[data-env="uat"]')).not.toHaveClass(/selected/);
   await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
 
-  const remembered = (await calls(page)).find((c) => c.cmd === "flyway_select_environment")!;
-  expect(remembered.args).toEqual({ id: "fp1", environment: "development" });
+  const chosen = (await calls(page)).filter((c) => c.cmd === "flyway_select_environment");
+  expect(last(chosen)?.args).toEqual({ id: "fp1", environment: "development" });
   await expect(page.locator(".mig-proj-match")).toHaveText(
     "This is not one of your saved connections.",
   );
@@ -332,8 +300,8 @@ test("an answer for an environment you have left is dropped", async ({ page }) =
     }),
   );
   await page.goto("/");
-  await openPane(page);
-  await page.click('.mig-envrow[data-env="development"]');
+  await expect(page.locator("#mig-side")).toBeVisible();
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
 
   await expect(page.locator(".mig .d")).toHaveText("dev's own migration");
   // Long enough for the slow uat answer to have arrived and been ignored.
@@ -352,12 +320,12 @@ test("out of order belongs to the environment, not to the window", async ({ page
   await page.locator("#mig-out-of-order").check();
   await expect.poll(async () => last(await infoCalls(page))?.outOfOrder).toBe(true);
 
-  await page.click('.mig-envrow[data-env="development"]');
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
   await expect(page.locator("#mig-out-of-order")).not.toBeChecked();
   await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
   expect(last(await infoCalls(page))?.outOfOrder).toBe(false);
 
-  await page.click('.mig-envrow[data-env="uat"]');
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
   await expect(page.locator("#mig-out-of-order")).toBeChecked();
 });
 
@@ -392,7 +360,7 @@ const V2_FILE = {
 
 test("clicking a migration opens its SQL in a tab, without binding the file", async ({ page }) => {
   await connect(page, flyway([project()], V2_FILE));
-  await openPane(page);
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
   await page.locator('.mig[data-state="pending"]').click();
 
   await expect(page.locator("#editor .cm-content")).toContainText("ADD colour");
@@ -419,20 +387,16 @@ test("with nothing connected a migration opens in the viewer", async ({ page }) 
 });
 
 /** Flyway explains itself well; a paraphrase would replace an instruction. */
-test("Flyway's own refusal is what the pane shows", async ({ page }) => {
-  await installBackend(
-    page,
-    flyway([project()], {
-      flyway_info: () => {
-        throw new Error(
-          "Validate failed: Detected failed migration to version 4. Please remove any " +
-            "half-completed changes then run repair to fix the schema history.",
-        );
-      },
-    }),
-  );
-  await page.goto("/");
-  await openPane(page);
+test("Flyway's own refusal is what the list shows", async ({ page }) => {
+  await openApp(page, {
+    flyway_info: () => {
+      throw new Error(
+        "Validate failed: Detected failed migration to version 4. Please remove any " +
+          "half-completed changes then run repair to fix the schema history.",
+      );
+    },
+  });
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
   await expect(page.locator(".mig-empty")).toContainText(/run repair to fix the schema history/);
 });
 
@@ -466,10 +430,10 @@ test("out of order re-asks Flyway with the flag", async ({ page }) => {
 
 // ---------------------------------------------------- where it is reading
 
-test("the pane says which project file and folder it is using", async ({ page }) => {
+test("the view says which project file and folder it is using", async ({ page }) => {
   await withProject(page);
-  await expect(page.locator(".mig-project-name")).toHaveText("Flyway Connections");
-  await expect(page.locator(".mig-project-name")).toHaveAttribute("title", PATH);
+  await expect(page.locator("#mig-side .mig-project-name")).toHaveText("Flyway Connections");
+  await expect(page.locator("#mig-side .mig-project-name")).toHaveAttribute("title", PATH);
   await expect(page.locator(".mig-proj-where")).toContainText("flyway.toml");
   await expect(page.locator(".mig-proj-where")).toContainText("/p");
 });
@@ -479,7 +443,7 @@ test("the pane says which project file and folder it is using", async ({ page })
  * from `locations`, which is relative, can be a list and can be overridden per
  * environment.
  */
-test("the pane says which folder the migrations were actually read from", async ({ page }) => {
+test("the view says which folder the migrations were actually read from", async ({ page }) => {
   await withProject(page);
   await expect(page.locator(".mig-proj-from")).toContainText("/p");
   await expect(page.locator(".mig-proj-from")).toHaveAttribute("title", /reading migrations from/);
@@ -509,9 +473,9 @@ test("Apply names the versions and the target, and runs nothing until confirmed"
 }) => {
   await withProject(page, { flyway_info: () => [MIGRATIONS[0], ...PENDING_ONLY] });
 
-  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
-  await expect(page.locator("#btn-mig-apply")).toHaveText("Apply 1 pending");
-  await page.click("#btn-mig-apply");
+  await expect(page.locator("#btn-mig-view-apply")).toBeEnabled();
+  await expect(page.locator("#btn-mig-view-apply")).toHaveText("Apply 1 pending");
+  await page.click("#btn-mig-view-apply");
 
   const ask = page.locator("dialog.ask");
   await expect(ask).toContainText("V5");
@@ -527,9 +491,9 @@ test("Apply names the versions and the target, and runs nothing until confirmed"
 /** Unmatched is allowed — often the migration account — but said plainly. */
 test("applying to an environment that is none of your connections says so", async ({ page }) => {
   await withProject(page, { flyway_info: () => PENDING_ONLY });
-  await page.click('.mig-envrow[data-env="development"]');
-  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
-  await page.click("#btn-mig-apply");
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await expect(page.locator("#btn-mig-view-apply")).toBeEnabled();
+  await page.click("#btn-mig-view-apply");
 
   const ask = page.locator("dialog.ask");
   await expect(ask).toContainText("dev.example.com:3306 as dev_app");
@@ -556,7 +520,7 @@ test("the confirmation describes the file as it reads now, and sends that target
     flyway_info: () => PENDING_ONLY,
   });
 
-  await page.click("#btn-mig-apply");
+  await page.click("#btn-mig-view-apply");
   const ask = page.locator("dialog.ask");
   await expect(ask).toContainText("uat2.example.com:3306");
   await expect(ask).toContainText("This is not one of your saved connections.");
@@ -581,7 +545,7 @@ test("confirming applies, and says what Flyway did", async ({ page }) => {
     flyway_migrate: () => ({ executed: 1, target: "5" }),
   });
 
-  await page.click("#btn-mig-apply");
+  await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("applied 1 migration to uat");
@@ -617,8 +581,9 @@ test("after an apply, an open connection that is this environment is refreshed",
   const connected = (await calls(page)).find((c) => c.cmd === "connect")!;
   connId = (connected.args.profile as { id: string }).id;
 
-  await openPane(page);
-  await page.click("#btn-mig-apply");
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await page.locator(".mig").first().waitFor();
+  await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("refreshed the schema of UAT");
@@ -643,20 +608,20 @@ test("a read-only match is not offered an apply or a repair, and says which", as
     }),
   });
 
-  await expect(page.locator('.mig-envrow[data-env="uat"] .chip')).toHaveText("read-only");
-  await expect(page.locator("#btn-mig-apply")).toBeDisabled();
-  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /“UAT”.*read-only/);
-  await expect(page.locator("#btn-mig-repair")).toBeDisabled();
-  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /“UAT”.*read-only/);
+  await expect(page.locator('#mig-side .mig-envrow[data-env="uat"] .chip')).toHaveText("read-only");
+  await expect(page.locator("#btn-mig-view-apply")).toBeDisabled();
+  await expect(page.locator("#btn-mig-view-apply")).toHaveAttribute("title", /“UAT”.*read-only/);
+  await expect(page.locator("#btn-mig-view-repair")).toBeDisabled();
+  await expect(page.locator("#btn-mig-view-repair")).toHaveAttribute("title", /“UAT”.*read-only/);
   // Not urged either: something is failed, but nothing may be done about it.
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
 });
 
 test("a failed migration blocks apply, and the button explains why", async ({ page }) => {
   await withProject(page);
-  await expect(page.locator("#btn-mig-apply")).toBeDisabled();
-  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /failed/);
-  await expect(page.locator("#btn-mig-apply")).toHaveAttribute("title", /repaired/);
+  await expect(page.locator("#btn-mig-view-apply")).toBeDisabled();
+  await expect(page.locator("#btn-mig-view-apply")).toHaveAttribute("title", /failed/);
+  await expect(page.locator("#btn-mig-view-apply")).toHaveAttribute("title", /repaired/);
 });
 
 test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
@@ -670,7 +635,7 @@ test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
     },
   });
 
-  await page.click("#btn-mig-apply");
+  await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("Can't DROP 'weight'");
@@ -690,14 +655,14 @@ test("Repair is always offered, and urged while something has failed", async ({ 
   await withProject(page, {
     flyway_info: () => (asked++ === 0 ? MIGRATIONS : [MIGRATIONS[0], MIGRATIONS[1]]),
   });
-  await expect(page.locator("#btn-mig-repair")).toBeVisible();
-  await expect(page.locator("#btn-mig-repair")).toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-view-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-view-repair")).toHaveClass(/urge/);
 
-  await page.click("#btn-mig-refresh");
+  await page.click("#btn-mig-view-refresh");
   await expect(page.locator('.mig[data-state="failed"]')).toHaveCount(0);
-  await expect(page.locator("#btn-mig-repair")).toBeVisible();
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
-  await expect(page.locator("#btn-mig-apply")).toBeEnabled();
+  await expect(page.locator("#btn-mig-view-repair")).toBeVisible();
+  await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-view-apply")).toBeEnabled();
 });
 
 /**
@@ -716,7 +681,7 @@ test("repairing with nothing failed says what realigning a checksum means", asyn
     }),
   });
 
-  await page.click("#btn-mig-repair");
+  await page.click("#btn-mig-view-repair");
   const ask = page.locator("dialog.ask");
   await expect(ask).not.toContainText("remove the failed entry");
   await expect(ask).toContainText("realign the checksum");
@@ -731,7 +696,7 @@ test("repairing with nothing failed says what realigning a checksum means", asyn
 /** "Repair" sounds like it fixes the database, and it does not. */
 test("the repair confirmation says where, and what it does not undo", async ({ page }) => {
   await withProject(page);
-  await page.click("#btn-mig-repair");
+  await page.click("#btn-mig-view-repair");
 
   const ask = page.locator("dialog.ask");
   await expect(ask).toContainText("uat.example.com:3306 as uat_app");
@@ -750,7 +715,7 @@ test("confirming repairs, says what Flyway did, and re-reads the list", async ({
   await withProject(page);
   const before = (await infoCalls(page)).length;
 
-  await page.click("#btn-mig-repair");
+  await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
   await expect.poll(async () => commandNames(page)).toContain("flyway_repair");
@@ -774,7 +739,7 @@ test("a repair that found nothing to do says so, rather than claiming success", 
     flyway_repair: () => ({ actions: [], removed: [], deleted: [], aligned: [] }),
   });
 
-  await page.click("#btn-mig-repair");
+  await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("found nothing to repair");
@@ -788,7 +753,7 @@ test("a refused repair shows Flyway's own message", async ({ page }) => {
     },
   });
 
-  await page.click("#btn-mig-repair");
+  await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("Unable to connect to the database");
@@ -813,18 +778,18 @@ test("Repair is urged when Flyway asks for one, even with nothing failed", async
     },
   });
 
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
-  await page.click("#btn-mig-apply");
+  await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
+  await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("checksum mismatch");
-  await expect(page.locator("#btn-mig-repair")).toBeEnabled();
-  await expect(page.locator("#btn-mig-repair")).toHaveClass(/urge/);
-  await expect(page.locator("#btn-mig-repair")).toHaveAttribute("title", /asked for a repair/);
+  await expect(page.locator("#btn-mig-view-repair")).toBeEnabled();
+  await expect(page.locator("#btn-mig-view-repair")).toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-view-repair")).toHaveAttribute("title", /asked for a repair/);
 
   // Asked for *this* environment. Moving to another must not carry it along.
-  await page.click('.mig-envrow[data-env="development"]');
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
 });
 
 test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
@@ -838,9 +803,183 @@ test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
     },
   });
 
-  await page.click("#btn-mig-apply");
+  await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
   await expect(page.locator("#grid .empty")).toContainText("Unable to connect");
-  await expect(page.locator("#btn-mig-repair")).not.toHaveClass(/urge/);
+  await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
+});
+
+// ------------------------------------------- the view, and what it is not
+
+/** G2. One tab, re-pointed — never one per environment. */
+test("choosing an environment opens one tab, and another re-points it", async ({ page }) => {
+  await withProject(page);
+
+  const strip = page.locator("#script-tabs .stab");
+  await expect(strip.filter({ hasText: "Migrations" })).toHaveCount(1);
+  await expect(strip.filter({ hasText: "Migrations · uat" })).toBeVisible();
+  await expect(page.locator("#mig-view")).toBeVisible();
+  await expect(page.locator("#editor")).toBeHidden();
+
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await expect(strip.filter({ hasText: "Migrations" })).toHaveCount(1);
+  await expect(strip.filter({ hasText: "Migrations · development" })).toBeVisible();
+});
+
+/** G3. It belongs to no connection, so every connection's strip has it. */
+test("the migrations tab survives switching connection", async ({ page }) => {
+  await connect(page, flyway([project()]));
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await page.locator(".mig").first().waitFor();
+
+  // A second connection, with its own workspace.
+  await page.click(".rail-add");
+  await page.locator("#conn-dialog").waitFor({ state: "visible" });
+  await page.fill("#conn-dialog input[name=name]", "second");
+  await page.click("#conn-ok");
+  await page.locator("#conn-dialog").waitFor({ state: "hidden" });
+
+  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations · uat" })).toBeVisible();
+  // Its own SQL tab is in front, not the view.
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#mig-view")).toBeHidden();
+});
+
+test("closing the tab puts the editor back", async ({ page }) => {
+  await withProject(page);
+  await page.locator("#script-tabs .stab").filter({ hasText: "Migrations" }).locator(".stab-mark").click();
+
+  await expect(page.locator("#mig-view")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations" })).toHaveCount(0);
+});
+
+/** G5. A view has no buffer: the buffer's controls must not act on it. */
+test("Run, Run all and Format do nothing while the view is in front", async ({ page }) => {
+  await connect(page, flyway([project()]));
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await page.locator(".mig").first().waitFor();
+
+  // The buffer's toolbar goes with the buffer: Run, Run all and Format belong
+  // to an editor, and there is none in front.
+  await expect(page.locator("#editor-head")).toBeHidden();
+  await page.keyboard.press("Control+Shift+F");
+  await page.keyboard.press("Control+s");
+  await page.keyboard.press("Control+Enter");
+
+  const names = await commandNames(page);
+  expect(names).not.toContain("run_script");
+  expect(names).not.toContain("format_sql");
+  expect(names).not.toContain("save_file");
+});
+
+/** G6. A view is reopened from the sidebar, never restored from the session. */
+test("the migrations tab is never written to the session", async ({ page }) => {
+  await connect(page, flyway([project()]));
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await page.locator(".mig").first().waitFor();
+
+  await expect
+    .poll(async () => (await calls(page)).filter((c) => c.cmd === "save_session").length)
+    .toBeGreaterThan(0);
+  const saved = (await calls(page)).filter((c) => c.cmd === "save_session");
+  const titles = saved.flatMap((c) => {
+    const session = c.args.session as { connections: Array<{ tabs: Array<{ title: string }> }> };
+    return session.connections.flatMap((w) => w.tabs.map((t) => t.title));
+  });
+  expect(titles.join(" ")).not.toContain("Migrations");
+});
+
+/** The labels are spelled out: "…" was read as a label cut short. */
+test("the buttons say what they do, in full", async ({ page }) => {
+  await withProject(page, { flyway_info: () => TWO_PENDING });
+  await expect(page.locator("#btn-mig-view-apply")).toHaveText("Apply 2 pending");
+  await expect(page.locator("#btn-mig-view-repair")).toHaveText("Repair schema history");
+});
+
+/**
+ * **Apply up to here.** Measured against Flyway 13.5.0 Community on
+ * 2026-09-28: `-cherryPick` is refused by this edition, `-target=N` is not. So
+ * a row offers a stopping point, and the confirmation names only what will run.
+ */
+test("a pending row applies up to itself, and says only what will run", async ({ page }) => {
+  await withProject(page, { flyway_info: () => TWO_PENDING });
+
+  const rows = page.locator(".mig-row");
+  await rows.filter({ hasText: "add colour" }).locator(".mig-uptohere").click();
+
+  const ask = page.locator("dialog.ask");
+  await expect(ask.locator("h2")).toHaveText("Apply 1 migration?");
+  await expect(ask).toContainText("V4");
+  await expect(ask).toContainText("add colour");
+  // The one it stops before is not named: the list behind the dialog says it.
+  await expect(ask).not.toContainText("V5");
+  await expect(ask).not.toContainText("index on orders");
+
+  await ask.locator('button:has-text("Apply to uat")').click();
+  await expect.poll(async () => (await migrateCalls(page)).length).toBe(1);
+  expect((await migrateCalls(page))[0].target).toBe("4");
+});
+
+test("Apply with no row chosen runs every pending migration, with no target", async ({ page }) => {
+  await withProject(page, { flyway_info: () => TWO_PENDING });
+  await page.click("#btn-mig-view-apply");
+
+  const ask = page.locator("dialog.ask");
+  await expect(ask.locator("h2")).toHaveText("Apply 2 migrations?");
+  await expect(ask).toContainText("V4");
+  await expect(ask).toContainText("V5");
+  await ask.locator('button:has-text("Apply to uat")').click();
+
+  await expect.poll(async () => (await migrateCalls(page)).length).toBe(1);
+  expect((await migrateCalls(page))[0].target).toBe(null);
+});
+
+/** A repeatable migration has no version, so it cannot be a target. */
+test("a repeatable migration is not offered as a stopping point", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => [
+      { ...TWO_PENDING[1], version: null, description: "repeatable view", category: "Repeatable" },
+      TWO_PENDING[2],
+    ],
+  });
+
+  const repeatable = page.locator(".mig-row").filter({ hasText: "repeatable view" });
+  await expect(repeatable.locator(".mig-uptohere")).toHaveCount(0);
+  await expect(
+    page.locator(".mig-row").filter({ hasText: "index on orders" }).locator(".mig-uptohere"),
+  ).toHaveCount(1);
+});
+
+/** The row still opens the migration's SQL; the action must not. */
+test("the row action does not open the file", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => TWO_PENDING,
+    read_file: () => ({
+      name: "V4__add_colour.sql", path: "/p/V4__add_colour.sql",
+      contents: "ALTER TABLE widgets ADD colour VARCHAR(16);",
+      sizeBytes: 41, encoding: "utf-8", lineEnding: "lf", mtimeMs: 1, readOnly: false,
+    }),
+  });
+
+  await page.locator(".mig-row").filter({ hasText: "add colour" }).locator(".mig-uptohere").click();
+  await expect(page.locator("dialog.ask")).toBeVisible();
+  expect(await commandNames(page)).not.toContain("read_file");
+  await page.locator('dialog.ask button:has-text("Cancel")').click();
+
+  // The row itself still does.
+  await page.locator('.mig[data-state="pending"]').first().click();
+  await expect.poll(async () => commandNames(page)).toContain("read_file");
+});
+
+test("the section collapses and expands from its caret", async ({ page }) => {
+  await openApp(page);
+  await page.click("#mig-side-toggle");
+  await expect(page.locator("#mig-side")).toHaveClass(/collapsed/);
+  await expect(page.locator("#mig-side-body")).toBeHidden();
+
+  await page.click("#mig-side-toggle");
+  await expect(page.locator("#mig-side")).not.toHaveClass(/collapsed/);
+  await expect(page.locator("#mig-side-body")).toBeVisible();
 });

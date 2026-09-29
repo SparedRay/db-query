@@ -1,6 +1,6 @@
 # Stage 18 — Migrations in the app's own flow
 
-**Status:** 🚧 Phases 1–2 built — 2026-09-28. Hands-on (G8) outstanding.
+**Status:** ✅ Built — 2026-09-29. The pane it replaced is deleted.
 
 ---
 
@@ -133,7 +133,7 @@ which is the exact confusion Stage 17 removed.
 ### Phase 3 — Proof
 
 - [x] UI tests for both layouts (G7)
-- [ ] Hands-on (G8), then delete the loser
+- [x] Hands-on (G8), then delete the loser
 
 ## 7. The design pass, and what it changed — 2026-09-28
 
@@ -220,3 +220,34 @@ drawn as the tooltips and results pane they really are.
 confirmation naming only what runs, the connection-switch guard, and the
 session guard — each fails its test when its fix is removed. Screenshots of the
 built layout and of the confirmation match the canvas.
+
+## 8. The pane is gone — 2026-09-29
+
+> *"our new panel needs a caret. Otherwise it looks like is not toggleable.
+> Also we will have to remove the side button and the old code if not in use
+> anymore."*
+
+The comparison §3.3 set up is over: the sidebar shape is the one, so the other
+was deleted rather than left to rot behind a setting.
+
+* **A caret.** The section header had a `twisty` span and nothing in it — the
+  tree's chevron is scoped to `.node`, which the section is not. It now carries
+  the app's own chevron, rotating rather than swapping glyph, so open and shut
+  cannot drift apart.
+* **Deleted**: the rail button, `#migrations-pane` and its splitter, the grid
+  tracks they needed, `migrationsLayout` and its Settings control, and every
+  branch that asked which layout was on. `migUi()` survives as one place to
+  name the elements rather than four call sites naming them.
+* **The section is always shown**, and filled at boot: it reads the project
+  files and the saved connections and asks Flyway nothing.
+* **The empty state moved into the sidebar.** With no projects there is no view
+  open, so "No Flyway projects yet…" was being drawn in a list nobody could
+  see.
+* **Adding a project lands on it.** Adding one is asking to look at it, and the
+  row you would click next is the one the file already names.
+
+`migrations-tree.spec.ts` is folded into `migrations.spec.ts`: **47 tests, one
+file, one layout**. Nothing was dropped in the merge — the pane's claims were
+about behaviour both shapes shared, and they are all still asserted.
+
+**388 Rust unit tests, 780 UI tests on both engines.**
