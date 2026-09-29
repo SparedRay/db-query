@@ -16,8 +16,6 @@
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
         <button id="btn-schema" class="rail-cog" type="button"
                 title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
-        <button id="btn-migrations" class="rail-cog" type="button"
-                title="Migrations" aria-pressed="false"></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
       </div>
 
@@ -37,10 +35,10 @@
         <div id="tree" class="tree"></div>
         <!-- Stage 18: projects live where choosing happens. Hidden in the pane
              layout, which keeps them on the other side of the window. -->
-        <section id="mig-side" class="mig-side" hidden>
+        <section id="mig-side" class="mig-side">
           <div class="mig-side-head">
             <button id="mig-side-toggle" class="mig-side-toggle" type="button" aria-expanded="true">
-              <span class="twisty open"></span><span>Migrations</span>
+              <span class="twisty open" id="mig-side-caret"></span><span>Migrations</span>
             </button>
             <button id="btn-mig-side-add" class="mini" type="button"
                     title="Add a flyway.toml">Add&hellip;</button>
@@ -125,21 +123,6 @@
       <!-- The migrations pane. A pane rather than a section of the schema tree
            so the database structure stays visible while a migration is being
            read — which is the whole reason to look at both at once. -->
-      <div id="msplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
-      <aside id="migrations-pane" hidden>
-        <div class="pane-head">
-          <span id="mig-title">Migrations</span>
-          <button id="btn-mig-repair" class="mini" hidden>Repair schema history</button>
-          <button id="btn-mig-apply" class="mini" hidden>Apply</button>
-          <button id="btn-mig-refresh" class="mini" title="Re-read the projects and ask Flyway again">Refresh</button>
-          <button id="btn-mig-add" class="mini" title="Add a flyway.toml">Add&hellip;</button>
-        </div>
-        <!-- Projects stand on their own (Stage 17): each file, each of its
-             environments, and which saved connection each environment is. -->
-        <div id="mig-projects" class="mig-projects"></div>
-        <div id="mig-env" class="mig-env" hidden></div>
-        <div id="mig-list" class="mig-list"></div>
-      </aside>
     </div>
 
     <!--
@@ -289,16 +272,6 @@
                      autocomplete="off" spellcheck="false" />
             </label>
             <p class="hint" id="set-flyway-note"></p>
-            <label>Layout
-              <select id="set-mig-layout">
-                <option value="tree">In the sidebar, with a tab (new)</option>
-                <option value="pane">In a pane of its own (previous)</option>
-              </select>
-            </label>
-            <p class="hint">Both do the same work. The sidebar layout puts
-              projects where databases are and gives the list the width of the
-              main area; the pane is what earlier versions had. Switching takes
-              effect immediately.</p>
             <p class="hint">If it will not start, <strong>About → Diagnostics</strong>
               shows every path that was searched and what Flyway said when it ran.</p>
           </section>
