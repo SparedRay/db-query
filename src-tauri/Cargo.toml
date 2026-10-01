@@ -55,7 +55,11 @@ serde = { version = "1", features = ["derive"] }
 # the vendored Cargo.toml on 2026-09-10: MIT OR Apache-2.0.
 toml = "1"
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# `process` is new for Stage 20: an agent CLI is a child process whose stdout we
+# read as it is written. **No new crate** — a feature of the tokio already
+# compiled here, and the one that brings `kill_on_drop`, which is what stops an
+# abandoned reply from leaving a CLI running and billing.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process"] }
 
 # sqlx 0.9 split the old `runtime-tokio-rustls` feature into separate runtime
 # and TLS flags. `mysql-rsa` is required for MySQL 8.0's default

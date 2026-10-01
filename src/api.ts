@@ -615,6 +615,12 @@ export interface ChatMessage {
 
 /** What arrives while a reply is being written. */
 export type AssistantEvent =
+  /**
+   * The provider is up and about to answer. **Only a CLI sends this**: Copilot
+   * CLI is silent for its first couple of seconds while it starts and refreshes
+   * its token, and an empty bubble for that long reads as broken.
+   */
+  | { type: "started" }
   | { type: "thinking"; delta: string }
   | { type: "text"; delta: string }
   | { type: "done"; stopReason: string | null }

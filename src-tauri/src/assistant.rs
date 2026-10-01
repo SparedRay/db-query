@@ -115,6 +115,12 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StreamEvent {
+    /// The provider is up and about to answer. **Only a CLI sends this**, and
+    /// it earns its place: Copilot CLI says nothing at all for its first ~2.5
+    /// seconds while it starts and refreshes its token, and an empty bubble
+    /// for two and a half seconds reads as broken. The HTTP providers have
+    /// nothing to report here, so they do not.
+    Started,
     /// A summary of the model's reasoning, shown dimmed. Requested explicitly:
     /// without it a thinking model looks like a long pause before anything.
     Thinking {

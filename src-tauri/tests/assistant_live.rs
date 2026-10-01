@@ -76,7 +76,8 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
                 StreamEvent::Text { delta } => answer.push_str(&delta),
                 StreamEvent::Done { .. } => done = true,
                 StreamEvent::Failed { message } => panic!("stream failed: {message}"),
-                StreamEvent::Thinking { .. } => {}
+                // An HTTP provider never sends this; a CLI does.
+                StreamEvent::Started | StreamEvent::Thinking { .. } => {}
             }
         }
     }
