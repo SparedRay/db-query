@@ -134,3 +134,74 @@ costs nothing, which the existing test still pins.
 test that flaked in the last two runs was the strip's smooth scrolling being
 measured mid-animation; it now waits for the scroll to settle and passed three
 runs in a row.
+
+## 6. The connection loader is the connection's own shape — 2026-10-01
+
+> *"On UI the loader for the connection today is a round loader. While the
+> connection is a dotted square. Can't we make it so its an animation of the
+> square loading?"*
+
+A connecting rail item is `rail-item offline connecting`: a transparent
+**rounded square**, 32px, radius 9, dashed border — with the shared `.spinner`
+laid over it at `inset: -4px`, which is a **40px circle**. The right instinct
+(the thing you clicked is the thing that should look busy) drawn in the wrong
+shape, larger than the item it reported on, and the only circle on a rail of
+rounded squares.
+
+### 6.1 Choosing between five
+
+Five loaders were drawn and animated at real size before any of them was
+built — marching ants, a tracing stroke, corner brackets, a rising fill and a
+conic sweep — on a design canvas, each in the rail at 32px in both themes,
+because 32px in peripheral vision is the only size that matters. What the
+mockups settled:
+
+* **A rising fill** is a determinate shape. A connect has no percentage, so a
+  level that climbs would be inventing one.
+* **A conic sweep** has the right shape and the wrong speed: rotation is
+  uniform in angle, not in distance, so the leading edge crawls past a corner
+  and races along an edge.
+* **Corner brackets** read as a selection marquee more than as waiting.
+
+Chosen: **a tracing stroke** — one accent segment travelling the item's own
+perimeter. *"Indeed is closer to today's UI"*: it keeps the current meaning
+exactly and corrects only the shape, so there is nothing to re-learn.
+
+### 6.2 What it cost
+
+`busyOutline(radius)` in `icons.ts` — an inline `<svg>` with one `<rect>`.
+Three details are load-bearing:
+
+* **`pathLength="100"`** normalises the perimeter, so `stroke-dasharray:
+  26 74` is *a quarter of the outline lit* at any size, and one element serves
+  32px and anything later.
+* **`inset: -1px`, not `0`.** An absolutely positioned child is laid out
+  against the *padding* box, so `0` draws the outline a pixel inside the border
+  it is meant to run along. Every state of a rail item carries a 1px border —
+  dashed offline, transparent live — so -1px lands on the border box exactly.
+* **`rx` is passed in, not normalised.** A corner radius is a length, not a
+  fraction of a perimeter. The caller states the item's own 9px, so the CSS and
+  the SVG agree by construction rather than by coincidence.
+
+Also: `.rail-item.connecting:hover` no longer grows to an 11px radius. The item
+is not clickable while connecting — the handler returns early, so a second
+click cannot open a second connection — and growing it would both promise a
+click that is refused and move the border 2px away from the stroke tracing it.
+
+Reduced motion slows it to 3.4s rather than the ring's 2.4s, deliberately: a
+travelling dash covers the whole perimeter in one period, so matching the
+ring's duration would move the segment at about the speed it does now.
+
+### 6.3 Proof
+
+The three existing rail tests follow the element. The new one measures rather
+than asserting a class name — **whatever draws the busy state has to be the
+item's own box**, so it compares the two bounding boxes, and separately that
+the rect is animating and drawn at the item's radius. Both halves falsify:
+`inset: -5px` (a ring around the item again) fails it, and removing the
+animation fails it.
+
+**800 UI tests on both engines**, `mise run check` clean.
+
+Noted in passing, not fixed here: `cargo clippy` warns `while_let_loop` in
+`lint.rs`, from `e91e804` (the CTE work), and has since that commit.

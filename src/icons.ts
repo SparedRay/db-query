@@ -151,6 +151,8 @@ const PATHS: Record<IconName, string> = {
   close: '<path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/>',
 };
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 /**
  * One icon, as an inline `<svg>`.
  *
@@ -159,7 +161,7 @@ const PATHS: Record<IconName, string> = {
  * twice.
  */
 export function icon(name: IconName): SVGElement {
-  const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const el = document.createElementNS(SVG_NS, "svg");
   el.setAttribute("viewBox", "0 0 16 16");
   el.setAttribute("fill", "none");
   el.setAttribute("stroke", "currentColor");
@@ -172,5 +174,43 @@ export function icon(name: IconName): SVGElement {
   el.dataset.icon = name;
   // Static markup from the table above, never anything a server sent.
   el.innerHTML = PATHS[name];
+  return el;
+}
+
+/**
+ * The busy outline for a **rounded square**: one stroke segment travelling the
+ * element's own perimeter.
+ *
+ * Reported in use: the rail's loader was the shared `.spinner`, a circle laid
+ * over a 32px rounded square at `inset: -4px`. It was the only shape on the
+ * rail that was not the rail's shape, so a connection opening read as a ring
+ * arriving from somewhere else rather than as *that square* working. This
+ * traces the shape instead.
+ *
+ * `pathLength="100"` normalises the perimeter to 100 units, so the dash
+ * lengths in CSS are percentages of it and one element serves every size the
+ * CSS gives it — 32px in the rail, and whatever a future caller uses. The
+ * half-unit inset puts a 1px stroke *on* the border box rather than
+ * straddling it, which is exactly where the dashed offline border is drawn.
+ *
+ * `rx` is the one thing that cannot be normalised: a corner radius is a length,
+ * not a fraction of a perimeter, so the caller states the element's own radius
+ * and the CSS and the SVG agree by construction rather than by coincidence.
+ */
+export function busyOutline(radius: number): SVGElement {
+  const el = document.createElementNS(SVG_NS, "svg");
+  el.setAttribute("viewBox", "0 0 32 32");
+  // Decoration beside an `aria-busy` element that already says it is working.
+  el.setAttribute("aria-hidden", "true");
+  el.classList.add("busy-outline");
+
+  const rect = document.createElementNS(SVG_NS, "rect");
+  rect.setAttribute("x", "0.5");
+  rect.setAttribute("y", "0.5");
+  rect.setAttribute("width", "31");
+  rect.setAttribute("height", "31");
+  rect.setAttribute("rx", String(radius - 0.5));
+  rect.setAttribute("pathLength", "100");
+  el.append(rect);
   return el;
 }

@@ -10,7 +10,7 @@
 
 import { api, type Capabilities, type ProfileView, type ConnInfo } from "./api";
 import { contextMenu } from "./menu";
-import { icon } from "./icons";
+import { busyOutline, icon } from "./icons";
 import { choose } from "./dialog";
 
 export interface ConnectionEntry {
@@ -333,7 +333,8 @@ export class ConnectionManager {
 
       if (entry.connecting) {
         el.setAttribute("aria-busy", "true");
-        el.append(Object.assign(document.createElement("span"), { className: "spinner" }));
+        // 9 is `.rail-item`'s own border-radius, which the outline traces.
+        el.append(busyOutline(9));
       }
 
       el.onclick = () => {
