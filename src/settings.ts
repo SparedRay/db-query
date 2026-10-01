@@ -5,7 +5,7 @@
 // job is connections. Reads are defensive — storage throws outright in some
 // embeddings, and a value written by a future version must not break this one.
 
-import type { Provider } from "./api";
+import type { AiProvider, Recipe } from "./api";
 import type { ThemePref } from "./theme";
 
 export interface Settings {
@@ -24,10 +24,19 @@ export interface Settings {
   browseLimit: number;
 
   // --- assistant. Where questions go; the key lives in the keychain.
-  aiProvider: Provider;
+  aiProvider: AiProvider;
   /** Base URL, so any OpenAI-compatible server — including a local one — works. */
   aiBaseUrl: string;
   aiModel: string;
+  /** Which CLI, when `aiProvider` is `localCli`. */
+  aiRecipe: Recipe | null;
+
+  // --- integrations. Which agent CLIs this app may run at all.
+  //
+  // Off by default, like the MCP server: an integration that is off is not
+  // probed at startup, is not offered as a place to send questions, and spawns
+  // nothing. Enabling one is what makes it worth warming.
+  cliEnabled: Recipe[];
 
   // --- the MCP server. Off unless turned on; the token is in the keychain and
   // is deliberately not here — this file is localStorage, which is not where
@@ -76,6 +85,8 @@ export const DEFAULTS: Settings = {
   aiProvider: "anthropic",
   aiBaseUrl: "https://api.anthropic.com",
   aiModel: "claude-opus-5",
+  aiRecipe: null,
+  cliEnabled: [],
   mcpEnabled: false,
   // Not a number: the default lives in Rust, and repeating it here is how the
   // two drift. `app_defaults` fills it in before Settings can be opened.
@@ -93,11 +104,15 @@ export const DEFAULTS: Settings = {
  */
 export const AI_PRESETS: Array<{
   label: string;
-  provider: Provider;
+  provider: AiProvider;
   baseUrl: string;
   model: string;
   /** Placeholder when `model` is blank, so the field is not a mystery. */
   modelHint: string;
+  /** Set on the CLI presets; the model is the CLI's own business. */
+  recipe?: Recipe;
+  /** Shown only while its integration is enabled in Settings. */
+  needsIntegration?: Recipe;
 }> = [
   {
     label: "Anthropic",
@@ -105,6 +120,27 @@ export const AI_PRESETS: Array<{
     baseUrl: "https://api.anthropic.com",
     model: "claude-opus-5",
     modelHint: "claude-opus-5",
+  },
+  // The CLI presets. No base URL and no model: the CLI chose a model when the
+  // person signed into it, and asking them to name one here would be asking
+  // them to repeat a choice they already made somewhere else.
+  {
+    label: "Claude Code (CLI)",
+    provider: "localCli",
+    baseUrl: "",
+    model: "",
+    modelHint: "chosen by the CLI",
+    recipe: "claude",
+    needsIntegration: "claude",
+  },
+  {
+    label: "Copilot CLI",
+    provider: "localCli",
+    baseUrl: "",
+    model: "",
+    modelHint: "chosen by the CLI",
+    recipe: "copilot",
+    needsIntegration: "copilot",
   },
   {
     label: "OpenAI",
@@ -161,8 +197,31 @@ const KEY = "db-query.settings";
 const text = (v: unknown, fallback: string): string =>
   typeof v === "string" ? v : fallback;
 
-const provider = (v: unknown): Provider =>
-  v === "openAiCompatible" || v === "anthropic" ? v : DEFAULTS.aiProvider;
+const provider = (v: unknown): AiProvider =>
+  v === "openAiCompatible" || v === "anthropic" || v === "localCli"
+    ? v
+    : DEFAULTS.aiProvider;
+
+/** One of the known recipes, or null. An unknown name is not a recipe. */
+const recipe = (v: unknown): Recipe | null =>
+  v === "claude" || v === "copilot" ? v : null;
+
+/**
+ * The enabled integrations, deduplicated and filtered to names we know.
+ *
+ * Filtered rather than trusted because this comes back from localStorage: a
+ * value written by a future version — or by hand — must not end up being
+ * passed to a process spawn as though it were a recipe.
+ */
+const recipes = (v: unknown): Recipe[] => {
+  if (!Array.isArray(v)) return [];
+  const out: Recipe[] = [];
+  for (const item of v) {
+    const r = recipe(item);
+    if (r && !out.includes(r)) out.push(r);
+  }
+  return out;
+};
 
 const bounded = (n: number, lo: number, hi: number, fallback: number) =>
   Number.isFinite(n) && n >= lo && n <= hi ? Math.round(n) : fallback;
@@ -203,6 +262,8 @@ export function load(): Settings {
     aiProvider: provider(o.aiProvider),
     aiBaseUrl: text(o.aiBaseUrl, DEFAULTS.aiBaseUrl),
     aiModel: text(o.aiModel, DEFAULTS.aiModel),
+    aiRecipe: recipe(o.aiRecipe),
+    cliEnabled: recipes(o.cliEnabled),
     mcpEnabled: typeof o.mcpEnabled === "boolean" ? o.mcpEnabled : DEFAULTS.mcpEnabled,
     // Unprivileged ports only: a stored 80 would fail to bind on every
     // platform and read as the feature being broken. Anything outside the

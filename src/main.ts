@@ -28,6 +28,9 @@ import {
   type FlywayMatch,
   type FlywayProjectView,
   type FlywayMigration,
+  type Recipe,
+  type CliStatus,
+  type Provider,
 } from "./api";
 import { copyText } from "./clipboard";
 import { choose, showValue } from "./dialog";
@@ -50,7 +53,7 @@ import {
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
 import { createHistory } from "./history";
-import { createAssistant } from "./assistant";
+import { cliLabel, createAssistant } from "./assistant";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -121,6 +124,8 @@ const els = {
   setAiSave: $<HTMLButtonElement>("set-ai-save"),
   setAiForget: $<HTMLButtonElement>("set-ai-forget"),
   setAiNote: $<HTMLElement>("set-ai-note"),
+  aiHttpFields: $<HTMLElement>("ai-http-fields"),
+  setIntegrations: $<HTMLElement>("set-integrations"),
   historyDialog: $<HTMLDialogElement>("history-dialog"),
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
@@ -2554,6 +2559,7 @@ const assistant = createAssistant({
     provider: settings.aiProvider,
     baseUrl: settings.aiBaseUrl,
     model: settings.aiModel,
+    recipe: settings.aiRecipe,
   }),
   context: () => ({
     connectionId: conns.active()?.profile.id ?? null,
@@ -2578,6 +2584,136 @@ const assistant = createAssistant({
 
 els.btnAssistant.onclick = () => void assistant.open();
 
+// ---------------------------------------------------- integrations, and warming
+//
+// An agent CLI is off until it is turned on. Turning one on is what makes it
+// worth probing at startup: the answer is then already there when the person
+// asks a question, and nothing at all is spawned for an integration that is
+// off — which is the whole point of the switch.
+
+/** The last probe result per CLI. Null while one is in flight. */
+const cliStatus = new Map<Recipe, CliStatus | null>();
+
+/** What to say about a CLI, from a probe that may have failed outright. */
+function cliNote(recipe: Recipe, status: CliStatus | null): string {
+  if (!status) return `Could not ask ${cliLabel(recipe)} whether it is ready.`;
+  if (status.detail) return status.detail;
+  return `${cliLabel(recipe)} is installed and signed in.`;
+}
+
+/**
+ * The assistant button's state.
+ *
+ * Only a CLI provider can be "starting" or "not ready" before you click: an
+ * HTTP provider has nothing to find out that a probe could tell us. The button
+ * is never disabled — opening the panel is how you read *why* it is not ready,
+ * and a dead button with a tooltip is worse than a live one that explains
+ * itself.
+ */
+function paintAssistantButton() {
+  const recipe = settings.aiProvider === "localCli" ? settings.aiRecipe : null;
+  const spinner = els.btnAssistant.querySelector(".spinner");
+  els.btnAssistant.classList.remove("not-ready");
+  if (!recipe) {
+    spinner?.remove();
+    els.btnAssistant.title = "Ask the assistant (Ctrl+K)";
+    return;
+  }
+
+  const status = cliStatus.get(recipe);
+  if (status === null) {
+    // Probing. The same spinner the rail and the tree use.
+    if (!spinner) {
+      els.btnAssistant.append(
+        Object.assign(document.createElement("span"), { className: "spinner" }),
+      );
+    }
+    els.btnAssistant.title = `Checking ${cliLabel(recipe)}…`;
+    return;
+  }
+
+  spinner?.remove();
+  const ready = status?.installed === true && status?.signedIn === true;
+  els.btnAssistant.classList.toggle("not-ready", !ready);
+  els.btnAssistant.title = ready
+    ? `Ask ${cliLabel(recipe)} (Ctrl+K)`
+    : `${cliNote(recipe, status ?? null)} (Ctrl+K)`;
+}
+
+/** Probe one CLI and remember the answer. Costs nothing — no model call. */
+async function warmCli(recipe: Recipe) {
+  cliStatus.set(recipe, null);
+  paintAssistantButton();
+  // A failed probe is recorded as a failed probe, not as an exception: being
+  // unable to ask is one of the states the button has to show.
+  const status = await api.assistantCliProbe(recipe).catch(() => null);
+  cliStatus.set(recipe, status);
+  paintAssistantButton();
+  drawIntegrations();
+}
+
+/** The Integrations rows: one per CLI, off by default. */
+function drawIntegrations() {
+  const rows = ([ "claude", "copilot" ] as Recipe[]).map((recipe) => {
+    const row = document.createElement("div");
+    row.className = "integration";
+    row.dataset.recipe = recipe;
+
+    const label = document.createElement("label");
+    label.className = "toggle";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = settings.cliEnabled.includes(recipe);
+    box.onchange = () => {
+      settings.cliEnabled = box.checked
+        ? [...settings.cliEnabled, recipe]
+        : settings.cliEnabled.filter((r) => r !== recipe);
+      // Turning one off also stops it being where questions go. Leaving the
+      // provider pointed at a disabled integration would be a setting that
+      // contradicts itself.
+      if (!box.checked && settings.aiRecipe === recipe) {
+        settings.aiProvider = "anthropic";
+        settings.aiRecipe = null;
+        settings.aiBaseUrl = AI_PRESETS[0]!.baseUrl;
+        settings.aiModel = AI_PRESETS[0]!.model;
+      }
+      saveSettings(settings);
+      if (box.checked) void warmCli(recipe);
+      else cliStatus.delete(recipe);
+      drawIntegrations();
+      // Unconditional, and both ways round: the provider list *is* the set of
+      // enabled integrations plus the HTTP ones, so turning one on has to add
+      // its option, not only change its note. Found by a test that enabled one
+      // and then looked for it in the list.
+      applyAiSettings();
+      paintAssistantButton();
+    };
+    label.append(box, document.createTextNode(` ${cliLabel(recipe)}`));
+
+    const note = document.createElement("span");
+    note.className = "integration-note";
+    if (!box.checked) {
+      note.textContent = "Off.";
+    } else if (cliStatus.get(recipe) === null) {
+      note.textContent = "Checking…";
+      note.append(
+        Object.assign(document.createElement("span"), { className: "spinner" }),
+      );
+    } else {
+      note.textContent = cliNote(recipe, cliStatus.get(recipe) ?? null);
+    }
+
+    row.append(label, note);
+    return row;
+  });
+  els.setIntegrations.replaceChildren(...rows);
+}
+
+drawIntegrations();
+// Warm whatever is already on, without blocking the window: an assistant that
+// is not ready yet is not an app that cannot open.
+for (const recipe of settings.cliEnabled) void warmCli(recipe);
+
 // --- assistant configuration ------------------------------------------------
 
 /**
@@ -2587,14 +2723,32 @@ els.btnAssistant.onclick = () => void assistant.open();
  * two adapters cover every server that speaks one of the two shapes, and a
  * base URL is all that separates Ollama from Groq.
  */
-for (const [i, preset] of AI_PRESETS.entries()) {
-  els.setAiPreset.append(new Option(preset.label, String(i)));
+/**
+ * Fill the provider list, leaving out CLI presets whose integration is off.
+ *
+ * Rebuilt rather than hidden: an option that is present but unusable is a
+ * question the person has to answer twice.
+ */
+function drawAiPresets() {
+  els.setAiPreset.replaceChildren();
+  for (const [i, preset] of AI_PRESETS.entries()) {
+    if (preset.needsIntegration && !settings.cliEnabled.includes(preset.needsIntegration)) {
+      continue;
+    }
+    els.setAiPreset.append(new Option(preset.label, String(i)));
+  }
 }
 
 /** Which preset the current settings look like, for the select. */
 function matchingPreset(): number {
   const i = AI_PRESETS.findIndex(
-    (p) => p.provider === settings.aiProvider && p.baseUrl === settings.aiBaseUrl,
+    (p) =>
+      p.provider === settings.aiProvider &&
+      // The CLI presets share an empty base URL, so the recipe is what tells
+      // them apart; the HTTP ones have no recipe and are matched by URL.
+      (p.provider === "localCli"
+        ? p.recipe === settings.aiRecipe
+        : p.baseUrl === settings.aiBaseUrl),
   );
   // Falls back to "Other", which is where a hand-edited base URL belongs.
   return i === -1 ? AI_PRESETS.length - 1 : i;
@@ -2603,8 +2757,22 @@ function matchingPreset(): number {
 /** What is stored for the provider currently selected. */
 async function refreshAiNote() {
   els.setAiModel.placeholder = AI_PRESETS[matchingPreset()]?.modelHint ?? "model name";
+
+  // A CLI has no key and no URL to report on: what matters is whether it is
+  // installed and signed in, which is a different question with a different
+  // command. The key and base-URL fields are hidden rather than left there
+  // looking optional.
+  const cli = settings.aiProvider === "localCli" ? settings.aiRecipe : null;
+  els.aiHttpFields.hidden = cli !== null;
+  if (cli) {
+    els.setAiNote.textContent = "Checking…";
+    const status = await api.assistantCliProbe(cli).catch(() => null);
+    els.setAiNote.textContent = cliNote(cli, status);
+    return;
+  }
+
   try {
-    const s = await api.assistantStatus(settings.aiProvider, settings.aiBaseUrl);
+    const s = await api.assistantStatus(settings.aiProvider as Provider, settings.aiBaseUrl);
     const parts = [s.hasKey ? "A key is stored." : "No key stored."];
     if (s.local) {
       // The genuinely better property of a local model, and the reason to
@@ -2619,6 +2787,7 @@ async function refreshAiNote() {
 }
 
 function applyAiSettings() {
+  drawAiPresets();
   els.setAiPreset.value = String(matchingPreset());
   els.setAiBase.value = settings.aiBaseUrl;
   els.setAiModel.value = settings.aiModel;
@@ -2629,6 +2798,7 @@ els.setAiPreset.onchange = () => {
   const preset = AI_PRESETS[Number(els.setAiPreset.value)];
   if (!preset) return;
   settings.aiProvider = preset.provider;
+  settings.aiRecipe = preset.recipe ?? null;
   settings.aiBaseUrl = preset.baseUrl;
   // Only overwrite the model when the preset knows one. Clearing it for a local
   // server is deliberate: which models that machine has pulled is not knowable
@@ -2636,6 +2806,10 @@ els.setAiPreset.onchange = () => {
   settings.aiModel = preset.model;
   saveSettings(settings);
   applyAiSettings();
+  paintAssistantButton();
+  if (preset.recipe && cliStatus.get(preset.recipe) === undefined) {
+    void warmCli(preset.recipe);
+  }
 };
 
 for (const el of [els.setAiBase, els.setAiModel]) {
@@ -2648,8 +2822,9 @@ for (const el of [els.setAiBase, els.setAiModel]) {
 }
 
 els.setAiSave.onclick = async () => {
+  if (settings.aiProvider === "localCli") return;
   try {
-    await api.assistantSetKey(settings.aiProvider, els.setAiKey.value);
+    await api.assistantSetKey(settings.aiProvider as Provider, els.setAiKey.value);
     // Cleared immediately: the field exists to hand the key over, not to hold it.
     els.setAiKey.value = "";
     await refreshAiNote();
@@ -2659,8 +2834,9 @@ els.setAiSave.onclick = async () => {
 };
 
 els.setAiForget.onclick = async () => {
+  if (settings.aiProvider === "localCli") return;
   try {
-    await api.assistantSetKey(settings.aiProvider, null);
+    await api.assistantSetKey(settings.aiProvider as Provider, null);
     els.setAiKey.value = "";
     await refreshAiNote();
   } catch (err) {

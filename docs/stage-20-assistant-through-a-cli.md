@@ -506,3 +506,54 @@ first token at 3.8s, so it covers 1.4s that would otherwise be an empty bubble.
 - [ ] UI tests with a fake CLI on PATH
 - [ ] A long-lived process per chat (§9.3) — now known to be possible for both,
       since Copilot's ACP mode is real and answers a handshake
+
+## 11. Phase 1, the UI — built 2026-10-01
+
+Settings → Assistant → **Integrations**: one row per CLI, off by default, each
+saying what its probe found. Enabling one warms it at startup and adds it to the
+provider list; disabling one removes the option and, if questions were going
+there, moves the provider back. The assistant button carries the result.
+
+### 11.1 Decisions the build settled
+
+* **`localCli` is not a Rust `Provider`.** It has its own command and needs
+  neither key nor URL, so widening the Rust enum would have added a variant
+  whose `key_id` and `endpoint` mean nothing. It is a TypeScript-side
+  `AiProvider` instead, and the branch happens where the config is read.
+* **The key and base-URL fields are hidden as a group** when a CLI is selected.
+  Left on screen they read as optional rather than irrelevant.
+* **The assistant button is never disabled**, however bad the probe's news.
+  Opening the panel is how you read *why* it is not ready, so taking the click
+  away would hide the explanation behind the thing needing explanation. It gets
+  a mark and a tooltip; the panel's own Send stays disabled, which is where
+  refusing to send actually belongs.
+* **Send becomes Stop for a CLI reply**, for the whole time one is in flight —
+  including the seconds before its first word, which is exactly when someone
+  wants it back. The HTTP path shows no Stop, because it has nothing to kill.
+
+### 11.2 A correction to §9.4
+
+The plan called for "a fake CLI on PATH" in the UI suite. It is not needed and
+would have been worse: the probe and the reply are both backend commands, so the
+existing stub covers them the same way it covers the HTTP provider — no vendor,
+no subscription, no PATH manipulation, and the same tests on both engines. What
+a fake binary would have tested is whether the *vendor's* output still parses,
+and that belongs in `agentcli_live.rs`, where it now is.
+
+### 11.3 Proof
+
+13 UI tests, on both engines. Two falsified:
+
+* Warming every CLI rather than only the enabled ones fails *"nothing is probed
+  when no integration is enabled"* — which is the claim that an integration
+  switched off costs nothing.
+* Leaving Send disabled during a CLI reply fails *"Send becomes Stop…"*.
+
+One app bug found by its own test: enabling an integration updated its note but
+not the provider list, because the list was only redrawn on the disable path.
+
+**826 UI tests on both engines, 414 Rust, `mise run check` clean.**
+
+### 11.4 Left for Phase 3
+
+- [ ] A long-lived process per chat (§9.3), now known to be possible for both

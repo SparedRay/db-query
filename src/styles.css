@@ -1374,3 +1374,32 @@ dialog.viewer .viewer-note {
   background: var(--bg-input); color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px; font: 12px var(--mono);
 }
+
+/* --- integrations (Settings → Assistant) ---------------------------------
+   One row per agent CLI, each saying what a probe found. The note is as wide
+   as the dialog allows and wraps: "not signed in, run `copilot login`" is the
+   whole value of the row, and truncating it would leave the switch without a
+   reason. */
+.integrations { display: flex; flex-direction: column; gap: 10px; margin-top: 2px; }
+.integration {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px;
+}
+.integration .toggle { color: var(--fg); font-size: 13px; }
+.integration-note {
+  display: flex; align-items: center; gap: 6px;
+  padding-left: 20px;
+  font-size: 12px; color: var(--fg-dim); line-height: 1.5;
+}
+
+/* The assistant button reports what the startup probe found. A CLI that is not
+   ready gets a mark, not a disabled button: opening the panel is how you read
+   *why*, so taking the click away would hide the explanation. */
+#btn-assistant { position: relative; }
+#btn-assistant .spinner { position: absolute; right: -3px; bottom: -3px; width: 8px; height: 8px; }
+#btn-assistant.not-ready::after {
+  content: ""; position: absolute; right: -2px; bottom: -2px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--warn); border: 2px solid var(--bg-rail);
+}

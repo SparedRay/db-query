@@ -14,7 +14,14 @@
 // *around* the SQL — which is usually the part that explains a join — instead of
 // throwing it away to get at a structured field.
 
-import { api, type AssistantConfig, type AssistantEvent, type ChatMessage } from "./api";
+import {
+  api,
+  type AssistantConfig,
+  type AssistantEvent,
+  type ChatMessage,
+  type Provider,
+  type Recipe,
+} from "./api";
 
 export interface AssistantDeps {
   dialog: HTMLDialogElement;
@@ -34,6 +41,11 @@ export interface AssistantDeps {
   openInTab: (sql: string) => void;
   /** Remember that the assistant proposed this, so history can say so. */
   remember: (sql: string) => void;
+}
+
+/** What to call a CLI in front of a person. */
+export function cliLabel(recipe: Recipe): string {
+  return recipe === "claude" ? "Claude Code" : "Copilot CLI";
 }
 
 /** A message split into the prose and the runnable blocks it contained. */
@@ -132,11 +144,33 @@ export function createAssistant(deps: AssistantDeps) {
     }
   }
 
-  function setStreaming(on: boolean) {
+  /**
+   * The id of the CLI reply in flight, if any.
+   *
+   * Only a CLI reply has one, and only a CLI reply can be stopped: an HTTP
+   * request ends when it is dropped, while a child process carries on talking
+   * to a server — and spending the person's quota — until it is killed.
+   */
+  let inFlight: string | null = null;
+
+  function setStreaming(on: boolean, startingLabel = "Answering…") {
     streaming = on;
-    deps.send.disabled = on;
     deps.input.disabled = on;
-    deps.send.textContent = on ? "Answering…" : "Send";
+    // The CLI path turns Send into Stop rather than disabling it. A reply that
+    // takes seconds to begin and cannot be stopped is the thing the person
+    // reported about Cancel on a query.
+    const stoppable = on && inFlight !== null;
+    deps.send.disabled = on && !stoppable;
+    deps.send.textContent = on ? (stoppable ? "Stop" : startingLabel) : "Send";
+    deps.send.classList.toggle("danger", stoppable);
+  }
+
+  /** Stop a CLI reply. Harmless when nothing is in flight. */
+  function stop() {
+    const id = inFlight;
+    if (!id) return;
+    inFlight = null;
+    void api.assistantCliCancel(id).catch(() => {});
   }
 
   async function ask() {
@@ -165,7 +199,13 @@ export function createAssistant(deps: AssistantDeps) {
     let failed: string | null = null;
 
     const onEvent = (e: AssistantEvent) => {
-      if (e.type === "thinking") {
+      if (e.type === "started") {
+        // The CLI is up. Said out loud because Copilot CLI is silent for a
+        // couple of seconds before its first word, and "…" for that long reads
+        // as a hang — measured at 2.3s against a first token at 3.8s.
+        body.textContent = "…";
+        setStreaming(true);
+      } else if (e.type === "thinking") {
         thinking.hidden = false;
         thinking.textContent += e.delta;
       } else if (e.type === "text") {
@@ -180,13 +220,31 @@ export function createAssistant(deps: AssistantDeps) {
 
     try {
       const { connectionId, db } = deps.context();
+      const config = deps.config();
       // A copy: the request is a snapshot of the conversation, and `history` is
       // still being mutated by the turn that is in flight.
-      await api.assistantSend(deps.config(), connectionId, db, [...history], onEvent);
+      const snapshot = [...history];
+      if (config.provider === "localCli" && config.recipe) {
+        inFlight = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        // Re-labelled now that there is something to stop: `starting` rather
+        // than `Answering…`, because the CLI has not answered anything yet.
+        setStreaming(true, "Starting…");
+        await api.assistantCliSend(
+          config.recipe,
+          inFlight,
+          connectionId,
+          db,
+          snapshot,
+          onEvent,
+        );
+      } else {
+        await api.assistantSend(config, connectionId, db, snapshot, onEvent);
+      }
     } catch (err) {
       // The request never started — nothing was shown, so this replaces it.
       failed = String(err);
     } finally {
+      inFlight = null;
       setStreaming(false);
     }
 
@@ -211,7 +269,10 @@ export function createAssistant(deps: AssistantDeps) {
     deps.input.focus();
   }
 
-  deps.send.onclick = () => void ask();
+  deps.send.onclick = () => {
+    if (streaming) stop();
+    else void ask();
+  };
   deps.clear.onclick = () => {
     history = [];
     deps.log.replaceChildren();
@@ -234,19 +295,33 @@ export function createAssistant(deps: AssistantDeps) {
         return;
       }
       const config = deps.config();
-      const status = await api
-        .assistantStatus(config.provider, config.baseUrl)
-        .catch(() => null);
-      const ready = (status?.ready ?? false) && config.model.trim() !== "";
+      let ready: boolean;
 
-      deps.note.textContent = !ready
-        ? status && !status.ready
-          ? "No API key set. Add one in Settings to use the assistant."
-          : "No model set. Choose one in Settings."
-        : `${config.model} · ` +
-          (status?.local
-            ? "this model runs on your machine — nothing leaves it."
-            : "your schema's table and column names are sent with each question; row data never is.");
+      if (config.provider === "localCli" && config.recipe) {
+        // A CLI is asked a different question: not "is a key stored" but "is it
+        // installed and signed in". Free to ask — no model call — so it is
+        // asked every time the panel opens rather than cached and trusted.
+        const status = await api.assistantCliProbe(config.recipe).catch(() => null);
+        ready = (status?.installed ?? false) && (status?.signedIn ?? false);
+        deps.note.textContent = ready
+          ? `${cliLabel(config.recipe)} · signed in on this machine; ` +
+            "your schema's table and column names are sent with each question, row data never is."
+          : (status?.detail ?? `Could not ask ${cliLabel(config.recipe)} whether it is ready.`);
+      } else {
+        const status = await api
+          .assistantStatus(config.provider as Provider, config.baseUrl)
+          .catch(() => null);
+        ready = (status?.ready ?? false) && config.model.trim() !== "";
+
+        deps.note.textContent = !ready
+          ? status && !status.ready
+            ? "No API key set. Add one in Settings to use the assistant."
+            : "No model set. Choose one in Settings."
+          : `${config.model} · ` +
+            (status?.local
+              ? "this model runs on your machine — nothing leaves it."
+              : "your schema's table and column names are sent with each question; row data never is.");
+      }
 
       deps.send.disabled = !ready;
       deps.input.disabled = !ready;
