@@ -1,7 +1,9 @@
 # Stage 20 — The assistant through a CLI
 
-**Status:** 📋 Planned — 2026-10-01. Nothing built yet. Two facts must be
-measured before any code is written (§6).
+**Status:** 📋 Planned — 2026-10-01. Nothing built yet. **Phase 0 is
+measured** (§6) and changed the design: the tool-stripping flag Copilot
+documents is silently ignored, so the app checks the tool set rather than
+trusting it.
 
 ---
 
@@ -186,39 +188,121 @@ shape — fixed rules above, this connection's schema below.
 | C7 | Copilot and Claude both work | The same question on both recipes |
 | C8 | Cancelling stops it | Ask something long, press Cancel; the process is gone (`ps`), the chat says cancelled |
 
-## 6. What must be measured first
+## 6. Phase 0 — measured, 2026-10-01
 
-Each of these decides a design detail, and none of them is in the
-documentation. Measuring them is Phase 0 and needs `copilot` installed and
-signed in — which is the person's call, since it is their machine and their
-subscription.
+`copilot` 1.0.91 and `claude` 2.1.283, both signed in on this machine, every run
+in an empty scratch directory. Four invocations of Copilot and one of Claude;
+the raw JSONL is not committed, the numbers below are read from it.
 
-* **6.1 Is `--output-format=json` incremental?** JSONL one-object-per-line
-  suggests events as they happen, but if the lines arrive only at the end the
-  Copilot recipe is non-streaming (§4.3) and the UI has to say so.
-* **6.2 Can `--available-tools` be empty, and can the system prompt be
-  replaced?** If neither, Copilot's recipe cannot be given our prompt or
-  stripped of its tools, and we would have to carry our rules in the user
-  prompt instead — weaker, and worth knowing before it is designed around.
-* **6.3 Is there a `--bare` equivalent?** Without one, the person's own
-  `copilot-instructions.md`, agents and MCP servers load into our assistant.
-* **6.4 How is "not signed in" reported** — exit code, stderr, a JSON line?
-  C3 depends on telling that apart from a real failure.
-* **6.5 Cold-start cost.** A process per message, measured, both CLIs. If it is
-  seconds, the chat needs to say "starting" rather than look hung — the same
-  lesson as the connection spinner.
+| | **Claude Code** | **Copilot CLI** |
+|---|---|---|
+| Deltas arrive as they are produced | yes | **yes** — `assistant.message_delta` / `deltaContent` |
+| Tool set can be emptied | `--tools ""` → `tools: []` | only by a trick (§6.2) |
+| **The CLI states what it sent** | `system`/`init` carries `tools: []`, `mcp_servers: []` | `session.usage_checkpoint` carries `tool_count`, `tool_tokens` |
+| Our own system prompt | `--system-prompt-file` | **no** — §6.3 |
+| Ignore the person's config | `--bare` | `--no-custom-instructions`, `--disable-builtin-mcps` |
+| Trivial prompt, wall clock | **1.5 s** | 5.3–11.7 s, first line at ~2.5 s |
+| Not signed in | `claude auth status`, exit 0/1 | exit **1**, `Error: No authentication information found.` |
+
+### 6.1 Copilot streams, and the event stream is good
+
+`--output-format json` is JSONL emitted as things happen, not dumped at the
+end: for a twenty-line answer the `assistant.message_delta` lines arrived
+spread over ~220 ms, between `assistant.message_start` and `model.call_finished`.
+`deltaContent` is the text. So **both recipes stream** and §4.3's
+non-streaming fallback is not needed for either.
+
+The stream also carries `session.mcp_servers_loaded`, `model.call_start`,
+`session.usage_checkpoint` and a final `result` with `exitCode` and
+`premiumRequests`. More than we need, and all of it useful for the logbook.
+
+### 6.2 `--available-tools=` is silently ignored — and that is the headline
+
+Asking for an empty tool set **does nothing**. The run went out with
+`tool_count: 21` — `bash`, `create`, `edit`, `web_fetch`, `task` and the rest —
+at `tool_tokens: 7289`. The flag is not rejected, it is disregarded, so the
+mistake looks exactly like success.
+
+What the flag *does* do, with a real value, is work exactly as documented, and
+it is the **single lever that closes everything**: it filters MCP tools too, so
+there is no need to chase `--disable-mcp-server` for each server the person has
+configured — including, as §4.2 warns, possibly this app's own.
+
+| `--available-tools=` | `tool_count` | `tool_tokens` | `prompt_tokens` |
+|---|---|---|---|
+| *(empty)* | 21 | 7289 | 11013 |
+| `view` | 1 | 203 | 1836 |
+| `__db_query_none__` (no such tool) | **0** | 0 | 1589 |
+
+Zero is reachable — by naming a tool that does not exist. It still answers
+normally. But **that is a trick, not a contract**: nothing documents it, and if
+Copilot ever validates the name it breaks *open*, handing the model back its
+tools, which is the wrong direction to fail in.
+
+So the invariant is not trusted, it is **checked, every message**: both CLIs
+report their own tool set, so the recipe reads it back —
+`tool_count` from `session.usage_checkpoint`, `tools: []` from Claude's `init` —
+and anything other than empty is a bug the app surfaces rather than a silence
+it keeps. Milestone C5 becomes an assertion in the code, not only a hands-on
+check.
+
+### 6.3 Copilot's system prompt is not ours to replace
+
+There is no equivalent of `--system-prompt-file`. With zero tools the request
+still carried 1589 prompt tokens of Copilot's own instructions, in segments it
+names itself — `customized_identity_preamble`, `code_change_instructions`,
+`tone_and_style`. We can add our rules to the prompt text; we cannot stop it
+being a coding assistant underneath.
+
+That is acceptable — our rules are about what it must not claim to be able to
+do, and nothing in its own prompt contradicts them — but it is a real
+difference from Claude, where `--system-prompt-file` means `system_prompt(...)`
+can be handed over verbatim. Untested and worth one probe later:
+`--agent`, which may be able to carry our instructions as a custom agent.
+
+### 6.4 Cold start is the UX problem
+
+Claude answered a trivial prompt in **1.5 s** end to end. Copilot took 5.3 s on
+a warm run and 11.7 s on the first, with nothing at all on stdout for the first
+~2.5 s. A chat that sits blank for two and a half seconds reads as broken —
+the same lesson as the connection spinner. The recipe therefore reports
+*starting* as a state of its own, before the first delta, rather than letting
+an empty bubble stand for it.
+
+### 6.5 What a message costs on Copilot
+
+One **premium request** per invocation, and `--max-ai-credits` can cap a
+session. On these free credentials `availableModels` held only
+`mai-code-1.1-flash`, chosen by auto-routing. Cutting the tool schemas out
+takes a trivial message from 11,013 to 1,589 prompt tokens — so §6.2 is a cost
+fix as much as a safety one.
+
+Also worth passing: `--no-auto-update`, so the CLI does not silently download a
+new version underneath a recipe that was measured against this one.
+
+### 6.6 Still unanswered
+
+* Whether `--agent` can carry our system prompt (§6.3).
+* What `--acp` offers. Copilot CLI can run as an **Agent Client Protocol**
+  server, which is a real JSON-RPC protocol rather than a stdout format. If it
+  suits, it is a better integration than parsing lines — and it is how editors
+  already talk to agents. Worth a look before Phase 1 is written.
 
 ## 7. Task tracker
 
-### Phase 0 — Measure (§6)
+### Phase 0 — Measure (§6) — ✅ done 2026-10-01
 
-- [ ] Install and sign in to `copilot` (needs the person's go-ahead)
-- [ ] Record §6.1–6.5 for both CLIs, with the command and its raw output
+- [x] Install and sign in to `copilot` — 1.0.91, free credentials
+- [x] Record both CLIs' streaming, tool stripping, auth failure and cold start
+- [ ] `--agent` as a system-prompt carrier (§6.6)
+- [ ] Assess `--acp` before Phase 1 is written (§6.6)
 
 ### Phase 1 — One provider, rebuilt each turn
 
 - [ ] `Provider::LocalCli` + a `Recipe` table (binary, args, parser, streams?)
 - [ ] Spawn with an empty cwd and a clean environment; stream stdout
+- [ ] **Read the tool set back and assert it is empty, every message** (§6.2)
+- [ ] A `starting` state before the first delta (§6.4)
 - [ ] Claude recipe
 - [ ] Copilot recipe, shaped by Phase 0
 - [ ] Settings: the closed recipe list, no key field, no base URL
