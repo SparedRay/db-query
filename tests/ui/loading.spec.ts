@@ -83,12 +83,12 @@ test("connecting shows a spinner on the connection being opened", async ({ page 
 
   await page.locator(".rail-item").click();
   await expect(page.locator(".rail-item.connecting")).toHaveCount(1);
-  await expect(page.locator(".rail-item .spinner")).toBeVisible();
+  await expect(page.locator(".rail-item .busy-outline")).toBeVisible();
   await expect(page.locator(".rail-item")).toHaveAttribute("aria-busy", "true");
 
   g.open();
   await expect(page.locator(".rail-item.live")).toHaveCount(1);
-  await expect(page.locator(".rail-item .spinner")).toHaveCount(0);
+  await expect(page.locator(".rail-item .busy-outline")).toHaveCount(0);
 });
 
 /** A dead-looking button gets clicked again; that must not open two connections. */
@@ -120,12 +120,55 @@ test("a failed connection clears the spinner", async ({ page }) => {
   });
 
   await page.locator(".rail-item").click();
-  await expect(page.locator(".rail-item .spinner")).toBeVisible();
+  await expect(page.locator(".rail-item .busy-outline")).toBeVisible();
 
   g.fail(new Error("Access denied for user 'reporting'"));
-  await expect(page.locator(".rail-item .spinner")).toHaveCount(0);
+  await expect(page.locator(".rail-item .busy-outline")).toHaveCount(0);
   await expect(page.locator(".rail-item.connecting")).toHaveCount(0);
   await expect(page.locator(".rail-item.offline")).toHaveCount(1);
+});
+
+/**
+ * **The loader is the item's own shape.**
+ *
+ * It used to be the shared `.spinner`: a circle at `inset: -4px` around a 32px
+ * rounded square, so 40px across — larger than the thing it reported on, and
+ * the only circle on a rail of rounded squares. Reported as looking foreign.
+ *
+ * So this measures the two boxes rather than asserting a class name: whatever
+ * draws the busy state has to be the item's own outline, not a ring around it.
+ */
+test("the connecting outline is the item's own square, not a ring around it", async ({ page }) => {
+  const g = gate();
+  await bootSaved(page, async () => {
+    await g.p;
+    return CONN;
+  });
+
+  await page.locator(".rail-item").click();
+  const outline = page.locator(".rail-item .busy-outline");
+  await expect(outline).toHaveCount(1);
+  // The circle is gone, not merely drawn over.
+  await expect(page.locator(".rail-item .spinner")).toHaveCount(0);
+
+  const item = (await page.locator(".rail-item").boundingBox())!;
+  const drawn = (await outline.boundingBox())!;
+  expect(Math.abs(drawn.width - item.width)).toBeLessThan(1);
+  expect(Math.abs(drawn.height - item.height)).toBeLessThan(1);
+
+  // And it travels. A static outline is a border, not a loader.
+  const paint = await page.evaluate(() => {
+    const r = document.querySelector(".rail-item .busy-outline rect");
+    if (!r) return null;
+    return { animation: getComputedStyle(r).animationName, rx: r.getAttribute("rx") };
+  });
+  expect(paint?.animation).toBe("trace");
+  // Drawn at the item's own 9px radius, less the half-unit stroke inset.
+  expect(paint?.rx).toBe("8.5");
+
+  g.open();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await expect(outline).toHaveCount(0);
 });
 
 // ------------------------------------------------------------ the tree
