@@ -448,3 +448,61 @@ recipes is a feature; a text field is a vulnerability with a label.
 They are what the Ollama fixture tests, they are what works with no CLI
 installed, and they are what works on a machine where neither vendor's CLI
 exists. A CLI recipe is another way in, not a replacement.
+
+## 10. Phase 1, the backend — built 2026-10-01
+
+`agentcli.rs`: the recipes, the parser, the process runner and the readiness
+probes. 18 unit tests, 4 live tests (`mise run test-cli`), 414 Rust tests in
+all. The UI is not built yet.
+
+Three things the plan got wrong, found by building it:
+
+### 10.1 `--bare` breaks authentication
+
+It looked exactly right — it skips hooks, skills, CLAUDE.md and MCP discovery
+in one flag, which is §4.2's whole wish list. With it, every run returns
+`Not logged in · Please run /login` and `duration_api_ms: 0`, while
+`claude auth status` says the account is signed in. Without it, the same call
+works.
+
+So the person's configuration **does** load, and the tool flags carry the whole
+weight. Which turned out to matter: with `--disallowedTools "mcp__*"` the tool
+list came back empty but the *server* list did not — four claude.ai connectors
+had loaded anyway. No tools were exposed, so the rule held, but it held for a
+different reason than the flag implied. `--strict-mcp-config` with an empty
+config is now passed as well, and the `init` readback is what will say whether
+it worked.
+
+### 10.2 A clean environment would break both CLIs
+
+§4.2 promised `env_clear()`. It reads as the careful choice and it is the wrong
+one: both CLIs authenticate out of the person's own session — Claude from under
+`HOME`, Copilot from the OS credential store, which on Linux needs the session
+D-Bus address. Clearing the environment does not harden the call, it stops it
+working.
+
+Giving that up is cheap because there is nothing of ours to leak: a database
+password lives in the keychain and is read at the moment it is used, never
+parked in our environment. The empty working directory, which is the part that
+keeps a coding agent out of the person's project, stays.
+
+### 10.3 The invariant, proven against the real CLI
+
+The live test asks a real question and asserts the answer did not fail —
+because a non-empty tool set is *how* a reply fails. Falsified on 2026-10-01 by
+switching the recipe to the documented `--available-tools=` form: the real CLI
+offered 21 tools, the readback named every one of them in the refusal, and the
+test failed. That is the central safety claim of this stage, demonstrated
+failing when broken rather than asserted.
+
+Cancel is proven the same way — a cancelled reply returns in ~2.5s with no
+`Done` event, because the process was killed rather than waited out — and the
+`Started` event earns its place with numbers: it arrived at 2.3s against a
+first token at 3.8s, so it covers 1.4s that would otherwise be an empty bubble.
+
+### 10.4 Still to build
+
+- [ ] Settings → Integrations, and the assistant button's five states (§9.1)
+- [ ] UI tests with a fake CLI on PATH
+- [ ] A long-lived process per chat (§9.3) — now known to be possible for both,
+      since Copilot's ACP mode is real and answers a handshake

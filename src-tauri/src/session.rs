@@ -407,6 +407,13 @@ pub struct AppState {
     /// statement came from. In memory only: provenance is a fact about this
     /// run, and a stale proposal file would start mislabelling things.
     pub proposals: Mutex<crate::assistant::Proposals>,
+    /// One entry per assistant reply still being streamed out of a CLI, so it
+    /// can be stopped. Keyed by a request id the caller makes up.
+    ///
+    /// A CLI reply needs this and an HTTP one does not: dropping an HTTP
+    /// request ends it, while a child process carries on talking to a server
+    /// and spending the person's quota until something kills it.
+    pub cli_asks: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 /// sqlx errors are verbose and full of internals. Surface the part a human

@@ -124,7 +124,12 @@ impl Recipe {
     /// own with it; **Copilot cannot** — it has no such flag, so there the
     /// caller folds our rules into the prompt text instead and this argument
     /// is unused.
-    pub fn ask_args(self, system: &std::path::Path, prompt: &str, cwd: &std::path::Path) -> Vec<String> {
+    pub fn ask_args(
+        self,
+        system: &std::path::Path,
+        prompt: &str,
+        cwd: &std::path::Path,
+    ) -> Vec<String> {
         let s = |x: &str| x.to_string();
         match self {
             // `--bare` is deliberately absent. It looks exactly right — it
@@ -371,7 +376,8 @@ fn copilot_line(v: &serde_json::Value) -> Vec<CliEvent> {
         Some("result") => {
             let code = v["exitCode"].as_i64().unwrap_or(0);
             vec![CliEvent::Done {
-                error: (code != 0).then(|| format!("{} exited with code {code}.", Recipe::Copilot.label())),
+                error: (code != 0)
+                    .then(|| format!("{} exited with code {code}.", Recipe::Copilot.label())),
             }]
         }
         _ => vec![],
@@ -420,6 +426,417 @@ fn is_signed_out(text: &str) -> bool {
         || t.starts_with("authentication required")
 }
 
+// ----------------------------------------------------------------- running it
+
+use crate::assistant::StreamEvent;
+use std::process::Stdio;
+use tokio::io::AsyncBufReadExt;
+
+/// A scratch directory and, for Claude, the system-prompt file in it.
+///
+/// Both CLIs are coding agents that read their working directory by default,
+/// so neither is invited into the person's project: each run gets an empty
+/// directory of its own and it is removed afterwards.
+struct Scratch {
+    dir: std::path::PathBuf,
+    system: std::path::PathBuf,
+}
+
+impl Scratch {
+    fn make(system: &str) -> Result<Self, String> {
+        let n: u64 = rand::random();
+        let dir = std::env::temp_dir().join(format!("db-query-cli-{n:016x}"));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Could not make a scratch directory: {e}"))?;
+        let path = dir.join("system.txt");
+        std::fs::write(&path, system).map_err(|e| format!("Could not write the prompt: {e}"))?;
+        Ok(Self { dir, system: path })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best effort: a leftover directory in the system temp is untidy, not
+        // broken, and a failed cleanup must not fail an answer.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Stream one reply out of a CLI.
+///
+/// Mirrors the HTTP path's contract: anything that goes wrong after the first
+/// token arrives as a [`StreamEvent::Failed`] rather than a returned error, so
+/// half an answer is not thrown away to show a message.
+pub async fn run(
+    recipe: Recipe,
+    system: &str,
+    messages: &[ChatMessage],
+    cancelled: &tokio::sync::Notify,
+    mut emit: impl FnMut(StreamEvent),
+) -> Result<(), String> {
+    let scratch = Scratch::make(system)?;
+
+    // Claude replaces its system prompt with ours. Copilot has no such flag —
+    // measured 2026-10-01 — so there the rules ride in the prompt instead.
+    let prompt = match recipe {
+        Recipe::Claude => transcript(messages),
+        Recipe::Copilot => format!("{system}\n\n---\n\n{}", transcript(messages)),
+    };
+
+    let args = recipe.ask_args(&scratch.system, &prompt, &scratch.dir);
+
+    // The environment is **inherited**, which was not the original plan.
+    //
+    // `env_clear()` was: it reads as the careful choice. But both CLIs
+    // authenticate out of the person's own session — Claude from under `HOME`,
+    // Copilot from the OS credential store, which on Linux needs the session
+    // D-Bus address — so clearing the environment does not harden the call, it
+    // breaks it. What made clearing cheap to give up is that there is nothing
+    // of ours to leak: a database password lives in the keychain and is read at
+    // the moment it is used, never parked in our environment.
+    let mut child = tokio::process::Command::new(recipe.program())
+        .args(&args)
+        .current_dir(&scratch.dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // If this future is dropped — the window closes, the task is abandoned —
+        // the CLI does not keep running and billing.
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!(
+                "{} is not installed: `{}` was not found on your PATH.",
+                recipe.label(),
+                recipe.program()
+            ),
+            _ => format!("Could not start {}: {e}", recipe.program()),
+        })?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("The CLI produced no output stream.")?;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let wire = recipe.wire();
+
+    let mut said_anything = false;
+    let mut ended = false;
+    // Copilot announces itself more than once — `session.info` and
+    // `session.auto_mode_resolved` both mean "up". The UI only needs to leave
+    // the starting state once.
+    let mut announced = false;
+    let mut refusal: Option<String> = None;
+
+    // Armed before the first read, so a cancel landing in between is not lost —
+    // the same shape `session::cancellable` uses for a query.
+    let notified = cancelled.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
+    loop {
+        let line = tokio::select! {
+            read = lines.next_line() => match read {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(e) => {
+                    emit(StreamEvent::Failed { message: format!("The reply was cut off: {e}") });
+                    break;
+                }
+            },
+            _ = &mut notified => {
+                // Killing is the only way to stop a child, and the only cost is
+                // a process that was going to exit anyway.
+                let _ = child.kill().await;
+                return Ok(());
+            }
+        };
+
+        for event in parse_line(wire, &line) {
+            match event {
+                CliEvent::Started if !announced => {
+                    announced = true;
+                    emit(StreamEvent::Started);
+                }
+                CliEvent::Started => {}
+                CliEvent::Text { delta } => {
+                    said_anything = true;
+                    emit(StreamEvent::Text { delta });
+                }
+                // **The invariant.** See the module docs for why this is read
+                // back rather than trusted to the flags.
+                CliEvent::Tools { names } if !names.is_empty() => {
+                    refusal = Some(format!(
+                        "{} offered the model {} tool{} ({}). The assistant is not allowed any, \
+                         so this answer was stopped. Please report this — the flags that remove \
+                         them have changed.",
+                        recipe.label(),
+                        names.len(),
+                        if names.len() == 1 { "" } else { "s" },
+                        names.join(", ")
+                    ));
+                }
+                CliEvent::Tools { .. } => {}
+                CliEvent::ToolUse { name } => {
+                    refusal = Some(format!(
+                        "{} tried to use a tool ({name}). The assistant has no tools and runs \
+                         nothing, so this answer was stopped.",
+                        recipe.label()
+                    ));
+                }
+                CliEvent::NotSignedIn => {
+                    refusal = Some(format!(
+                        "{} is not signed in. Run `{} {}` in a terminal, then try again.",
+                        recipe.label(),
+                        recipe.program(),
+                        match recipe {
+                            Recipe::Claude => "auth login",
+                            Recipe::Copilot => "login",
+                        }
+                    ));
+                }
+                CliEvent::Done { error } => {
+                    ended = true;
+                    match error {
+                        Some(message) if !said_anything => refusal = Some(message),
+                        // It failed *after* writing something. The text on
+                        // screen is the better half; say it was cut short
+                        // rather than replacing it with the CLI's own summary.
+                        Some(_) => emit(StreamEvent::Failed {
+                            message: format!("{} stopped early.", recipe.label()),
+                        }),
+                        None => {}
+                    }
+                }
+            }
+        }
+
+        if refusal.is_some() {
+            let _ = child.kill().await;
+            break;
+        }
+    }
+
+    if let Some(message) = refusal {
+        emit(StreamEvent::Failed { message });
+        return Ok(());
+    }
+
+    // Nothing at all came back. The reason is usually on stderr, and a bare
+    // "it failed" when the CLI said why is a worse message than the CLI's.
+    if !said_anything && !ended {
+        let mut why = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            why = String::from_utf8_lossy(&buf).trim().to_string();
+        }
+        let status = child.wait().await.ok();
+        let code = status.and_then(|s| s.code()).unwrap_or(-1);
+        let detail = if why.is_empty() {
+            format!("exited with code {code} and said nothing")
+        } else {
+            why.lines().take(4).collect::<Vec<_>>().join(" ")
+        };
+        emit(StreamEvent::Failed {
+            message: format!("{} {detail}.", recipe.label()),
+        });
+        return Ok(());
+    }
+
+    emit(StreamEvent::Done { stop_reason: None });
+    let _ = child.wait().await;
+    Ok(())
+}
+
+// ------------------------------------------------------------- is it ready?
+
+/// What a readiness probe found. Everything here is knowable **without a model
+/// call**, which is what makes warming an integration at startup honest rather
+/// than a way to spend someone's quota on a lamp.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub installed: bool,
+    pub signed_in: bool,
+    /// What to say to the person. Empty when it is simply ready.
+    pub detail: String,
+}
+
+/// Probe a recipe. Never asks a model anything, never costs a request.
+pub async fn probe(recipe: Recipe) -> Status {
+    match recipe {
+        Recipe::Claude => probe_claude(recipe).await,
+        Recipe::Copilot => probe_copilot(recipe).await,
+    }
+}
+
+fn missing(recipe: Recipe) -> Status {
+    Status {
+        installed: false,
+        signed_in: false,
+        detail: format!(
+            "`{}` was not found on your PATH. Install {} to use it here.",
+            recipe.program(),
+            recipe.label()
+        ),
+    }
+}
+
+/// `claude auth status` prints JSON and exits 0 when signed in, 1 when not.
+async fn probe_claude(recipe: Recipe) -> Status {
+    let out = tokio::process::Command::new(recipe.program())
+        .args(recipe.probe_args())
+        .stdin(Stdio::null())
+        .output()
+        .await;
+    let out = match out {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return missing(recipe),
+        Err(e) => {
+            return Status {
+                installed: true,
+                signed_in: false,
+                detail: format!("Could not ask {}: {e}", recipe.label()),
+            }
+        }
+    };
+    // The exit code alone would do, but the JSON says it in a field and a field
+    // is harder to misread than a convention.
+    let signed_in = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .ok()
+        .and_then(|v| v["loggedIn"].as_bool())
+        .unwrap_or_else(|| out.status.success());
+    Status {
+        installed: true,
+        signed_in,
+        detail: if signed_in {
+            String::new()
+        } else {
+            format!(
+                "Not signed in. Run `{} auth login` in a terminal.",
+                recipe.program()
+            )
+        },
+    }
+}
+
+/// Copilot has no `auth status`, and its token lives in the OS credential
+/// store, which is not ours to read.
+///
+/// So this speaks **ACP** — the Agent Client Protocol, its `--acp` mode — over
+/// stdin and stdout: `initialize`, then `session/new`. Measured 2026-10-01,
+/// signing out produces
+/// `{"error":{"code":-32000,"message":"Authentication required"}}` and signing
+/// in produces a live session, with no model call either way.
+async fn probe_copilot(recipe: Recipe) -> Status {
+    let dir = match Scratch::make("") {
+        Ok(d) => d,
+        Err(detail) => {
+            return Status {
+                installed: true,
+                signed_in: false,
+                detail,
+            }
+        }
+    };
+    let mut child = match tokio::process::Command::new(recipe.program())
+        .args(recipe.probe_args())
+        .current_dir(&dir.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return missing(recipe),
+        Err(e) => {
+            return Status {
+                installed: true,
+                signed_in: false,
+                detail: format!("Could not start {}: {e}", recipe.label()),
+            }
+        }
+    };
+
+    let handshake = format!(
+        "{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false}}}}"#,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": { "cwd": dir.dir.display().to_string(), "mcpServers": [] }
+        })
+    );
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, handshake.as_bytes()).await;
+        // Dropped, so the CLI sees end-of-input and does not wait for more.
+    }
+
+    let answer = match child.stdout.take() {
+        Some(stdout) => read_acp_answer(stdout).await,
+        None => None,
+    };
+    let _ = child.kill().await;
+
+    match answer {
+        Some(Ok(())) => Status {
+            installed: true,
+            signed_in: true,
+            detail: String::new(),
+        },
+        Some(Err(message)) => Status {
+            installed: true,
+            signed_in: false,
+            detail: format!("{message} Run `{} login` in a terminal.", recipe.program()),
+        },
+        // It started and never answered the handshake. Installed, and nothing
+        // more can be claimed — which the caller shows as exactly that.
+        None => Status {
+            installed: true,
+            signed_in: false,
+            detail: format!(
+                "{} did not answer. It is installed; whether it is signed in is unknown.",
+                recipe.label()
+            ),
+        },
+    }
+}
+
+/// Read ACP lines until the answer to `session/new` (id 1) arrives.
+///
+/// `Ok(())` is a session; `Err` is the refusal's message. A notification that
+/// happens to arrive first — the agent advertises its commands — is not an
+/// answer, so the loop keeps reading rather than guessing from the first line.
+async fn read_acp_answer(stdout: tokio::process::ChildStdout) -> Option<Result<(), String>> {
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    // Bounded: a CLI that chatters forever must not hold the probe open, and a
+    // handshake takes two lines when it works.
+    for _ in 0..64 {
+        let line = match tokio::time::timeout(std::time::Duration::from_secs(20), lines.next_line())
+            .await
+        {
+            Ok(Ok(Some(line))) => line,
+            _ => return None,
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v["id"].as_i64() != Some(1) {
+            continue;
+        }
+        if let Some(message) = v["error"]["message"].as_str() {
+            return Some(Err(format!("{message}.")));
+        }
+        if v.get("result").is_some() {
+            return Some(Ok(()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,10 +850,7 @@ mod tests {
         let line = r#"{"type":"system","subtype":"init","tools":[],"mcp_servers":[],"model":"claude-opus-5-5"}"#;
         assert_eq!(
             parse_line(Wire::ClaudeStreamJson, line),
-            vec![
-                CliEvent::Started,
-                CliEvent::Tools { names: vec![] }
-            ]
+            vec![CliEvent::Started, CliEvent::Tools { names: vec![] }]
         );
     }
 
@@ -476,7 +890,8 @@ mod tests {
     /// would print every answer twice.
     #[test]
     fn claude_full_message_adds_no_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"1\n2\n3"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"1\n2\n3"}]}}"#;
         assert_eq!(parse_line(Wire::ClaudeStreamJson, line), vec![]);
     }
 
@@ -492,7 +907,8 @@ mod tests {
     /// `subtype` is "success" on a failed run, so it is not the field to read.
     #[test]
     fn a_failed_claude_run_is_an_error_despite_its_subtype() {
-        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}"#;
+        let line =
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}"#;
         assert_eq!(
             parse_line(Wire::ClaudeStreamJson, line),
             vec![CliEvent::Done {
@@ -506,13 +922,16 @@ mod tests {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Bash"}}}"#;
         assert_eq!(
             parse_line(Wire::ClaudeStreamJson, line),
-            vec![CliEvent::ToolUse { name: "Bash".into() }]
+            vec![CliEvent::ToolUse {
+                name: "Bash".into()
+            }]
         );
     }
 
     #[test]
     fn copilot_text_arrives_as_deltas() {
-        let line = r#"{"type":"assistant.message_delta","data":{"messageId":"e6","deltaContent":"OK"}}"#;
+        let line =
+            r#"{"type":"assistant.message_delta","data":{"messageId":"e6","deltaContent":"OK"}}"#;
         assert_eq!(
             parse_line(Wire::CopilotJsonl, line),
             vec![CliEvent::Text { delta: "OK".into() }]
@@ -601,7 +1020,10 @@ mod tests {
         );
         let joined = args.join(" ");
         // Not `--available-tools=`, which is silently ignored.
-        assert!(joined.contains(&format!("--available-tools={NO_SUCH_TOOL}")), "{joined}");
+        assert!(
+            joined.contains(&format!("--available-tools={NO_SUCH_TOOL}")),
+            "{joined}"
+        );
         assert!(!joined.contains("--available-tools= "), "{joined}");
         assert!(joined.contains("--no-custom-instructions"));
         assert!(joined.contains("--disable-builtin-mcps"));

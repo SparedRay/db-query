@@ -422,39 +422,21 @@ async fn remember_proposal(state: State<'_, AppState>, sql: String) -> Result<()
     Ok(())
 }
 
-/// Stream one reply.
+/// The system prompt for one question: the rules, plus this connection's shape.
 ///
-/// Errors after the request has started are sent **as events**, not returned:
-/// by then there may be half an answer on screen, and throwing it away to show
-/// an error loses the more useful half.
-// Eight parameters, and each is load-bearing: where to send the request, which
-// model, the schema context, the conversation and the channel to stream back.
-// Bundling them into a struct would only move the list.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-async fn assistant_send(
-    state: State<'_, AppState>,
-    provider: assistant::Provider,
-    base_url: String,
-    model: String,
-    connection_id: Option<String>,
-    db: Option<String>,
-    messages: Vec<assistant::ChatMessage>,
-    on_event: tauri::ipc::Channel<assistant::StreamEvent>,
-) -> Result<(), String> {
-    if model.trim().is_empty() {
-        return Err("No model is set. Choose one in Settings.".into());
-    }
-    let key = secrets::load(provider.key_id()).map_err(|e| e.0)?;
-    if key.is_none() && provider.requires_key(&base_url) {
-        return Err("No API key is set. Add one in Settings to use the assistant.".into());
-    }
-
+/// Extracted when the CLI providers arrived (Stage 20). Both paths need exactly
+/// the same prompt, and a second copy of the schema-rendering rules is a second
+/// place for them to drift.
+async fn assistant_system(
+    state: &State<'_, AppState>,
+    connection_id: &Option<String>,
+    db: &Option<String>,
+) -> String {
     // Schema, when there is a live connection to take it from. Names and types
     // only — `render_schema` cannot see row data, by construction.
     let mut caps: Option<crate::engine::Capabilities> = None;
-    let (server_version, schema_text) = match &connection_id {
-        Some(id) => match session::server(&state, id).await {
+    let (server_version, schema_text) = match connection_id {
+        Some(id) => match session::server(state, id).await {
             Ok(server) => {
                 let version = server.server_version.clone();
                 caps = Some(server.capabilities.clone());
@@ -470,7 +452,7 @@ async fn assistant_send(
                 // model was handed "columns not loaded" and invented the rest.
                 // A failure here is not fatal: an unreachable server should
                 // produce a thinner prompt, not a refused question.
-                let warmed = schema::warm(&state, id, ns, schema::TABLE_DETAIL_BUDGET)
+                let warmed = schema::warm(state, id, ns, schema::TABLE_DETAIL_BUDGET)
                     .await
                     .unwrap_or_default();
 
@@ -501,7 +483,38 @@ async fn assistant_send(
         None => ("unknown".to_string(), None),
     };
 
-    let system = assistant::system_prompt(&server_version, schema_text.as_deref(), caps.as_ref());
+    assistant::system_prompt(&server_version, schema_text.as_deref(), caps.as_ref())
+}
+
+/// Stream one reply.
+///
+/// Errors after the request has started are sent **as events**, not returned:
+/// by then there may be half an answer on screen, and throwing it away to show
+/// an error loses the more useful half.
+// Eight parameters, and each is load-bearing: where to send the request, which
+// model, the schema context, the conversation and the channel to stream back.
+// Bundling them into a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn assistant_send(
+    state: State<'_, AppState>,
+    provider: assistant::Provider,
+    base_url: String,
+    model: String,
+    connection_id: Option<String>,
+    db: Option<String>,
+    messages: Vec<assistant::ChatMessage>,
+    on_event: tauri::ipc::Channel<assistant::StreamEvent>,
+) -> Result<(), String> {
+    if model.trim().is_empty() {
+        return Err("No model is set. Choose one in Settings.".into());
+    }
+    let key = secrets::load(provider.key_id()).map_err(|e| e.0)?;
+    if key.is_none() && provider.requires_key(&base_url) {
+        return Err("No API key is set. Add one in Settings to use the assistant.".into());
+    }
+
+    let system = assistant_system(&state, &connection_id, &db).await;
     let body = assistant::request(provider, &model, &system, &messages);
 
     // Auth differs by provider, and a local server usually wants none at all —
@@ -554,6 +567,59 @@ async fn assistant_send(
                 return Ok(());
             }
         }
+    }
+    Ok(())
+}
+
+/// Is this CLI installed and signed in? Costs nothing — see `agentcli::probe`.
+#[tauri::command]
+async fn assistant_cli_probe(recipe: agentcli::Recipe) -> agentcli::Status {
+    agentcli::probe(recipe).await
+}
+
+/// Stream one reply out of a CLI.
+///
+/// `request_id` is the caller's handle for stopping it. The HTTP path needs no
+/// such thing — dropping the request ends it — but a child process keeps
+/// talking to a server, and spending the person's quota, until it is killed.
+#[tauri::command]
+async fn assistant_cli_send(
+    state: State<'_, AppState>,
+    recipe: agentcli::Recipe,
+    request_id: String,
+    connection_id: Option<String>,
+    db: Option<String>,
+    messages: Vec<assistant::ChatMessage>,
+    on_event: tauri::ipc::Channel<assistant::StreamEvent>,
+) -> Result<(), String> {
+    let system = assistant_system(&state, &connection_id, &db).await;
+
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    state
+        .cli_asks
+        .lock()
+        .await
+        .insert(request_id.clone(), cancel.clone());
+
+    let result = agentcli::run(recipe, &system, &messages, &cancel, |event| {
+        let _ = on_event.send(event);
+    })
+    .await;
+
+    // Removed however it ended, including the error paths: an entry left behind
+    // is a cancel that silently does nothing next time the id is reused.
+    state.cli_asks.lock().await.remove(&request_id);
+    result
+}
+
+/// Stop a CLI reply, killing the process behind it.
+#[tauri::command]
+async fn assistant_cli_cancel(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Some(cancel) = state.cli_asks.lock().await.get(&request_id) {
+        cancel.notify_waiters();
     }
     Ok(())
 }
@@ -1939,6 +2005,9 @@ pub fn run() {
             assistant_status,
             assistant_set_key,
             assistant_send,
+            assistant_cli_probe,
+            assistant_cli_send,
+            assistant_cli_cancel,
             remember_proposal,
             history_search,
             history_clear,

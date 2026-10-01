@@ -206,6 +206,18 @@ run = "podman stop db-query-ollama && podman rm db-query-ollama"
 # a filter matches nothing. A misspelled filter otherwise reports a green run
 # that contacted no server at all — which is what the first version of this task
 # did, silently, for one run.
+# Needs a CLI installed *and* signed in. The readiness test is free; the other
+# three each spend one request on the person's own subscription, which is why
+# this is a task they run rather than part of `check`. `CLI_RECIPE=claude`
+# switches which CLI is exercised.
+[tasks.test-cli]
+description = "The agent-CLI provider, against a real Copilot or Claude CLI"
+run = """
+cargo test --manifest-path src-tauri/Cargo.toml --test agentcli_live \
+  -- --ignored --test-threads=1 --nocapture | tee /tmp/db-query-cli-test.log
+grep -q "4 passed" /tmp/db-query-cli-test.log || { echo "not all four ran — is the CLI signed in?"; exit 1; }
+"""
+
 [tasks.test-ollama]
 description = "The assistant's local-endpoint test, against the ollama-up fixture"
 run = """
