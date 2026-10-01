@@ -1,5 +1,6 @@
 //! Command surface and state registration.
 
+pub mod agentcli;
 pub mod assistant;
 pub mod decode;
 pub mod elastic;
