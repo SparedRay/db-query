@@ -140,6 +140,10 @@ about what the app knows.
 
 ### 4.4 Multi-turn: rebuild now, resume later
 
+> **Superseded by §9.3** — a warmed, long-lived process turns out to give
+> continuity *without* either of the options weighed below. The reasoning here
+> is kept because it is what rules `--resume` out, and §9.3 depends on it.
+
 > *"For now as a POC we can rebuild on each invokation but we might have to
 > target the holding of a session-id as ideally that will reduce token usage
 > isn't?"*
@@ -323,6 +327,107 @@ new version underneath a recipe that was measured against this one.
 - [ ] A session id per chat, `--resume` with rebuild as the fallback
 - [ ] Decide the second-copy question in §4.4 before turning persistence on
 - [ ] Measure what it actually saves before keeping it
+
+## 9. Enabled per integration, warmed at startup — 2026-10-01
+
+> *"what if we select on integrations which one we want to enable (That way
+> user has control over which one they need) and then we condition the
+> assitant button wit a loader. when enabled on start up it will warm the
+> tool. If user needs it is already there, if not (Or disable) we don't add
+> anything."*
+
+Right on both counts, and it matches what the app already does: the MCP server
+is off until switched on, and anything slower than an eyeblink says so. Nothing
+is spawned, probed or shown for an integration that is off.
+
+### 9.1 What "ready" can honestly mean, per CLI
+
+Warming is only worth having if the light it turns on is true, and the two CLIs
+differ in what can be learned for free:
+
+| | **Claude Code** | **Copilot CLI** |
+|---|---|---|
+| Installed | binary on PATH | binary on PATH |
+| Signed in | `claude auth status` — JSON, exit 0/1, **free** | **not knowable for free** |
+
+Copilot has no `auth status`. `copilot login` is an interactive OAuth flow; the
+token lives in the system credential store, or falls back to plaintext under
+`~/.copilot/`; and the subcommands that exit 0 do so while signed out too
+(measured: `mcp list`, `instruction list`, `skill list` all exit 0 with an empty
+`HOME`). Sign-in is learned only by sending a real prompt, which costs a premium
+request.
+
+Reading Copilot's own credential-store entry is **not** the answer. This app's
+rule is that it stores its secrets in the OS keychain and reads only its own;
+going through another application's entry to infer a boolean trades that for a
+convenience.
+
+So the states the button can show are:
+
+* **off** — not enabled. Nothing drawn, nothing spawned.
+* **starting** — the probe is in flight. This is the loader.
+* **ready** — Claude: installed *and* signed in. Copilot: installed, sign-in
+  unverified, and the tooltip says so rather than implying otherwise.
+* **not installed** — names the binary it looked for.
+* **not signed in** — Claude at startup; Copilot only after a question has
+  been asked. Says how to fix it.
+
+And in Settings, a **Test** button that spends one premium request and
+**says so in its own label** before it is pressed. The app does not spend the
+person's quota to light a lamp they did not ask for.
+
+### 9.2 What warming can and cannot buy
+
+Measured in §6.4: Copilot's first run took 11.7 s and its warm runs 5.3 s. So
+roughly **6 s is one-time** — token refresh, update check — and **~5 s is per
+message**, and stays however warm the process is. Warming makes the first
+question as fast as the fifth. It does not make either fast, and the UI must
+not promise that it does: the *starting* state of §6.4 is still needed on every
+message.
+
+Two rules, from the same lesson the connection spinner taught:
+
+* The probe is **asynchronous and never blocks startup**. An assistant that is
+  not ready is not an app that cannot open.
+* A failed probe is **quiet but visible** — the button says what it found, and
+  nothing is thrown in the person's face, exactly as the update check behaves.
+
+### 9.3 Warming and multi-turn are the same mechanism
+
+This is the part worth taking from the suggestion. "Warm the tool" implies a
+process that *stays*, and a process that stays is also the answer to §4.4:
+
+`claude -p --input-format stream-json` holds one process open and reads turns
+from stdin. Spawned at startup it makes no API call until a message arrives, so
+warming is **free** — and because every turn goes down the same pipe, the
+conversation continues without `--resume`. That sidesteps all three objections
+in §4.4 at once: we still own the message list, nothing is persisted outside
+this app, and there is no session id to go stale. Compaction is still theirs,
+but a chat tab is short-lived and we can restart the process rather than let it
+drift.
+
+**For Copilot this is unknown.** Its `-p` exits after completion, so a
+long-lived process needs `--acp`, the Agent Client Protocol server mode
+(§6.6) — which is JSON-RPC and designed for exactly this. Until that is
+probed, Copilot's "warm" means nothing more than the binary check, and its
+recipe is one process per message.
+
+So §6.6 stops being curiosity and becomes a dependency: **`--acp` is probed
+before Phase 1 is written**, because it decides whether Copilot gets one
+mechanism or two.
+
+### 9.4 Tracker
+
+- [ ] Settings → Integrations: a row per CLI, off by default
+- [ ] An async readiness probe per enabled integration, run at startup
+- [ ] The five button states of §9.1, with honest tooltips
+- [ ] A **Test** button whose label says it spends a request
+- [ ] Probe `--acp` (§9.3) — decides Copilot's process model
+- [ ] A long-lived process per chat where the CLI supports it, with an idle
+      timeout and a respawn when it dies
+- [ ] UI tests: a fake CLI on PATH covers ready, missing and signed-out without
+      a vendor or a subscription
+
 
 ## 8. Decisions
 
