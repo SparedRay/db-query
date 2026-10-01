@@ -199,20 +199,32 @@
             <label>Provider
               <select id="set-ai-preset"></select>
             </label>
-            <label>Base URL
-              <input type="text" id="set-ai-base" placeholder="https://…" autocomplete="off" spellcheck="false" />
-            </label>
-            <label>Model
-              <input type="text" id="set-ai-model" autocomplete="off" spellcheck="false" />
-            </label>
-            <label>API key
-              <input type="password" id="set-ai-key" placeholder="leave empty for a local model" autocomplete="off" />
-            </label>
-            <div class="ai-key-actions">
-              <button type="button" id="set-ai-save" class="mini">Save key</button>
-              <button type="button" id="set-ai-forget" class="mini">Forget key</button>
+            <!-- Hidden as a group when the provider is a CLI: it has no key and
+                 no URL, and leaving the fields on screen would make them look
+                 optional rather than irrelevant. -->
+            <div id="ai-http-fields">
+              <label>Base URL
+                <input type="text" id="set-ai-base" placeholder="https://…" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>Model
+                <input type="text" id="set-ai-model" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>API key
+                <input type="password" id="set-ai-key" placeholder="leave empty for a local model" autocomplete="off" />
+              </label>
+              <div class="ai-key-actions">
+                <button type="button" id="set-ai-save" class="mini">Save key</button>
+                <button type="button" id="set-ai-forget" class="mini">Forget key</button>
+              </div>
             </div>
             <p class="hint" id="set-ai-note">Checking…</p>
+
+            <h3>Integrations</h3>
+            <p class="hint">
+              A command-line agent you are already signed into can answer instead of
+              an API key. Nothing is run, probed or offered until you turn one on.
+            </p>
+            <div id="set-integrations" class="integrations"></div>
             <p class="hint">Keys are stored in your system keychain, one per
               provider, never in a config file. The assistant writes SQL for you to
               review and run — it cannot execute anything itself. Your schema's

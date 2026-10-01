@@ -592,11 +592,37 @@ export interface FileTypeSpec {
  */
 export type Provider = "anthropic" | "openAiCompatible";
 
+/**
+ * Which agent CLI. A closed list, mirroring Rust's `agentcli::Recipe` — the
+ * thing a person configures is *which of these*, never a command line.
+ */
+export type Recipe = "claude" | "copilot";
+
+/**
+ * Where answers come from. `localCli` is not a Rust `Provider`: the CLI path
+ * has its own command and needs no key or URL, so widening the Rust enum would
+ * have added a variant whose `key_id` and `endpoint` mean nothing.
+ */
+export type AiProvider = Provider | "localCli";
+
 /** Where to send questions. Not a secret — the key is separate. */
 export interface AssistantConfig {
-  provider: Provider;
+  provider: AiProvider;
   baseUrl: string;
   model: string;
+  /** Set when `provider` is `localCli`; ignored otherwise. */
+  recipe: Recipe | null;
+}
+
+/**
+ * What a readiness probe found. Costs nothing to ask — no model call, no
+ * billable request — which is what lets it run at startup.
+ */
+export interface CliStatus {
+  installed: boolean;
+  signedIn: boolean;
+  /** What to tell the person. Empty when it is simply ready. */
+  detail: string;
 }
 
 export interface AssistantStatus {
@@ -886,6 +912,41 @@ export const api = {
       onEvent: channel,
     });
   },
+
+  /** Is this CLI installed and signed in? Free — see `agentcli::probe`. */
+  assistantCliProbe: (recipe: Recipe) =>
+    invoke<CliStatus>("assistant_cli_probe", { recipe }),
+
+  /**
+   * Stream one reply out of a CLI.
+   *
+   * `requestId` is the handle for stopping it. The HTTP path needs none —
+   * dropping the request ends it — but a child process keeps talking to a
+   * server, and spending the person's quota, until it is killed.
+   */
+  assistantCliSend: (
+    recipe: Recipe,
+    requestId: string,
+    connectionId: string | null,
+    db: string | null,
+    messages: ChatMessage[],
+    onEvent: (e: AssistantEvent) => void,
+  ) => {
+    const channel = new Channel<AssistantEvent>();
+    channel.onmessage = onEvent;
+    return invoke<void>("assistant_cli_send", {
+      recipe,
+      requestId,
+      connectionId,
+      db,
+      messages,
+      onEvent: channel,
+    });
+  },
+
+  /** Stop a CLI reply, killing the process behind it. */
+  assistantCliCancel: (requestId: string) =>
+    invoke<void>("assistant_cli_cancel", { requestId }),
 
   /** Record that the assistant proposed this SQL, for history provenance. */
   rememberProposal: (sql: string) => invoke<void>("remember_proposal", { sql }),
