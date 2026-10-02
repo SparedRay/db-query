@@ -1454,3 +1454,47 @@ button .spinner {
   border-color: currentColor transparent transparent transparent;
   vertical-align: -1px;
 }
+
+/* --- L2: what we know while Flyway runs ---------------------------------
+   Deliberately not a progress bar. Flyway is run with `-outputType=json`,
+   which emits one document when it finishes, so the app knows what it asked
+   for and how long it has been waiting, and does not know which migration is
+   in flight. A bar would imply the second. */
+.mig-progress {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised); border-bottom: 1px solid var(--border);
+}
+.mig-progress .spinner { margin-top: 2px; flex-shrink: 0; }
+.mig-progress-text { flex-grow: 1; min-width: 0; font-size: 12px; line-height: 1.55; }
+.mig-progress-text b { color: var(--fg); font-weight: 600; }
+.mig-progress-what { color: var(--fg-dim); font-family: var(--mono); font-size: 11px; }
+.mig-progress-note { color: var(--fg-dimmer, var(--fg-dim)); opacity: .85; }
+
+/* --- L3: Flyway's output, where the grid would be ----------------------- */
+.flyway-pane { display: flex; flex-direction: column; min-height: 0; flex-grow: 1; }
+.flyway-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--border);
+}
+.flyway-title {
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-dim);
+}
+.flyway-when { flex-grow: 1; min-width: 0; font-size: 11px; color: var(--fg-dim); }
+.flyway-body {
+  flex-grow: 1; overflow: auto; padding: 8px 12px;
+  scrollbar-gutter: stable;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--fg-dim);
+}
+.flyway-body.hidden { display: none; }
+/* The report, rendered rather than printed: with `-outputType=json` the raw
+   text is a JSON document, which is not what anybody opened a pane to read. */
+.fw-line { white-space: pre-wrap; }
+.fw-head { color: var(--fg); margin-bottom: 6px; }
+.fw-mig { display: grid; grid-template-columns: minmax(56px, max-content) minmax(0, 1fr) auto; gap: 8px; }
+.fw-mig .fw-state { color: var(--fg-dim); }
+.fw-mig.ok .fw-state { color: var(--ok, #10b981); }
+.fw-mig.bad .fw-state { color: var(--danger-fg); }
+.fw-err { color: var(--danger-fg); white-space: pre-wrap; margin-top: 6px; }
+.fw-note { font-family: system-ui, sans-serif; color: var(--fg-dim); }
+.fw-outcome { font-family: system-ui, sans-serif; color: var(--fg); margin-bottom: 8px; }

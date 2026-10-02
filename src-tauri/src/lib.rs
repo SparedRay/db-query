@@ -639,6 +639,14 @@ async fn assistant_cli_cancel(
     Ok(())
 }
 
+/// What Flyway printed on its last run, for the migrations tab's output pane.
+///
+/// `None` before anything has run. Costs nothing — it is already in memory.
+#[tauri::command]
+fn flyway_last_run() -> Option<flywaycli::LastRun> {
+    flywaycli::last_run()
+}
+
 /// Which Flyway the configured command actually runs. Costs a JVM start, so
 /// it is asked when someone opens the pane that wonders.
 #[tauri::command]
@@ -2028,6 +2036,7 @@ pub fn run() {
             assistant_set_key,
             assistant_send,
             flyway_version,
+            flyway_last_run,
             assistant_cli_probe,
             assistant_cli_send,
             assistant_cli_cancel,

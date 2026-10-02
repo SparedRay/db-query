@@ -1000,3 +1000,79 @@ what is pending"*, and restoring the early `return` fails *"opening migrations
 clears the editor's result set"*.
 
 **862 UI tests on both engines, 422 Rust, `mise run check` exits 0.**
+
+## 19. L3 + L2 — Flyway's output where the grid was, 2026-10-02
+
+Chosen from the canvas. Two changes that answer one complaint each, and a
+discovery that changed what L3 could honestly be.
+
+### 19.1 The pane holds Flyway's output, not the SQL grid (L3)
+
+A migrations tab has no result set — its answers are a sentence and a report —
+so the pane that holds the grid now holds Flyway's output, and the grid and the
+result-tab strip are hidden while a migrations tab is in front. A **swap**, not
+a second region: a tab with two scrolling panes, one of them always empty, is
+worse than either.
+
+Outcomes go there too. They used to go through `results.setMessage`, which
+painted a surface the tab no longer shows.
+
+### 19.2 What the output actually is
+
+The mockup drew Flyway's human log. **It does not arrive.** Every operation is
+run with `-outputType=json`, so `stdout` is one JSON document, and printing it
+raw would put a wall of braces in a pane someone opened to read a report.
+
+So the pane **renders** it: a header line (`Flyway 13.5.0 · migrate · database
+flyway_dev`), one line per migration with its state and execution time, the
+error message when Flyway refused, and `stderr` verbatim underneath — which is
+where a JVM warning or a driver complaint turns up, never inside the report.
+Every field used is one in the captured fixtures in `flywaycli.rs`; none was
+invented. Output that will not parse is shown exactly as it came, because a
+Flyway that printed something unexpected is precisely when you want it unedited.
+
+This is also the "debug window" §17.5 recorded as not built. The output was
+being parsed and discarded: a successful run left a sentence, and the only way
+to see what Flyway said was to make it fail. `flywaycli::LAST_RUN` keeps the
+newest one; the report is copied **onto the tab** the moment a run ends, because
+the backend keeps only one and `showSelected` immediately asks for `info`, which
+would otherwise overwrite a migrate's report with that.
+
+### 19.3 The strip says what is known (L2)
+
+The operation, the environment, the migrations by version, and seconds elapsed —
+plus one line admitting *"Flyway reports when it finishes, not as it goes"*.
+No progress bar, because a bar claims to know which migration is in flight and
+we do not.
+
+**No Stop button**, though the mockup had one: killing a JVM part-way through a
+migration is how a schema history ends up locked, and offering it would make
+that the person's problem. Dropping it is the decision; drawing it was a mistake
+in the mockup.
+
+L1 — per-migration progress in the list — stays unbuilt and depends on the
+measurement in §19.5.
+
+### 19.4 Proof
+
+Six new UI tests, three falsified: printing the JSON raw fails *"renders
+Flyway's report rather than its JSON"*, leaving the grid visible fails *"opening
+migrations clears the editor's result set"*, and dropping the "not as it goes"
+sentence fails *"admits what it cannot know"*. Twenty-one existing assertions
+moved from `#grid .empty` to `#flyway-body`: the design moved, so the
+assertions followed it rather than the reverse.
+
+**874 UI tests on both engines, 422 Rust, `mise run check` exits 0.**
+
+### 19.5 Still unmeasured
+
+Whether Flyway's human log is observable while the JSON is being collected.
+Flyway is not installed on the development machine, so one command on a machine
+that has it decides whether L1 is buildable:
+
+```bash
+flyway -outputType=json info > out.json 2> err.txt
+```
+
+Progress lines in `err.txt` mean a live log, and L1, are possible; nothing until
+the end means L2 is already the truthful version of it.

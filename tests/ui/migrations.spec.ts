@@ -548,10 +548,10 @@ test("confirming applies, and says what Flyway did", async ({ page }) => {
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("applied 1 migration to uat");
-  await expect(page.locator("#grid .empty")).toContainText("now at 5");
+  await expect(page.locator("#flyway-body")).toContainText("applied 1 migration to uat");
+  await expect(page.locator("#flyway-body")).toContainText("now at 5");
   // UAT is not open here, so there is nothing to refresh and it says so.
-  await expect(page.locator("#grid .empty")).toContainText("may need a refresh");
+  await expect(page.locator("#flyway-body")).toContainText("may need a refresh");
 });
 
 /**
@@ -586,7 +586,7 @@ test("after an apply, an open connection that is this environment is refreshed",
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("refreshed the schema of UAT");
+  await expect(page.locator("#flyway-body")).toContainText("refreshed the schema of UAT");
   const refreshed = (await calls(page)).filter((c) => c.cmd === "refresh_schema");
   expect(refreshed.map((c) => c.args)).toEqual([{ connectionId: connId, db: "poc" }]);
 });
@@ -638,8 +638,8 @@ test("a failed apply shows Flyway's message verbatim", async ({ page }) => {
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("Can't DROP 'weight'");
-  await expect(page.locator("#grid .empty")).toContainText("V4__deliberately_broken.sql");
+  await expect(page.locator("#flyway-body")).toContainText("Can't DROP 'weight'");
+  await expect(page.locator("#flyway-body")).toContainText("V4__deliberately_broken.sql");
 });
 
 // ------------------------------------------------------------- repairing
@@ -689,8 +689,8 @@ test("repairing with nothing failed says what realigning a checksum means", asyn
   await expect(ask).toContainText("as it was first executed");
 
   await ask.locator('button:has-text("Repair uat")').click();
-  await expect(page.locator("#grid .empty")).toContainText("Aligned applied migration checksums");
-  await expect(page.locator("#grid .empty")).toContainText("V1");
+  await expect(page.locator("#flyway-body")).toContainText("Aligned applied migration checksums");
+  await expect(page.locator("#flyway-body")).toContainText("V1");
 });
 
 /** "Repair" sounds like it fixes the database, and it does not. */
@@ -726,9 +726,9 @@ test("confirming repairs, says what Flyway did, and re-reads the list", async ({
     confirmed: { url: "jdbc:mysql://uat.example.com:3306/flyway", user: "uat_app" },
     program: "",
   });
-  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
-  await expect(page.locator("#grid .empty")).toContainText("V3");
-  await expect(page.locator("#grid .empty")).toContainText("database itself is unchanged");
+  await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
+  await expect(page.locator("#flyway-body")).toContainText("V3");
+  await expect(page.locator("#flyway-body")).toContainText("database itself is unchanged");
   await expect.poll(async () => (await infoCalls(page)).length).toBeGreaterThan(before);
 });
 
@@ -742,8 +742,8 @@ test("a repair that found nothing to do says so, rather than claiming success", 
   await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("found nothing to repair");
-  await expect(page.locator("#grid .empty")).not.toContainText("Removed");
+  await expect(page.locator("#flyway-body")).toContainText("found nothing to repair");
+  await expect(page.locator("#flyway-body")).not.toContainText("Removed");
 });
 
 test("a refused repair shows Flyway's own message", async ({ page }) => {
@@ -756,7 +756,7 @@ test("a refused repair shows Flyway's own message", async ({ page }) => {
   await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("Unable to connect to the database");
+  await expect(page.locator("#flyway-body")).toContainText("Unable to connect to the database");
 });
 
 /**
@@ -782,7 +782,7 @@ test("Repair is urged when Flyway asks for one, even with nothing failed", async
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("checksum mismatch");
+  await expect(page.locator("#flyway-body")).toContainText("checksum mismatch");
   await expect(page.locator("#btn-mig-view-repair")).toBeEnabled();
   await expect(page.locator("#btn-mig-view-repair")).toHaveClass(/urge/);
   await expect(page.locator("#btn-mig-view-repair")).toHaveAttribute("title", /asked for a repair/);
@@ -806,7 +806,7 @@ test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("Unable to connect");
+  await expect(page.locator("#flyway-body")).toContainText("Unable to connect");
   await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
 });
 
@@ -1077,7 +1077,7 @@ test("a Flyway failure gives the button back", async ({ page }) => {
   await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
 
-  await expect(page.locator("#grid .empty")).toContainText("was not found");
+  await expect(page.locator("#flyway-body")).toContainText("was not found");
   const btn = page.locator("#btn-mig-view-repair");
   await expect(btn.locator(".spinner")).toHaveCount(0);
   await expect(btn).toContainText("Repair");
@@ -1143,8 +1143,11 @@ test("opening migrations clears the editor's result set", async ({ page }) => {
   await page.click('#mig-side .mig-envrow[data-env="uat"]');
   await expect(page.locator(".mig").first()).toBeVisible();
   // Not the rows, and not silence either.
-  await expect(page.locator("#grid table")).toHaveCount(0);
-  await expect(page.locator("#grid .empty")).toContainText("What Flyway did will appear here");
+  // The grid is not merely cleared — it is not the surface a migrations tab
+  // uses. Flyway's output pane is.
+  await expect(page.locator("#grid")).toBeHidden();
+  await expect(page.locator("#flyway-pane")).toBeVisible();
+  await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
 });
 
 /** And an outcome survives a trip to another tab and back. */
@@ -1157,14 +1160,17 @@ test("what Flyway did is still there when you come back", async ({ page }) => {
 
   await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
-  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
+  await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
 
   // Away to the SQL tab and back.
   await page.locator("#script-tabs .stab").first().click();
-  await expect(page.locator("#grid .empty")).not.toContainText("Removed failed migrations");
+  // A SQL tab gets the grid back, and Flyway's pane goes away with its tab.
+  await expect(page.locator("#flyway-pane")).toBeHidden();
+  await expect(page.locator("#grid")).toBeVisible();
 
   await page.locator('#script-tabs .stab:has-text("uat")').click();
-  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
+  await expect(page.locator("#flyway-pane")).toBeVisible();
+  await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
 });
 
 /**
@@ -1198,4 +1204,128 @@ test("a long version does not run over the description", async ({ page }) => {
     els.map((e) => Math.round(e.getBoundingClientRect().width)),
   );
   expect(Math.min(...widths)).toBeGreaterThanOrEqual(56);
+});
+
+// ------------------------------------------- L2 and L3: waiting, and the output
+
+/**
+ * **L2. The strip says what is known and admits what is not.**
+ *
+ * Flyway runs with `-outputType=json`, which emits one document when it
+ * finishes — so the app knows the operation, the environment and which
+ * migrations it asked for, and does *not* know which one is in flight. A
+ * progress bar would claim the second, so there is a spinner, an elapsed count
+ * and a sentence saying Flyway reports at the end.
+ *
+ * There is no Stop, deliberately: killing a JVM part-way through a migration is
+ * how a schema history ends up locked.
+ */
+test("while applying, the strip names the migrations and admits what it cannot know", async ({
+  page,
+}) => {
+  const gate = gateAfterFirst(PENDING_ONLY);
+  await withProject(page, { flyway_info: gate.stub, flyway_migrate: () => held().promise });
+
+  await page.click("#btn-mig-view-apply");
+  gate.release(PENDING_ONLY);
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const strip = page.locator("#mig-progress");
+  await expect(strip).toBeVisible();
+  await expect(strip.locator(".spinner")).toBeVisible();
+  await expect(strip).toContainText("Applying 1 migration to uat");
+  // Which ones, by version.
+  await expect(strip.locator(".mig-progress-what")).toContainText("V5");
+  await expect(strip).toContainText("Flyway reports when it finishes, not as it goes");
+  await expect(strip).toHaveAttribute("role", "status");
+  // Nothing that offers to kill a running migration.
+  await expect(strip.locator("button")).toHaveCount(0);
+});
+
+test("the strip goes when the run ends", async ({ page }) => {
+  await withProject(page, { flyway_info: () => PENDING_ONLY });
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+  await expect(page.locator("#flyway-body")).toContainText("applied 1 migration");
+  await expect(page.locator("#mig-progress")).toBeHidden();
+});
+
+/**
+ * **L3. Flyway's report is rendered, not printed.**
+ *
+ * `stdout` is a JSON document, so printing it raw would put a wall of braces in
+ * a pane somebody opened to read a report. The fields come from the captured
+ * fixtures in `flywaycli.rs`.
+ */
+const REPORT = {
+  op: "migrate",
+  code: 0,
+  stdout: JSON.stringify({
+    flywayVersion: "13.5.0",
+    database: "flyway_dev",
+    operation: "migrate",
+    migrations: [
+      { version: "5", description: "add index", state: "Success", executionTime: 41 },
+    ],
+  }),
+  stderr: "",
+};
+
+test("the output pane renders Flyway's report rather than its JSON", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
+    flyway_last_run: () => REPORT,
+  });
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const body = page.locator("#flyway-body");
+  await expect(body).toContainText("Flyway 13.5.0");
+  await expect(body).toContainText("database flyway_dev");
+  await expect(body.locator(".fw-mig")).toContainText("add index");
+  await expect(body.locator(".fw-mig .fw-state")).toContainText("41 ms");
+  // Rendered: no braces from the document it came from.
+  await expect(body).not.toContainText("flywayVersion");
+  await expect(body).not.toContainText("{");
+});
+
+/** Anything that will not parse is shown verbatim — that is when you need it. */
+test("output that is not a report is shown as it came", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
+    flyway_last_run: () => ({
+      op: "migrate",
+      code: 1,
+      stdout: "Error: Unable to obtain connection from database",
+      stderr: "Picked up JAVA_TOOL_OPTIONS: -Xmx512m",
+    }),
+  });
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const body = page.locator("#flyway-body");
+  await expect(body).toContainText("Unable to obtain connection");
+  // Including the JVM's own noise, which is never inside the report.
+  await expect(body).toContainText("JAVA_TOOL_OPTIONS");
+});
+
+test("the output pane can be collapsed and says which it is", async ({ page }) => {
+  await withProject(page);
+  const toggle = page.locator("#btn-flyway-toggle");
+  await expect(toggle).toHaveText("Hide");
+  await expect(page.locator("#flyway-body")).toBeVisible();
+
+  await toggle.click();
+  await expect(toggle).toHaveText("Show");
+  await expect(page.locator("#flyway-body")).toBeHidden();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+  await toggle.click();
+  await expect(page.locator("#flyway-body")).toBeVisible();
+});
+
+/** Before anything has run, it says so rather than sitting blank. */
+test("an untouched environment says nothing has run", async ({ page }) => {
+  await withProject(page);
+  await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
 });

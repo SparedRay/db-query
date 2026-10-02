@@ -44,6 +44,53 @@ impl Finished {
     }
 }
 
+/// What one Flyway run printed, kept so the migrations tab can show it.
+///
+/// **Why this is kept at all.** Until now the output was parsed and thrown
+/// away: a successful run left nothing behind but a sentence, and the only way
+/// to see what Flyway actually said was to make it fail. The migrations tab
+/// has a pane going spare — it used to show the SQL grid, which belongs to a
+/// query and not to a migration — so the run's own words go there.
+///
+/// It carries whatever Flyway printed, which includes the server and the user
+/// it connected as. That is already true of the failure messages this app has
+/// always shown; it is not a redaction boundary and is not presented as one.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastRun {
+    /// The operation: `migrate`, `repair`, `info`.
+    pub op: String,
+    pub code: Option<i32>,
+    /// Flyway's report. With `-outputType=json` this is a JSON document, which
+    /// is why the caller renders it rather than printing it raw.
+    pub stdout: String,
+    /// Anything Flyway said outside its report.
+    pub stderr: String,
+}
+
+/// The last run, whatever it was.
+///
+/// A global rather than app state: `run` is called from three commands and a
+/// background refresh, and threading a handle through all of them to hold one
+/// string would be more plumbing than the string is worth.
+static LAST_RUN: std::sync::Mutex<Option<LastRun>> = std::sync::Mutex::new(None);
+
+/// What Flyway last printed, or `None` before anything has run.
+pub fn last_run() -> Option<LastRun> {
+    LAST_RUN.lock().ok().and_then(|g| g.clone())
+}
+
+fn remember(op: &str, finished: &Finished) {
+    if let Ok(mut slot) = LAST_RUN.lock() {
+        *slot = Some(LastRun {
+            op: op.to_string(),
+            code: finished.code,
+            stdout: finished.stdout.clone(),
+            stderr: finished.stderr.clone(),
+        });
+    }
+}
+
 /// Build the arguments for one operation. Split out from the spawning so the
 /// **shape of the command line is testable without running anything.**
 pub fn arguments(
@@ -429,6 +476,7 @@ async fn spawn(program: &str, args: Vec<String>, dir: Option<PathBuf>) -> Result
             "flyway",
             format!("{op} exited {code}"),
         );
+        remember(op, &finished);
         Ok(finished)
     })
     .await
