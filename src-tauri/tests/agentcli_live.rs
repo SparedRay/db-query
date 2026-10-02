@@ -214,9 +214,7 @@ async fn turn(
         cancel,
         |e| {
             events.lock().unwrap().push(e);
-            if stop_after_first_event
-                && !fired.swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
+            if stop_after_first_event && !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 cancel.ask();
             }
         },

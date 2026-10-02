@@ -490,7 +490,10 @@ mod tests {
     fn the_agents_own_commentary_never_reaches_the_chat() {
         assert!(is_plumbing(DISABLED_LINE));
         assert!(is_plumbing(UNKNOWN_LINE));
-        assert!(matches!(classify(&chunk(UNKNOWN_LINE)), Update::Plumbing(_)));
+        assert!(matches!(
+            classify(&chunk(UNKNOWN_LINE)),
+            Update::Plumbing(_)
+        ));
         assert!(matches!(
             classify(&chunk(DISABLED_LINE)),
             Update::Disabled(_)
