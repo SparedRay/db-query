@@ -735,3 +735,52 @@ be worth a fake ACP agent on stdio if this path grows.
 
 **422 Rust tests, `mise run check` clean. The session path re-verified live:
 3.8 s then 1.8 s.**
+
+## 15. Two silences, filled — 2026-10-01
+
+> *"we need a loader while is getting a response as right now is just … which is
+> not very intuitive … Lastly, we also need a loader when we open asistant first
+> time otherwise tha 1s seems like it did nothing"*
+
+Both are the rule the rail and the tree already follow — anything slower than an
+eyeblink says so — applied to the two places in the chat that did not.
+
+### 15.1 Opening the panel waited for the probe
+
+`open()` awaited the readiness check **before** `showModal()`, so clicking the
+button did nothing visible until it answered: 2.5 s for Copilot's ACP
+handshake. The panel now appears at once, says it is checking, and fills in —
+with Send disabled until it knows, because appearing usable is a different lie
+from appearing dead.
+
+### 15.2 `…` is not a loader
+
+A literal ellipsis is indistinguishable from a one-character answer and from a
+panel that has died, and a CLI shows it for seconds. It is now a spinner and a
+word that changes every 2.6 s.
+
+The words are **vague on purpose** — *Thinking, Mulling, Sifting, Percolating*.
+A specific one ("reading your schema", "checking the columns") would be a claim
+about what the model is doing, and we do not know: all we know is that a process
+has not answered yet. Three details that are not decoration:
+
+* The next word is never the one before it. A list that repeats itself looks
+  stuck, which is the one thing it exists to disprove.
+* `role="status"` with a fixed label and the word `aria-hidden`: a screen reader
+  should hear "waiting for a reply" once, not a new verb every few seconds.
+* Under `prefers-reduced-motion` it shows one word and does not cycle. A word
+  that changes is motion too.
+
+It is a `<span>`, not a `<p>`: it goes inside `#chat-note`, which is already a
+paragraph, and a paragraph inside a paragraph is not markup.
+
+### 15.3 Proof
+
+Four UI tests on both engines, two falsified: restoring the old open order fails
+*"the panel opens before it knows whether the CLI is ready"*, and restoring the
+bare `…` fails *"waiting for a reply shows a spinner and a word"*. The others
+pin that `started` does **not** clear the line — the wait is not over, only its
+owner has changed — and that a turn which fails before saying anything leaves no
+spinner behind.
+
+**834 UI tests on both engines, 422 Rust, `mise run check` clean.**
