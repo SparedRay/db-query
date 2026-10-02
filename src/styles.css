@@ -1228,7 +1228,14 @@ dialog.viewer .viewer-note {
 #settings-dialog .settings-nav button:focus-visible {
   outline: 2px solid var(--accent); outline-offset: -2px;
 }
-#settings-dialog .settings-panes { overflow: auto; padding-right: 2px; }
+/* 14px, not 2px, and the gutter reserved whether or not a bar is showing: at
+   2px the scrollbar sat on the text, and without `stable` the text shifted
+   sideways when you moved to a pane short enough not to scroll. */
+#settings-dialog .settings-panes {
+  overflow: auto;
+  padding-right: 14px;
+  scrollbar-gutter: stable;
+}
 #settings-dialog .pane h3 {
   margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--fg-dim);
   text-transform: uppercase; letter-spacing: .06em;
@@ -1380,18 +1387,6 @@ dialog.viewer .viewer-note {
    as the dialog allows and wraps: "not signed in, run `copilot login`" is the
    whole value of the row, and truncating it would leave the switch without a
    reason. */
-.integrations { display: flex; flex-direction: column; gap: 10px; margin-top: 2px; }
-.integration {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 8px 10px;
-  background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px;
-}
-.integration .toggle { color: var(--fg); font-size: 13px; }
-.integration-note {
-  display: flex; align-items: center; gap: 6px;
-  padding-left: 20px;
-  font-size: 12px; color: var(--fg-dim); line-height: 1.5;
-}
 
 /* The assistant button reports what the startup probe found. A CLI that is not
    ready gets a mark, not a disabled button: opening the panel is how you read
@@ -1415,3 +1410,29 @@ dialog.viewer .viewer-note {
 /* Its own width so the line does not jostle as the word changes. A fixed width
    would clip the longest; this reserves room for it instead. */
 .chat-waiting-word { min-width: 8.5em; }
+
+/* --- a program on this machine ------------------------------------------
+   One row shape for every external program the app runs: the command-line
+   agents under Assistant, and Flyway under Migrations. They were filed in
+   different tabs under different headings, which is what made Settings read as
+   arbitrary — each answers the same three questions (is it installed, where is
+   it, is it ready), so each gets the same row. */
+.tool-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; margin-bottom: 7px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 7px;
+}
+.tool-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--border-dashed); }
+.tool-row.state-ready .tool-dot { background: var(--ok, #10b981); }
+.tool-row.state-problem .tool-dot { background: var(--warn); }
+.tool-row.state-checking .tool-dot { background: var(--accent); }
+.tool-who { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tool-who b { font-size: 13px; font-weight: 600; color: var(--fg); }
+/* Wraps rather than truncating: "not signed in, run `copilot login`" is the
+   whole value of the row, and a row without its reason is just a dot. */
+.tool-detail {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--fg-dim); line-height: 1.5;
+}
+.tool-row .toggle { flex-shrink: 0; margin: 0; }
+.integrations { display: flex; flex-direction: column; margin-top: 2px; }

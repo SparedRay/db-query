@@ -638,6 +638,13 @@ async fn assistant_cli_cancel(
     Ok(())
 }
 
+/// Which Flyway the configured command actually runs. Costs a JVM start, so
+/// it is asked when someone opens the pane that wonders.
+#[tauri::command]
+async fn flyway_version(program: String) -> Result<String, String> {
+    flywaycli::version(&program).await
+}
+
 /// Newest first, deduplicated by statement, optionally filtered.
 #[tauri::command]
 fn history_search(
@@ -2019,6 +2026,7 @@ pub fn run() {
             assistant_status,
             assistant_set_key,
             assistant_send,
+            flyway_version,
             assistant_cli_probe,
             assistant_cli_send,
             assistant_cli_cancel,

@@ -913,6 +913,14 @@ export const api = {
     });
   },
 
+  /**
+   * Which Flyway the configured command runs, or why it does not.
+   *
+   * Runs `flyway -v`, so it costs a JVM start — asked when the Migrations pane
+   * is opened, not on every settings dialog.
+   */
+  flywayVersion: (program: string) => invoke<string>("flyway_version", { program }),
+
   /** Is this CLI installed and signed in? Free — see `agentcli::probe`. */
   assistantCliProbe: (recipe: Recipe) =>
     invoke<CliStatus>("assistant_cli_probe", { recipe }),

@@ -1,5 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, installBackend, schemaBackend, settingsSection } from "./harness";
+import {
+  calls,
+  commandNames,
+  connect,
+  installBackend,
+  schemaBackend,
+  settingsSection,
+} from "./harness";
 
 /**
  * The settings dialog: appearance, session defaults, and the manual update
@@ -260,7 +267,7 @@ test("Diagnostics reports on the Flyway path currently typed, not the one last s
   await open(page);
   // The path lives under Integrations; the button that reports on it lives
   // under About, which is where somebody looks for "what is wrong with this".
-  await settingsSection(page, "integrations");
+  await settingsSection(page, "migrations");
 
   // Set without dispatching `change`. Filling it fires one, which commits the
   // setting on the way past and makes the test pass whether or not the button
@@ -299,4 +306,110 @@ test("a failed diagnostic says so and leaves the button usable", async ({ page }
   await expect(page.locator("#set-diagnostics-note")).toContainText("panicked");
   await expect(page.locator("#btn-diagnostics")).toBeEnabled();
   await expect(page.locator("dialog.viewer")).toHaveCount(0);
+});
+
+// ------------------------------------------------- how Settings is organised
+
+/**
+ * **Sections are named after the task, not after our categories.**
+ *
+ * "Integrations" held the MCP server and Flyway — one a server we host, the
+ * other a program we shell out to — while the command-line agents sat under
+ * Assistant under a second heading also called Integrations. The word named a
+ * category of ours rather than anything a person sets out to do, so it is gone:
+ * Flyway is under Migrations, where you look when migrations cannot find it,
+ * and the server has its own section because it is like nothing else here.
+ */
+test("Settings has no section named after our own categories", async ({ page }) => {
+  await connect(page, {});
+  await page.click("#btn-settings");
+
+  const tabs = await page.locator('#settings-nav [role="tab"]').allTextContents();
+  expect(tabs).toEqual([
+    "Appearance",
+    "Editor",
+    "Assistant",
+    "Migrations",
+    "MCP server",
+    "Updates",
+    "About",
+  ]);
+  // And not twice, which is how it read before.
+  expect(tabs.filter((t) => t === "Integrations")).toHaveLength(0);
+});
+
+/** Flyway is where somebody looks for it, and the server is not beside it. */
+test("Flyway is under Migrations and the MCP server is not", async ({ page }) => {
+  await connect(page, {});
+  await page.click("#btn-settings");
+
+  await settingsSection(page, "migrations");
+  await expect(page.locator("#set-flyway-path")).toBeVisible();
+  await expect(page.locator("#set-mcp-port")).toBeHidden();
+
+  await settingsSection(page, "mcp");
+  await expect(page.locator("#set-mcp-port")).toBeVisible();
+  await expect(page.locator("#set-flyway-path")).toBeHidden();
+});
+
+/**
+ * **A program on this machine looks the same wherever it appears.** The agents
+ * under Assistant and Flyway under Migrations answer the same three questions —
+ * installed, where, ready — so they are the same row.
+ */
+test("Flyway reports what it found, in the same row shape as an agent", async ({ page }) => {
+  await connect(page, { flyway_version: () => "Flyway OSS Edition 13.5.0 by Redgate" });
+  await page.click("#btn-settings");
+  await settingsSection(page, "migrations");
+
+  const row = page.locator("#set-flyway-row .tool-row");
+  await expect(row).toHaveClass(/state-ready/);
+  await expect(row.locator(".tool-detail")).toContainText("13.5.0");
+  await expect(row.locator(".tool-who b")).toHaveText("Flyway");
+});
+
+/** And it says what went wrong rather than just going quiet. */
+test("a Flyway that cannot be run says so in its row", async ({ page }) => {
+  await connect(page, {
+    flyway_version: () => {
+      throw new Error("`flyway` was not found on your PATH.");
+    },
+  });
+  await page.click("#btn-settings");
+  await settingsSection(page, "migrations");
+
+  const row = page.locator("#set-flyway-row .tool-row");
+  await expect(row).toHaveClass(/state-problem/);
+  await expect(row.locator(".tool-detail")).toContainText("not found on your PATH");
+});
+
+/**
+ * Running Flyway costs a JVM start, so **only the pane that wonders pays for
+ * it** — opening Settings on another section must not.
+ */
+test("Flyway is not run until you open the pane that asks", async ({ page }) => {
+  await connect(page, { flyway_version: () => "Flyway OSS Edition 13.5.0 by Redgate" });
+  await page.click("#btn-settings");
+
+  await settingsSection(page, "appearance");
+  await settingsSection(page, "assistant");
+  expect(await commandNames(page)).not.toContain("flyway_version");
+
+  await settingsSection(page, "migrations");
+  await expect(page.locator("#set-flyway-row .tool-row")).toHaveClass(/state-ready/);
+  expect(await commandNames(page)).toContain("flyway_version");
+});
+
+/** The scrollbar had 2px of room, which put it on the text. */
+test("the panes keep room for their scrollbar", async ({ page }) => {
+  await connect(page, {});
+  await page.click("#btn-settings");
+
+  const gutter = await page.locator("#settings-dialog .settings-panes").evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { padding: cs.paddingRight, stable: cs.scrollbarGutter };
+  });
+  expect(parseFloat(gutter.padding)).toBeGreaterThanOrEqual(12);
+  // Reserved whether or not a bar shows, so switching panes does not shift text.
+  expect(gutter.stable).toContain("stable");
 });
