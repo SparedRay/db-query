@@ -145,8 +145,10 @@
                   aria-controls="set-pane-editor">Editor</button>
           <button type="button" role="tab" id="set-tab-assistant"
                   aria-controls="set-pane-assistant">Assistant</button>
-          <button type="button" role="tab" id="set-tab-integrations"
-                  aria-controls="set-pane-integrations">Integrations</button>
+          <button type="button" role="tab" id="set-tab-migrations"
+                  aria-controls="set-pane-migrations">Migrations</button>
+          <button type="button" role="tab" id="set-tab-mcp"
+                  aria-controls="set-pane-mcp">MCP server</button>
           <button type="button" role="tab" id="set-tab-updates"
                   aria-controls="set-pane-updates">Updates</button>
           <button type="button" role="tab" id="set-tab-about"
@@ -219,10 +221,10 @@
             </div>
             <p class="hint" id="set-ai-note">Checking…</p>
 
-            <h3>Integrations</h3>
+            <h3>Command-line agents</h3>
             <p class="hint">
-              A command-line agent you are already signed into can answer instead of
-              an API key. Nothing is run, probed or offered until you turn one on.
+              An agent you are already signed into can answer instead of an API key.
+              Nothing is run, probed or offered until you turn one on.
             </p>
             <div id="set-integrations" class="integrations"></div>
             <p class="hint">Keys are stored in your system keychain, one per
@@ -231,8 +233,8 @@
               table and column names are sent with each question; row data never is.</p>
           </section>
 
-          <section class="pane" id="set-pane-integrations" role="tabpanel"
-                   aria-labelledby="set-tab-integrations" hidden>
+          <section class="pane" id="set-pane-mcp" role="tabpanel"
+                   aria-labelledby="set-tab-mcp" hidden>
             <h3>MCP server</h3>
             <p class="hint">Lets another tool — Claude Code, Claude Desktop, any
               MCP client — read the schema of the connection you have open and
@@ -274,18 +276,25 @@
               requests from a web page, and is off until you turn it on. It
               reports whichever connection is on screen, so switching connection
               changes what a client sees.</p>
+          </section>
+
+          <!-- Flyway lives here, not beside the MCP server. The two were filed
+               together under "Integrations", which was our category rather than
+               anyone's task: one is a server we host, the other a program we run.
+               This is where you look when migrations cannot find it. -->
+          <section class="pane" id="set-pane-migrations" role="tabpanel"
+                   aria-labelledby="set-tab-migrations" hidden>
             <h3>Flyway</h3>
             <p class="hint">Migrations are read and applied by <strong>your own
-              Flyway command line</strong> — this app never reimplements it, and
-              never bundles it. Leave the path empty to use whatever is on your
-              PATH.</p>
+              Flyway</strong>, not by a copy inside this app.</p>
+            <div id="set-flyway-row" class="tool-row"></div>
             <label>Flyway command
               <input type="text" id="set-flyway-path" placeholder="flyway"
                      autocomplete="off" spellcheck="false" />
             </label>
             <p class="hint" id="set-flyway-note"></p>
             <p class="hint">If it will not start, <strong>About → Diagnostics</strong>
-              shows every path that was searched and what Flyway said when it ran.</p>
+              records exactly what was run.</p>
           </section>
 
           <section class="pane" id="set-pane-updates" role="tabpanel"

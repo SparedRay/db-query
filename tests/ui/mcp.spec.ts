@@ -262,8 +262,8 @@ async function withServer(page: Page, extra: Backend = {}) {
 async function openIntegrations(page: Page) {
   await page.click("#btn-settings");
   await page.locator("#settings-dialog").waitFor({ state: "visible" });
-  await page.click("#set-tab-integrations");
-  await expect(page.locator("#set-pane-integrations")).toBeVisible();
+  await page.click("#set-tab-mcp");
+  await expect(page.locator("#set-pane-mcp")).toBeVisible();
 }
 
 test("the server is off until it is turned on", async ({ page }) => {

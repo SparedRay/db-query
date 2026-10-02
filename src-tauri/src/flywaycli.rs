@@ -92,6 +92,60 @@ pub const EXTENSIONS: &[&str] = &["cmd", "bat", "exe"];
 #[cfg(not(windows))]
 pub const EXTENSIONS: &[&str] = &[];
 
+/// Ask Flyway its version, which is the only honest way to answer "is the
+/// command I typed the right one".
+///
+/// [`resolve`] cannot answer it: off Windows it deliberately leaves the search
+/// to the operating system, so `found` is `None` whether or not Flyway is on
+/// the PATH. Running it costs a JVM start, so the caller does this when the
+/// person opens the pane that asks the question, not on every dialog.
+///
+/// `Ok` carries the version line as Flyway prints it; `Err` carries something a
+/// person can act on.
+pub async fn version(program: &str) -> Result<String, String> {
+    let asked = if program.trim().is_empty() {
+        DEFAULT_PROGRAM
+    } else {
+        program.trim()
+    };
+    let resolved = resolve(asked).program;
+
+    let run = tokio::process::Command::new(&resolved)
+        .arg("-v")
+        .stdin(std::process::Stdio::null())
+        .output();
+    // Flyway is a JVM program and a cold start is slow; past this it is not a
+    // slow Flyway, it is the wrong file.
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("`{asked}` was not found on your PATH."))
+        }
+        Ok(Err(e)) => return Err(format!("Could not run `{asked}`: {e}")),
+        Err(_) => return Err(format!("`{asked}` did not answer within 30 seconds.")),
+    };
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Flyway prints a banner; the version line is the one naming itself. Taking
+    // the first line instead would report the banner's ASCII art.
+    match text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Flyway") && l.contains(|c: char| c.is_ascii_digit()))
+    {
+        Some(line) => Ok(line.to_string()),
+        None if out.status.success() => Ok("Flyway answered, but did not say which version.".into()),
+        None => Err(format!(
+            "`{asked}` ran but is not Flyway: {}",
+            text.lines().find(|l| !l.trim().is_empty()).unwrap_or("it printed nothing").trim()
+        )),
+    }
+}
+
 /// Where a program was looked for, and what turned up.
 #[derive(Debug, Clone)]
 pub struct Resolution {

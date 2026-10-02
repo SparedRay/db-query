@@ -784,3 +784,78 @@ owner has changed — and that a turn which fails before saying anything leaves 
 spinner behind.
 
 **834 UI tests on both engines, 422 Rust, `mise run check` clean.**
+
+## 16. Settings, reorganised — 2026-10-02
+
+> *"Integrations hold Flyway and MCP while Assistant holds a setting on Dropdown
+> for local modals and api keys and checks for CLI integration. that's sort of
+> incoherent"*
+
+Right, and the first round of options — regroup the tabs, put cards in a pane —
+was reshuffling boxes. Sorting these things by **what they are** shows today's
+tabs cut across the grain:
+
+| | What it is |
+|---|---|
+| MCP server | something **we host**, so other tools reach in |
+| Flyway | a **program on this machine** that we run |
+| Claude Code, Copilot CLI | **programs on this machine** that we run |
+| Anthropic, OpenAI, Ollama | **services we call** over HTTP |
+
+So Flyway and the CLI agents are the same kind of thing — each answers *is it
+installed, where is it, is it ready* — and sat in different tabs under different
+headings. Meanwhile the Assistant's provider list spans two of those categories
+at once, which is why it read wrong wherever it was put.
+
+### 16.1 Named after the task
+
+"Integrations" was **our** category, not anything a person sets out to do;
+nobody opens Settings meaning to configure an integration. The word is gone:
+
+```
+Appearance · Editor · Assistant · Migrations · MCP server · Updates · About
+```
+
+Flyway is under **Migrations**, which is where you look when migrations cannot
+find it. The server has its own section because it is a server and is like
+nothing else here. The agents are under **Assistant**, the only place they are
+used, under a heading that says what they are rather than what we filed them as.
+
+The tab switcher needed no change at all: it reads `[role="tab"]` and
+`aria-controls`, so this was markup.
+
+### 16.2 One row for a program on this machine
+
+A dot, a name, what it is for, its control — the same row for the agents and for
+Flyway, because the question is the same. The state is in the **text** as well
+as the dot: a colour alone asks the person to remember which was which, and
+fails outright for anyone who cannot tell two of them apart.
+
+That row needed Flyway to say something true, and nothing could.
+`flywaycli::resolve` cannot answer it — off Windows it deliberately leaves the
+search to the operating system, so `found` is `None` either way — so
+`flywaycli::version` runs `flyway -v`. It costs a JVM start, so **only the pane
+that wonders pays for it**: opening Settings on Appearance runs nothing, and the
+answer is re-asked when the command is edited.
+
+### 16.3 A bug the new tests found
+
+`flywayAsked` started as `""` as its "not asked yet" sentinel — and `""` is a
+**real setting**, meaning "whatever is on the PATH". So the row never drew for
+anyone who had not typed a custom path, which is nearly everyone. It is `null`
+now. The test that opens the pane on a default install is what caught it; by
+hand it would have looked like a feature that simply did not exist.
+
+### 16.4 Proof
+
+Six UI tests on the organisation itself rather than on what it replaced: the tab
+list, Flyway being under Migrations with the server not beside it, the row
+reporting a version, the row reporting a failure, the probe not running until
+its pane is opened, and the gutter. Two falsified — probing on every open fails
+the laziness test, and 14px back to 2px fails the gutter test.
+
+The gutter was confirmed from the mockup before it was built: `padding-right`
+2px → 14px, plus `scrollbar-gutter: stable` so the text does not shift sideways
+when a pane is short enough not to scroll.
+
+**846 UI tests on both engines, 422 Rust, `mise run check` clean.**

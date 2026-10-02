@@ -69,7 +69,7 @@ test("nothing is probed when no integration is enabled", async ({ page }) => {
   await boot(page);
   await openSettings(page);
   await expect(page.locator(".integration")).toHaveCount(2);
-  await expect(page.locator('.integration[data-recipe="copilot"] .integration-note')).toHaveText(
+  await expect(page.locator('.integration[data-recipe="copilot"] .tool-detail')).toHaveText(
     "Off.",
   );
   expect(await commandNames(page)).not.toContain("assistant_cli_probe");
@@ -109,7 +109,7 @@ test("turning an integration on probes it and offers it", async ({ page }) => {
   await page.click('.integration[data-recipe="copilot"] input[type="checkbox"]');
 
   await expect(
-    page.locator('.integration[data-recipe="copilot"] .integration-note'),
+    page.locator('.integration[data-recipe="copilot"] .tool-detail'),
   ).toHaveText(/installed and signed in/);
   const labels = await page.locator("#set-ai-preset option").allTextContents();
   expect(labels).toContain("Copilot CLI");
@@ -120,7 +120,7 @@ test("a missing CLI names the binary rather than just failing", async ({ page })
   await boot(page, { enabled: ["copilot"], probe: NOT_INSTALLED });
   await openSettings(page);
   await expect(
-    page.locator('.integration[data-recipe="copilot"] .integration-note'),
+    page.locator('.integration[data-recipe="copilot"] .tool-detail'),
   ).toContainText("`copilot` was not found on your PATH");
 });
 

@@ -126,6 +126,7 @@ const els = {
   setAiNote: $<HTMLElement>("set-ai-note"),
   aiHttpFields: $<HTMLElement>("ai-http-fields"),
   setIntegrations: $<HTMLElement>("set-integrations"),
+  setFlywayRow: $<HTMLElement>("set-flyway-row"),
   historyDialog: $<HTMLDialogElement>("history-dialog"),
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
@@ -2211,6 +2212,8 @@ function showSettingsSection(tabId: string) {
   const target = settingsTabs.find((t) => t.id === tabId) ?? settingsTabs[0];
   if (!target) return;
   settingsSection = target.id;
+  // Only this pane pays for the answer, and only while it is the one on screen.
+  if (target.id === "set-tab-migrations") void drawFlywayRow();
   for (const t of settingsTabs) {
     const on = t === target;
     t.setAttribute("aria-selected", String(on));
@@ -2435,7 +2438,6 @@ function openSettings() {
   els.setBrowse.value = String(settings.browseLimit);
   els.setMcpPort.value = String(mcpPort());
   els.setFlywayPath.value = settings.flywayPath;
-  els.setFlywayNote.textContent = "";
   els.setUpdateNote.hidden = true;
   // Ask the backend rather than trusting the stored preference: the server can
   // have failed to start, or been stopped, since this was last opened.
@@ -2449,6 +2451,7 @@ function openSettings() {
  *  makes you guess what a font looks like before you can see it. */
 function commit() {
   settings.flywayPath = els.setFlywayPath.value.trim();
+  if (settings.flywayPath !== flywayAsked) void drawFlywayRow(true);
   settings.fontFamily = els.setFont.value;
   settings.fontSize = Number(els.setFontSize.value) || settings.fontSize;
   settings.editorTheme = els.setEditorColours.value as EditorTheme;
@@ -2652,18 +2655,103 @@ async function warmCli(recipe: Recipe) {
   drawIntegrations();
 }
 
-/** The Integrations rows: one per CLI, off by default. */
+/**
+ * One status row: a light, what it is, what it is for, and its control.
+ *
+ * Shared by the command-line agents and by Flyway, because they are the same
+ * kind of thing — a program on this machine that we run — and each answers the
+ * same three questions: is it installed, where is it, is it ready. They used to
+ * be filed in different tabs under different headings, which is what made
+ * Settings feel arbitrary.
+ */
+function toolRow(opts: {
+  name: string;
+  state: "ready" | "off" | "problem" | "checking";
+  detail: string;
+}): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `tool-row state-${opts.state}`;
+
+  const dot = document.createElement("span");
+  dot.className = "tool-dot";
+  // The state is in the text as well as the colour. A dot alone asks the
+  // person to remember which colour meant what, and fails outright for anyone
+  // who cannot tell two of them apart.
+  dot.setAttribute("aria-hidden", "true");
+
+  const who = document.createElement("span");
+  who.className = "tool-who";
+  const name = document.createElement("b");
+  name.textContent = opts.name;
+  const detail = document.createElement("span");
+  detail.className = "tool-detail";
+  detail.textContent = opts.detail;
+  who.append(name, detail);
+
+  row.append(dot, who);
+  return row;
+}
+
+/**
+ * Flyway's row, in Migrations: the same shape as an agent's.
+ *
+ * Asked **when the pane is opened**, and again when the command is edited,
+ * because running Flyway costs a JVM start and no other pane needs the answer.
+ * `flywaycli::resolve` cannot stand in for it: off Windows it leaves the search
+ * to the operating system, so it reports "not found" either way.
+ */
+// `null`, not `""`: an empty path is a real setting — "whatever is on the
+// PATH" — so using it as the "not asked yet" sentinel meant the row never drew
+// for anyone who had not typed a custom path, which is nearly everyone. Found
+// by the test that opens the pane on a default install.
+let flywayAsked: string | null = null;
+async function drawFlywayRow(force = false) {
+  const program = settings.flywayPath;
+  if (!force && flywayAsked === program) return;
+  flywayAsked = program;
+
+  els.setFlywayRow.replaceChildren(
+    toolRow({ name: "Flyway", state: "checking", detail: "Checking…" }),
+  );
+  els.setFlywayRow
+    .querySelector(".tool-detail")
+    ?.append(Object.assign(document.createElement("span"), { className: "spinner" }));
+
+  const found = await api.flywayVersion(program).catch((err) => String(err));
+  // Resolved against what is configured *now*: editing the command twice in
+  // quick succession must not let the slower answer win.
+  if (flywayAsked !== program) return;
+  const ok = found.startsWith("Flyway");
+  els.setFlywayRow.replaceChildren(
+    toolRow({ name: "Flyway", state: ok ? "ready" : "problem", detail: found }),
+  );
+}
+
+/** The command-line agents: one row per CLI, off by default. */
 function drawIntegrations() {
   const rows = ([ "claude", "copilot" ] as Recipe[]).map((recipe) => {
-    const row = document.createElement("div");
-    row.className = "integration";
+    const enabled = settings.cliEnabled.includes(recipe);
+    const status = cliStatus.get(recipe);
+    const state = !enabled
+      ? "off"
+      : status === null
+        ? "checking"
+        : status?.installed && status?.signedIn
+          ? "ready"
+          : "problem";
+    const row = toolRow({
+      name: cliLabel(recipe),
+      state,
+      detail: !enabled ? "Off." : status === null ? "Checking…" : cliNote(recipe, status ?? null),
+    });
+    row.classList.add("integration");
     row.dataset.recipe = recipe;
 
     const label = document.createElement("label");
     label.className = "toggle";
     const box = document.createElement("input");
     box.type = "checkbox";
-    box.checked = settings.cliEnabled.includes(recipe);
+    box.checked = enabled;
     box.onchange = () => {
       settings.cliEnabled = box.checked
         ? [...settings.cliEnabled, recipe]
@@ -2688,22 +2776,18 @@ function drawIntegrations() {
       applyAiSettings();
       paintAssistantButton();
     };
-    label.append(box, document.createTextNode(` ${cliLabel(recipe)}`));
+    // The name is already the row's title, so the box is labelled by what it
+    // does rather than repeating it.
+    label.setAttribute("aria-label", `Use ${cliLabel(recipe)}`);
+    label.append(box);
 
-    const note = document.createElement("span");
-    note.className = "integration-note";
-    if (!box.checked) {
-      note.textContent = "Off.";
-    } else if (cliStatus.get(recipe) === null) {
-      note.textContent = "Checking…";
-      note.append(
-        Object.assign(document.createElement("span"), { className: "spinner" }),
-      );
-    } else {
-      note.textContent = cliNote(recipe, cliStatus.get(recipe) ?? null);
+    if (state === "checking") {
+      row
+        .querySelector(".tool-detail")
+        ?.append(Object.assign(document.createElement("span"), { className: "spinner" }));
     }
 
-    row.append(label, note);
+    row.append(label);
     return row;
   });
   els.setIntegrations.replaceChildren(...rows);
