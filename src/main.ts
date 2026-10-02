@@ -3332,6 +3332,40 @@ interface MigUi {
   repair: HTMLButtonElement;
 }
 
+/**
+ * Put a spinner in a button for as long as something is running.
+ *
+ * Returns the undo, so the caller restores it in a `finally` and a thrown error
+ * cannot leave a button spinning forever.
+ *
+ * Apply and Repair already disabled themselves and wrote "Flyway is applying…"
+ * next to the list, and on Windows that was invisible: spawning Flyway opened a
+ * console window over the app, so the click looked like it had done nothing.
+ * The window is gone now (see `proc.rs`), and the wait is on the button that
+ * started it, which is where somebody is already looking.
+ */
+function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
+  // Snapshotted, not read back afterwards: the caller may re-render between
+  // here and the undo, and restoring the nodes it had is unambiguous.
+  const kept = Array.from(btn.childNodes);
+  const wasDisabled = btn.disabled;
+  const text = label ?? btn.textContent ?? "";
+
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  btn.replaceChildren(spinner, document.createTextNode(` ${text}`));
+  btn.disabled = true;
+  // Says it out loud for anyone who cannot see the spinner turn.
+  btn.setAttribute("aria-busy", "true");
+
+  return () => {
+    btn.replaceChildren(...kept);
+    btn.disabled = wasDisabled;
+    btn.removeAttribute("aria-busy");
+  };
+}
+
 function migUi(): MigUi {
   return {
     projects: els.migSideBody,
@@ -4057,7 +4091,7 @@ async function applyMigrations(upTo?: string) {
   );
   if (go !== "go") return;
 
-  migUi().apply.disabled = true;
+  const doneBusy = buttonBusy(migUi().apply, "Applying\u2026");
   migrationsMessage("Flyway is applying…");
   try {
     const out = await api.flywayMigrate(
@@ -4087,6 +4121,8 @@ async function applyMigrations(upTo?: string) {
     // the only signal for a checksum mismatch, which shows up nowhere in the
     // list.
     if (failure.suggestsRepair) migrationsRepairAsked.add(key);
+  } finally {
+    doneBusy();
   }
   await showSelected();
 }
@@ -4191,7 +4227,7 @@ async function repairMigrations() {
   );
   if (go !== "go") return;
 
-  migUi().repair.disabled = true;
+  const doneBusy = buttonBusy(migUi().repair, "Repairing\u2026");
   migrationsMessage("Flyway is repairing\u2026");
   try {
     const out = await api.flywayRepair(
@@ -4215,6 +4251,8 @@ async function repairMigrations() {
   } catch (err) {
     // Flyway's own words, verbatim.
     results.setMessage(String(err));
+  } finally {
+    doneBusy();
   }
   await showSelected();
 }

@@ -23,7 +23,6 @@
 //! woven into the reactor.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
@@ -110,7 +109,7 @@ pub async fn version(program: &str) -> Result<String, String> {
     };
     let resolved = resolve(asked).program;
 
-    let run = tokio::process::Command::new(&resolved)
+    let run = crate::proc::command(&resolved)
         .arg("-v")
         .stdin(std::process::Stdio::null())
         .output();
@@ -382,7 +381,7 @@ async fn spawn(program: &str, args: Vec<String>, dir: Option<PathBuf>) -> Result
     let program = r.program;
 
     tokio::task::spawn_blocking(move || {
-        let mut cmd = Command::new(&program);
+        let mut cmd = crate::proc::blocking_command(&program);
         cmd.args(&args)
             // Flyway asks nothing interactively, but a program that decided to
             // would otherwise hang a click forever with no way to answer it.
@@ -393,7 +392,7 @@ async fn spawn(program: &str, args: Vec<String>, dir: Option<PathBuf>) -> Result
         let out = cmd.output().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "Flyway was not found at \"{shown}\". Install the Flyway command line, or set \
-                 the path to it in Settings \u{2192} Integrations. Settings \u{2192} About \
+                 the path to it in Settings \u{2192} Migrations. Settings \u{2192} About \
                  \u{2192} Diagnostics prints every path that was tried."
             ),
             std::io::ErrorKind::PermissionDenied => {

@@ -192,7 +192,7 @@ impl Agent {
         cwd: &std::path::Path,
         system: String,
     ) -> Result<Self, String> {
-        let mut child = tokio::process::Command::new(program)
+        let mut child = crate::proc::command(program)
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())

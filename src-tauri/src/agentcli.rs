@@ -527,7 +527,7 @@ pub async fn run(
     // breaks it. What made clearing cheap to give up is that there is nothing
     // of ours to leak: a database password lives in the keychain and is read at
     // the moment it is used, never parked in our environment.
-    let mut child = tokio::process::Command::new(recipe.program())
+    let mut child = crate::proc::command(recipe.program())
         .args(&args)
         .current_dir(&scratch.dir)
         .stdin(Stdio::null())
@@ -813,7 +813,7 @@ fn missing(recipe: Recipe) -> Status {
 
 /// `claude auth status` prints JSON and exits 0 when signed in, 1 when not.
 async fn probe_claude(recipe: Recipe) -> Status {
-    let out = tokio::process::Command::new(recipe.program())
+    let out = crate::proc::command(recipe.program())
         .args(recipe.probe_args())
         .stdin(Stdio::null())
         .output()
@@ -868,7 +868,7 @@ async fn probe_copilot(recipe: Recipe) -> Status {
             }
         }
     };
-    let mut child = match tokio::process::Command::new(recipe.program())
+    let mut child = match crate::proc::command(recipe.program())
         .args(recipe.probe_args())
         .current_dir(&dir.dir)
         .stdin(Stdio::piped())
