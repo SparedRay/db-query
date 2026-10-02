@@ -155,18 +155,20 @@ until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2
 done
 podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
   "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa; \
-   CREATE DATABASE flyway_dev; CREATE DATABASE flyway_qa;"
+   DROP DATABASE IF EXISTS flyway_probe; \
+   CREATE DATABASE flyway_dev; CREATE DATABASE flyway_qa; CREATE DATABASE flyway_probe;"
 
 "$BIN" --version >/dev/null 2>&1 || { echo "the downloaded flyway will not run"; exit 1; }
 echo "flyway $VERSION ready at $BIN"
-echo "project: dev/flyway/flyway.toml (environments: development, qa)"
+echo "project: dev/flyway/flyway.toml (environments: development, qa, probe; tests clean probe)"
 """
 
 [tasks.flyway-down]
 description = "Drop the migration fixture databases (leaves the downloaded CLI)"
 run = """
 podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
-  "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa;"
+  "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa; \
+   DROP DATABASE IF EXISTS flyway_probe;"
 """
 
 [tasks.test-flyway]

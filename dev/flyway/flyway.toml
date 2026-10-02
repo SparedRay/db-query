@@ -28,6 +28,16 @@ url = "jdbc:mysql://127.0.0.1:3306/flyway_qa?allowPublicKeyRetrieval=true&useSSL
 user = "root"
 password = "devpassword"
 
+# A third database, for **tests that have to change something**. Added
+# 2026-10-02: the tests that pin what Flyway's migrate report contains have to
+# clean and re-apply to be worth anything, and doing that to `development` or
+# `qa` broke whichever test ran next. A mutating test gets its own database.
+[environments.probe]
+displayName = "Probe database (tests clean this one)"
+url = "jdbc:mysql://127.0.0.1:3306/flyway_probe?allowPublicKeyRetrieval=true&useSSL=false&createDatabaseIfNotExist=true"
+user = "root"
+password = "devpassword"
+
 [flyway]
 environment = "development"
 locations = [ "filesystem:migrations" ]
