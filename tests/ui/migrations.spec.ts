@@ -1257,19 +1257,33 @@ test("the strip goes when the run ends", async ({ page }) => {
  * a pane somebody opened to read a report. The fields come from the captured
  * fixtures in `flywaycli.rs`.
  */
-const REPORT = {
-  op: "migrate",
-  code: 0,
-  stdout: JSON.stringify({
-    flywayVersion: "13.5.0",
-    database: "flyway_dev",
-    operation: "migrate",
-    migrations: [
-      { version: "5", description: "add index", state: "Success", executionTime: 41 },
-    ],
-  }),
-  stderr: "",
-};
+/**
+ * **Real output**, captured from Flyway 13.5.0 against the `dev/flyway`
+ * fixture on 2026-10-02 (`mise run db-up && mise run flyway-up`).
+ *
+ * Not invented, and the first version of this fixture was: it gave each
+ * migration a `state` of "Success", which a migrate report does not have at
+ * all. The test passed and proved nothing about real output.
+ *
+ * The `error` object's `cause` chain and its three `stackTrace` strings are cut
+ * out here — the whole document was 18,480 bytes, of which 527 was the message.
+ * The renderer must never show them, so carrying them in a test file would
+ * prove nothing either.
+ */
+const MIGRATE_OK = "{\n  \"database\": \"flyway_qa\",\n  \"databaseType\": \"MySQL\",\n  \"flywayVersion\": \"13.5.0\",\n  \"initialSchemaVersion\": null,\n  \"licenseFailed\": false,\n  \"migrations\": [\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"create widgets\",\n      \"executionTime\": 27,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V1__create_widgets.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"1\"\n    },\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"seed widgets\",\n      \"executionTime\": 4,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V2__seed_widgets.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"2\"\n    },\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"add colour\",\n      \"executionTime\": 13,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V3__add_colour.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"3\"\n    }\n  ],\n  \"migrationsExecuted\": 3,\n  \"operation\": \"migrate\",\n  \"schemaName\": \"\",\n  \"success\": true,\n  \"targetSchemaVersion\": \"3\",\n  \"timestamp\": \"2026-10-02T19:16:06.00892756-03:00\",\n  \"totalMigrationTime\": 44,\n  \"warnings\": []\n}";
+
+/**
+ * The same fixture, stopped by its deliberately broken V4 — **with its real
+ * `cause` and a real `stackTrace`**, shortened to six frames.
+ *
+ * It has to carry them. The first version of this fixture had the traces cut
+ * out for size, which made the test's "and none of the Java" assertions
+ * vacuous: falsifying the renderer by printing the whole error object still
+ * passed, because there was no Java in the fixture to leak.
+ */
+const MIGRATE_FAILED = "{\n  \"database\": \"flyway_dev\",\n  \"databaseType\": \"MySQL\",\n  \"error\": {\n    \"errorCode\": \"FAILED_VERSIONED_MIGRATION\",\n    \"message\": \"Failed to execute script V4__deliberately_broken.sql against development environment\\n------------------------------------------------------------------------------------\\nSQL State  : 42000\\nError Code : 1091\\nMessage    : (conn=12) Can't DROP 'weight'; check that column/key exists\\nLocation   : migrations/V4__deliberately_broken.sql (/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V4__deliberately_broken.sql)\\nLine       : 4\\nStatement  : Run Flyway with -X option to see the actual statement causing the problem\\n\",\n    \"lineNumber\": 4,\n    \"path\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V4__deliberately_broken.sql\",\n    \"cause\": {\n      \"message\": \"Failed to execute script V4__deliberately_broken.sql against development environment\\n------------------------------------------------------------------------------------\\nSQL State  : 42000\\nError Code : 1091\\nMessage    : (conn=12) Can't DROP 'weight'; check that column/key exists\\nLocation   : migrations/V4__deliberately_broken.sql (/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V4__deliberately_broken.sql)\\nLine       : 4\\nStatement  : Run Flyway with -X option to see the actual statement causing the problem\\n\",\n      \"stackTrace\": \"org.flywaydb.core.internal.sqlscript.FlywaySqlScriptException: Failed to execute script V4__deliberately_broken.sql against development environment\\n------------------------------------------------------------------------------------\\nSQL State  : 42000\\nError Code : 1091\\nMessage    : (conn=12) Can't DROP 'weight'; check that column/key exists\\nLocation   : migrations/V4__deliberately_broken.sql (/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V4__deliberately_broken.sql)\\n\\t\\u2026 23 more\"\n    }\n  },\n  \"flywayVersion\": \"13.5.0\",\n  \"initialSchemaVersion\": null,\n  \"licenseFailed\": false,\n  \"migrations\": [\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"create widgets\",\n      \"executionTime\": 24,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V1__create_widgets.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"1\"\n    },\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"seed widgets\",\n      \"executionTime\": 3,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V2__seed_widgets.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"2\"\n    },\n    {\n      \"category\": \"Versioned\",\n      \"description\": \"add colour\",\n      \"executionTime\": 11,\n      \"filepath\": \"/home/lenovo/Documents/Projects/db-query/dev/flyway/migrations/V3__add_colour.sql\",\n      \"type\": \"SQL\",\n      \"version\": \"3\"\n    }\n  ],\n  \"migrationsExecuted\": 3,\n  \"operation\": \"migrate\",\n  \"schemaName\": \"\",\n  \"success\": false,\n  \"targetSchemaVersion\": null,\n  \"timestamp\": \"2026-10-02T19:15:42.170597838-03:00\",\n  \"totalMigrationTime\": 38,\n  \"warnings\": []\n}";
+
+const REPORT = { op: "migrate", code: 0, stdout: MIGRATE_OK, stderr: "" };
 
 test("the output pane renders Flyway's report rather than its JSON", async ({ page }) => {
   await withProject(page, {
@@ -1281,9 +1295,13 @@ test("the output pane renders Flyway's report rather than its JSON", async ({ pa
 
   const body = page.locator("#flyway-body");
   await expect(body).toContainText("Flyway 13.5.0");
-  await expect(body).toContainText("database flyway_dev");
-  await expect(body.locator(".fw-mig")).toContainText("add index");
-  await expect(body.locator(".fw-mig .fw-state")).toContainText("41 ms");
+  await expect(body).toContainText("database flyway_qa");
+  await expect(body).toContainText("3 executed");
+  await expect(body).toContainText("now at 3");
+  // A migrate report carries no `state`, so a listed migration is one that ran.
+  await expect(body.locator(".fw-mig").first()).toContainText("create widgets");
+  await expect(body.locator(".fw-mig").first()).toContainText("Applied");
+  await expect(body.locator(".fw-mig").first()).toContainText("27 ms");
   // Rendered: no braces from the document it came from.
   await expect(body).not.toContainText("flywayVersion");
   await expect(body).not.toContainText("{");
@@ -1328,4 +1346,46 @@ test("the output pane can be collapsed and says which it is", async ({ page }) =
 test("an untouched environment says nothing has run", async ({ page }) => {
   await withProject(page);
   await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
+});
+
+/**
+ * **A failed migrate still lists what succeeded.** Measured: Flyway applied
+ * V1, V2 and V3, then V4 failed — and the report carries all three plus the
+ * error. That ordering is the whole value of the pane after a failure.
+ *
+ * And the stack trace stays out. The real document was 18,480 bytes, of which
+ * the message was 527; the rest was a `cause` chain three deep, each with its
+ * own `stackTrace`. Printing the document raw would bury the one line that
+ * says which file and which SQL.
+ */
+test("a failed run shows what ran, then why it stopped, without the Java", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
+    flyway_migrate: () => {
+      throw new Error("Flyway refused");
+    },
+    flyway_last_run: () => ({
+      op: "migrate",
+      code: 1,
+      stdout: MIGRATE_FAILED,
+      stderr: "",
+    }),
+  });
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const body = page.locator("#flyway-body");
+  // The three that worked, in order.
+  await expect(body.locator(".fw-mig")).toHaveCount(3);
+  await expect(body.locator(".fw-mig").nth(0)).toContainText("create widgets");
+  await expect(body.locator(".fw-mig").nth(2)).toContainText("add colour");
+  // Then the reason, naming the file and the SQL error.
+  await expect(body.locator(".fw-err")).toContainText("V4__deliberately_broken.sql");
+  await expect(body.locator(".fw-err")).toContainText("Can't DROP 'weight'");
+
+  // None of the Java.
+  await expect(body).not.toContainText("org.flywaydb");
+  await expect(body).not.toContainText("stackTrace");
+  await expect(body).not.toContainText("MariaDbStatement");
 });

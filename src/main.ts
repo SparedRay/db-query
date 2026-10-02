@@ -3398,13 +3398,20 @@ function showResultsSurface(kind: TabKind) {
   $("grid").hidden = flyway;
 }
 
-/** One migration's line in the report. */
-function reportRow(m: Record<string, unknown>): HTMLElement {
-  const state = String(m.state ?? "");
+/**
+ * One migration's line in the report.
+ *
+ * **A migrate report has no `state`.** Measured against Flyway 13.5.0 on
+ * 2026-10-02: a migrate's `migrations[]` entries carry `category`,
+ * `description`, `executionTime`, `filepath`, `type` and `version` — and
+ * nothing else. `state` belongs to an `info` report. So a listed migration in a
+ * migrate is one that *ran*, and the row says so from `applied`, rather than
+ * printing an empty column.
+ */
+function reportRow(m: Record<string, unknown>, applied: boolean): HTMLElement {
+  const state = String(m.state ?? (applied ? "Applied" : ""));
   const row = elem("div", "fw-mig");
-  // Flyway's own words for the state, and our colour: `Success` and `Pending`
-  // are not judgements we make.
-  if (/success|baseline/i.test(state)) row.classList.add("ok");
+  if (/success|baseline|applied/i.test(state)) row.classList.add("ok");
   if (/fail|error|undone/i.test(state)) row.classList.add("bad");
   const ms = typeof m.executionTime === "number" ? `${m.executionTime} ms` : "";
   row.append(
@@ -3419,12 +3426,14 @@ function reportRow(m: Record<string, unknown>): HTMLElement {
  * Render what Flyway said.
  *
  * `stdout` is a **JSON document** — every operation is run with
- * `-outputType=json` — so printing it raw would put a wall of braces in a pane
- * somebody opened to read a report. The fields used here are the ones in the
- * captured fixtures in `flywaycli.rs`: `flywayVersion`, `database`,
- * `operation`, `migrations[]` and `error`. Anything that will not parse is
- * shown verbatim, because a Flyway that printed something unexpected is
- * exactly when you want to see it unedited.
+ * `-outputType=json` — so printing it raw is not an option: a failed migrate's
+ * document was **18,480 bytes**, of which the useful message was 527 and the
+ * rest was a Java stack trace nested three deep. Measured against 13.5.0 on
+ * 2026-10-02 with the `dev/flyway` fixture.
+ *
+ * Every field read here was in that run's output. Anything that will not parse
+ * is shown verbatim, because a Flyway that printed something unexpected is
+ * exactly when you want it unedited.
  */
 function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRun) {
   let parsed: Record<string, unknown> | null = null;
@@ -3452,11 +3461,33 @@ function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRu
     .join("  \u00b7  ");
   if (head) host.append(elem("div", "fw-head", head));
 
-  const migrations = Array.isArray(parsed.migrations) ? parsed.migrations : [];
-  for (const m of migrations) {
-    host.append(reportRow(m as Record<string, unknown>));
+  // The summary, from the fields a migrate actually carries.
+  const executed = typeof parsed.migrationsExecuted === "number" ? parsed.migrationsExecuted : null;
+  if (executed !== null) {
+    const bits = [`${executed} executed`];
+    if (parsed.targetSchemaVersion) bits.push(`now at ${parsed.targetSchemaVersion}`);
+    if (typeof parsed.totalMigrationTime === "number") {
+      bits.push(`${parsed.totalMigrationTime} ms in total`);
+    }
+    host.append(elem("div", "fw-note", bits.join(" \u00b7 ")));
   }
 
+  // **A failed migrate still lists what succeeded first**, which is the part
+  // somebody needs: three applied, then V4 failed because of this. So the rows
+  // are rendered whether or not the run as a whole worked.
+  const migrations = Array.isArray(parsed.migrations) ? parsed.migrations : [];
+  const isMigrate = String(parsed.operation ?? run.op) === "migrate";
+  for (const m of migrations) {
+    host.append(reportRow(m as Record<string, unknown>, isMigrate));
+  }
+
+  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+  for (const w of warnings) {
+    host.append(elem("div", "fw-note", String(w)));
+  }
+
+  // `error.message` only. The document also carries `cause` nested three deep,
+  // each with its own `stackTrace`, which is how one failure became 18 KB.
   const error = parsed.error as Record<string, unknown> | undefined;
   if (error) {
     host.append(
@@ -3464,8 +3495,9 @@ function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRu
     );
   }
 
-  // Flyway's own stderr, kept verbatim underneath: it is where a JVM warning
-  // or a driver complaint turns up, and those are never in the report.
+  // Flyway's own stderr, verbatim underneath. Measured empty on every run of
+  // the fixture — Flyway writes everything to stdout — but a JVM that
+  // complains before Flyway starts writes here, and that is worth seeing.
   if (run.stderr.trim()) host.append(elem("div", "fw-line", run.stderr.trim()));
 
   if (!head && migrations.length === 0 && !error && !run.stderr.trim()) {

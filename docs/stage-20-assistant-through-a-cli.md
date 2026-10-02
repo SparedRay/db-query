@@ -1076,3 +1076,79 @@ flyway -outputType=json info > out.json 2> err.txt
 
 Progress lines in `err.txt` mean a live log, and L1, are possible; nothing until
 the end means L2 is already the truthful version of it.
+
+## 20. §19.5 answered — L1 is not buildable, 2026-10-02
+
+> *"Why we dont create Pod on podman so we can execute that … That way we don't
+> need to install on the machine"*
+
+Right instinct, and it turned out nothing needed installing **or** containering:
+`mise run flyway-up` already unpacks a pinned Flyway 13.5.0 into `dev/.flyway`,
+which is why `which flyway` found nothing. The measurement ran against the real
+`dev/flyway` fixture with MySQL in podman, as the project already does.
+
+### 20.1 The answer
+
+```
+flyway -configFiles=flyway.toml -environment=development -outputType=json migrate
+  → stdout 18,831 bytes, stderr 0 bytes
+```
+
+**stderr is empty, on every run.** With `-outputType=json` Flyway writes one
+document to stdout when it finishes and nothing anywhere as it goes. So there
+is no live progress to stream, and **L1 — per-migration progress in the list —
+cannot be built honestly**. L2's "Flyway reports when it finishes, not as it
+goes" is not a hedge; it is the measured truth.
+
+Streaming would mean giving up `-outputType=json`, and with it every structured
+result this app depends on. Not a trade worth making for an animation.
+
+### 20.2 What the measurement changed
+
+**A migrate report has no `state` field.** Measured: its `migrations[]` entries
+carry `category`, `description`, `executionTime`, `filepath`, `type`, `version`
+and nothing else — `state` belongs to an `info` report. The renderer said
+`m.state ?? ""` and so printed an empty column for every row. A listed
+migration in a migrate is one that *ran*, and the row now says `Applied`.
+
+**A failed migrate still lists what succeeded.** V1, V2 and V3 applied, then V4
+failed, and the document carries all four facts. That ordering is the whole
+value of the pane after a failure, and it is now what the pane shows.
+
+**The error object is 18 KB of Java.** The useful message was 527 bytes; the
+rest was a `cause` chain three deep, each with its own `stackTrace`. Rendering
+`error.message` alone was already the design — now it is a verified necessity
+rather than a guess.
+
+Also added from the real reports: `migrationsExecuted`, `targetSchemaVersion`
+and `totalMigrationTime` as a summary line, and `warnings[]`.
+
+### 20.3 A test that proved nothing
+
+The fixture for all this started out **invented**: each migration had
+`state: "Success"`, which a migrate report never contains. It passed, and
+validated fiction.
+
+Replacing it with the real capture exposed a second, worse problem. The real
+document was trimmed of its stack traces for file size — which removed the very
+thing the test's *"and none of the Java"* assertions guard. Falsifying the
+renderer by printing the whole error object **still passed**, because there was
+no Java left in the fixture to leak.
+
+The fixture now carries a real `cause` and a real `stackTrace`, cut to six
+frames, and the falsification fails as it should. **A guard assertion is only
+worth what the fixture can violate.**
+
+### 20.4 On running Flyway in a container
+
+Worth separating two uses. For *measuring Flyway's behaviour*, a container
+would have worked and so did the already-unpacked binary. For *testing this
+app*, it cannot: the app's whole design is that it spawns **your own Flyway**,
+so the fixture has to be a binary this process can `Command::new` — one inside
+a container is reachable by `podman exec`, which is not the code path under
+test.
+
+Where it would earn its place is CI, so a run does not fetch 584 MB. That is
+not built, and is noted here rather than assumed.
+
+**876 UI tests on both engines, 422 Rust, `mise run check` exits 0.**
