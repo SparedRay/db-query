@@ -557,3 +557,66 @@ not the provider list, because the list was only redrawn on the disable path.
 ### 11.4 Left for Phase 3
 
 - [ ] A long-lived process per chat (§9.3), now known to be possible for both
+
+## 12. Phase 3 measured first — 2026-10-01
+
+ACP's prompt flow, against the real Copilot CLI. Three findings, one of which is
+a bug Phase 3 would have shipped.
+
+### 12.1 The premise holds: a session is worth 3–9 seconds a message
+
+| | one-shot (Phase 1) | ACP session (Phase 3) |
+|---|---|---|
+| start | 5.3–11.7 s **every message** | 2.4 s **once per chat** |
+| first turn | — | 1.85 s |
+| second turn | — | 2.66 s |
+
+So the cost moves from per-message to per-chat, which is the whole point. The
+flow is `session/prompt` → `session/update` notifications carrying
+`agent_message_chunk` → a response with `stopReason` and a `usage` object. The
+chunks are finer than the JSONL path's: single tokens, `"1"`, `"\n"`, `"2"`.
+
+### 12.2 The CLI talks to the user inside the answer
+
+The first two chunks of a turn were not the answer:
+
+```
+Info: Disabled tools: bash, create, dynamic_workflows_manage, edit, glob, grep,
+      list_agents, list_bash, read_agent, read_bash, run_dynamic_workflow, sql,
+      stop_bash, task, view, web_fetch, write_agent
+Info: Unknown tool name in the tool allowlist: "__db_query_no_tools__"
+```
+
+They arrive as `agent_message_chunk` — the same channel as the reply — so
+rendering the stream naively would open every answer with two lines of our own
+plumbing. **Found before it shipped only because the flow was measured rather
+than assumed.** The ACP path filters the known `Info:` forms, and a live test
+pins their shape so that a vendor rewording breaks a test rather than quietly
+leaking into the chat.
+
+### 12.3 The invariant is weaker over ACP, and the design has to say so
+
+The JSONL path reports its tool set as **data** — `tool_count` and the names, in
+a usage checkpoint — which is what §10.3 falsified. ACP has no equivalent:
+`usage_update` carries tokens only. What ACP gives instead is:
+
+* that `Info: Disabled tools: …` line, which **names what was removed** — prose,
+  but a positive statement rather than an absence, and it lists `bash`, `edit`,
+  `create`, `sql` by name;
+* `session/update` with `tool_call`, if the model ever calls one.
+
+So the ACP path enforces the rule with three things rather than one: the same
+flags, a refusal on any `tool_call`, and a check that the `Disabled tools:` line
+is present and names the write-capable tools. That is **not as strong** as
+reading a count back, and this is where it is written down rather than glossed:
+the strong check lives on the one-shot path.
+
+It also confirms the trick is visible to the vendor — *"Unknown tool name in the
+tool allowlist"* means they already notice the name that empties the list, and
+could validate it away. Which is the argument for the readback, not against it.
+
+### 12.4 Scope
+
+Phase 3 is the ACP transport for Copilot first, since that is the main driver.
+Claude keeps the one-shot path until its `--input-format stream-json` transport
+is built, and keeps the stronger check while it does.
