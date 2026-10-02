@@ -1389,3 +1389,43 @@ test("a failed run shows what ran, then why it stopped, without the Java", async
   await expect(body).not.toContainText("stackTrace");
   await expect(body).not.toContainText("MariaDbStatement");
 });
+
+/**
+ * **Flyway's third shape: a refusal.** `{"error": {…}}` and nothing else —
+ * no `operation`, no `migrations`. Captured from the fixture on 2026-10-02 by
+ * running the broken environment twice: the second run is stopped by validation
+ * before it starts.
+ *
+ * Found by a live test that asserted `operation` was "migrate" and got `null`.
+ * The pane has to render this too, falling back to the operation it asked for.
+ */
+const REFUSAL = JSON.stringify({
+  error: {
+    errorCode: "VALIDATE_ERROR",
+    message:
+      "Validate failed: Migrations have failed validation\n" +
+      "Detected failed migration to version 4 (deliberately broken).\n" +
+      "Please remove any half-completed changes then run repair to fix the schema history.",
+  },
+});
+
+test("a refusal, which carries nothing but a message, still reads", async ({ page }) => {
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
+    flyway_migrate: () => {
+      throw new Error("Validate failed");
+    },
+    flyway_last_run: () => ({ op: "migrate", code: 1, stdout: REFUSAL, stderr: "" }),
+  });
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const body = page.locator("#flyway-body");
+  await expect(body.locator(".fw-err")).toContainText("Detected failed migration to version 4");
+  await expect(body.locator(".fw-err")).toContainText("run repair");
+  // No rows and no summary, because the document has neither.
+  await expect(body.locator(".fw-mig")).toHaveCount(0);
+  // And the header still says which operation it was.
+  await expect(body.locator(".fw-head")).toContainText("migrate");
+});

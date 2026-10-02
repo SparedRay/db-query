@@ -504,3 +504,221 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
 
     let _ = fs::remove_dir_all(&copy);
 }
+
+// ------------------------------- the contract the output pane depends on (L3)
+
+/// Empty the probe schema, so a test that must see migrations really run can.
+///
+/// `-cleanDisabled=false` because Flyway refuses to clean by default, which is
+/// the right default everywhere except a fixture database that exists to be
+/// cleaned.
+async fn clean(environment: &str) {
+    flywaycli::run(
+        &program(),
+        &project(),
+        environment,
+        "clean",
+        vec!["-cleanDisabled=false".into()],
+    )
+    .await
+    .expect("flyway did not run — is `mise run flyway-up` done?");
+}
+
+/// A `migrate`, as the app runs one.
+async fn migrate(environment: &str, extra: Vec<String>) -> flywaycli::Finished {
+    flywaycli::run(&program(), &project(), environment, "migrate", extra)
+        .await
+        .expect("flyway did not run — is `mise run flyway-up` done?")
+}
+
+/// Everything below is **state independent**: it asserts the *shape* of what
+/// Flyway reports, never a count. The fixture's databases are only clean right
+/// after `mise run flyway-up`, and a test that fails on a second run teaches
+/// its reader to ignore it.
+fn report(out: &flywaycli::Finished) -> serde_json::Value {
+    serde_json::from_str(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "Flyway's stdout was not one JSON document: {e}\n{}",
+            out.stdout
+        )
+    })
+}
+
+/// **The measurement L1 was cancelled over.** 2026-10-02, Flyway 13.5.0: with
+/// `-outputType=json` everything goes to stdout at the end and **stderr stays
+/// empty**, so there is no live progress to stream and per-migration progress
+/// cannot be shown honestly.
+///
+/// Pinned as a test rather than written in a document, so that the day Flyway
+/// starts narrating to stderr, this fails and tells us L1 became possible.
+#[tokio::test]
+#[ignore]
+async fn flyway_says_nothing_until_it_finishes() {
+    let out = migrate("qa", vec!["-target=3".into()]).await;
+    assert_eq!(
+        out.stderr.trim(),
+        "",
+        "stderr carried something — live progress may now be streamable, which would make \
+         per-migration progress (L1) buildable. stderr was:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.trim().is_empty(),
+        "and stdout is where the whole report arrives"
+    );
+}
+
+/// **Flyway answers in one of three shapes, and the pane has to take all of
+/// them.** Measured 2026-10-02:
+///
+/// 1. a report that worked — every key below, `migrations[]` filled;
+/// 2. a report that broke part-way — the same keys plus `error`, and
+///    `migrations[]` still listing what *did* run;
+/// 3. a **refusal** — `{"error": {…}}` and nothing else at all, which is what
+///    arrives when validation stops the run before it starts.
+///
+/// This test found the third by failing on it: it asserted `operation` was
+/// `"migrate"` and got `null`, because an earlier test in the run had left the
+/// environment with a failed migration and Flyway refused rather than reported.
+/// The assertion was wrong, not Flyway.
+#[tokio::test]
+#[ignore]
+async fn a_migrate_answers_in_a_shape_the_pane_can_render() {
+    let out = migrate("probe", vec!["-target=3".into()]).await;
+    let v = report(&out);
+
+    if v.get("operation").and_then(|o| o.as_str()).is_none() {
+        // Shape 3. The pane falls back to the operation it asked for and shows
+        // the message, because there is nothing else in the document.
+        assert!(
+            v["error"]["message"].is_string(),
+            "a document with no `operation` is a refusal, so it must carry a message: {v}"
+        );
+        assert!(
+            v.get("migrations").is_none(),
+            "and a refusal carries nothing else — if it does now, the pane could show more: {v}"
+        );
+        return;
+    }
+
+    assert_eq!(v["operation"], "migrate");
+    assert!(v["flywayVersion"].is_string(), "the header needs a version");
+    assert!(v["database"].is_string(), "the header names the database");
+    assert!(
+        v["migrationsExecuted"].is_number(),
+        "the summary line counts what ran"
+    );
+    assert!(
+        v["totalMigrationTime"].is_number(),
+        "and says how long it took"
+    );
+    assert!(v["migrations"].is_array(), "the rows come from here");
+}
+
+/// **A migrate report has no `state`.** This is the one that bit: the renderer
+/// read `m.state`, found nothing, and printed an empty column on every row.
+/// `state` belongs to an `info` report, and a migration listed by a *migrate*
+/// is one that ran.
+#[tokio::test]
+#[ignore]
+async fn migrate_rows_have_no_state_but_info_rows_do() {
+    // **This test owns its state.** Inverting the assertion below used to pass:
+    // a previous test had already migrated `qa`, so `migrations[]` came back
+    // empty and the loop never ran. An assertion with nothing to check is not a
+    // test. `clean` empties the fixture schema so the migrate really applies —
+    // `-cleanDisabled=false` because Flyway refuses to clean by default, which
+    // is the right default everywhere except a fixture.
+    clean("probe").await;
+    let migrated = migrate("probe", vec!["-target=3".into()]).await;
+    let rows = report(&migrated)["migrations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !rows.is_empty(),
+        "a clean schema plus `-target=3` must have applied something, or this test checks \
+         nothing: {}",
+        migrated.stdout
+    );
+    for row in &rows {
+        assert!(
+            row["version"].is_string() && row["description"].is_string(),
+            "a row identifies its migration: {row}"
+        );
+        assert!(
+            row["executionTime"].is_number(),
+            "and says how long it took: {row}"
+        );
+        assert!(
+            row.get("state").is_none(),
+            "a migrate row still has no state — the renderer's `Applied` is now wrong: {row}"
+        );
+    }
+
+    // `info` always reports, so this half is unconditional.
+    let listed = info("probe").await;
+    let listed_rows = report(&listed)["migrations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !listed_rows.is_empty(),
+        "the fixture has migrations to list"
+    );
+    for row in &listed_rows {
+        assert!(
+            row["state"].is_string(),
+            "an info row does carry state, which is where the word belongs: {row}"
+        );
+    }
+}
+
+/// **A failure lists what succeeded, and hides 18 KB of Java.**
+///
+/// `development` ends at `V4__deliberately_broken.sql`. What the pane shows
+/// afterwards is the migrations that did run, then `error.message` — and the
+/// reason it cannot show the document is in the numbers here.
+#[tokio::test]
+#[ignore]
+async fn a_failed_migrate_explains_itself_without_its_stack_trace() {
+    // Cleaned first, so this is the **mid-run failure** every time. Run twice
+    // without it, Flyway refuses by validation instead — a document with only
+    // `error` in it, no `success` and no stack traces — and the test failed on
+    // its second run having proved nothing on the first.
+    clean("probe").await;
+    let out = migrate("probe", vec![]).await;
+    assert!(
+        !out.ok(),
+        "V4 is deliberately broken, so this must not succeed"
+    );
+
+    let v = report(&out);
+    assert_eq!(v["success"], false);
+    assert!(
+        !v["migrations"].as_array().unwrap_or(&vec![]).is_empty(),
+        "the migrations that ran before V4 are what the pane shows first: {}",
+        out.stdout
+    );
+
+    let message = v["error"]["message"]
+        .as_str()
+        .expect("the pane shows error.message, so it has to be there");
+    assert!(
+        message.contains("deliberately_broken") || message.contains("Validate"),
+        "the message names the migration or the validation that refused: {message}"
+    );
+
+    // The whole point of rendering rather than printing. Both numbers measured
+    // 2026-10-02: 527 bytes of message inside an 18,480-byte document.
+    assert!(
+        out.stdout.len() > message.len() * 4,
+        "the document is no longer mostly noise ({} bytes against a {}-byte message), so \
+         rendering it rather than printing it may no longer be necessary",
+        out.stdout.len(),
+        message.len()
+    );
+    assert!(
+        out.stdout.contains("stackTrace"),
+        "and the noise is still stack traces, which the pane must not show"
+    );
+}

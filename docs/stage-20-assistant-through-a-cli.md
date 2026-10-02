@@ -1152,3 +1152,65 @@ Where it would earn its place is CI, so a run does not fetch 584 MB. That is
 not built, and is noted here rather than assumed.
 
 **876 UI tests on both engines, 422 Rust, `mise run check` exits 0.**
+
+## 21. Testing L2 and L3 against the fixture — 2026-10-02
+
+> *"Ok and L2 + L3 can me test those with the fixtures?"*
+
+Partly, and the split is worth naming, because the honest answer is not "yes".
+
+**L2 cannot be.** The strip is UI timing — a spinner, an elapsed counter, a
+sentence. The fixture adds nothing a stub does not already give, and the claims
+are already pinned by the Playwright tests.
+
+**L3's rendering cannot be either.** The pane turns a document into lines, which
+is a function of its input. What the fixture *can* do — and now does — is pin
+the **contract**: that what the backend hands the pane is what the pane expects.
+A UI test can only check that against output pasted into it. These check it
+against Flyway.
+
+Five tests in `live_flyway.rs` (`mise run test-flyway`, 15 total now):
+
+* **stderr stays empty**, which is the measurement L1 was cancelled over,
+  pinned so that the day Flyway narrates to stderr a test says so.
+* **A migrate answers in one of three shapes**, which the live run discovered by
+  failing: a report that worked, a report that broke part-way, and a **refusal**
+  carrying `{"error": …}` and nothing else — no `operation`, no `migrations`.
+  The third now has a UI test of its own, because it is the common one: a failed
+  or edited migration refuses before it starts.
+* **Migrate rows carry no `state`, info rows do** — the asymmetry that made the
+  renderer print an empty column.
+* **A failure lists what ran before naming what broke**, and the document is
+  still mostly stack trace.
+
+### 21.1 Two tests that proved nothing, for the same reason
+
+Inverting *"a migrate row has no state"* **passed**: an earlier test had already
+migrated `qa`, so `migrations[]` came back empty and the loop body never ran.
+Inverting the renderer's error handling **passed** too, because the UI fixture
+had been trimmed of the stack traces its assertions forbid.
+
+Same lesson twice in one sitting: **an assertion is worth only what its input
+can violate.** A loop over nothing passes every claim about its contents.
+
+Both are fixed by the test owning its state — `clean` then migrate, so the rows
+are guaranteed — and the UI fixture now carries a real `cause` and a real
+`stackTrace` cut to six frames.
+
+### 21.2 The fixture gained a third database
+
+`flyway_probe`, because a test that must clean cannot share a database with
+tests that expect what `flyway-up` left. Cleaning `development` broke whichever
+test ran next; the suite now passes **twice in a row with no reset**, which is
+the property that was missing.
+
+### 21.3 On the container question
+
+For *measuring Flyway*, a container would have worked. For *testing this app*,
+it cannot: the design is that the app spawns **your own Flyway**, so the fixture
+must be a binary this process can `Command::new`. One inside a container is
+reachable by `podman exec`, which is not the code path under test. Where it
+would earn its place is CI, so a run does not fetch 584 MB — still not built.
+
+**878 UI tests on both engines, 422 Rust, 15 live Flyway tests, `mise run
+check` exits 0.**
