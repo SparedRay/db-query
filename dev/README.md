@@ -68,3 +68,21 @@ CI would pay a ~3 GB image and a ~1 GB model on every run to assert something
 non-deterministic — a 1.5B model's SQL varies run to run. The adapter's
 *behaviour* is pinned by 240 offline unit tests; this fixture exists to prove
 the wire format once, by hand, against something real.
+
+## When the disk fills up
+
+`cargo` never prunes `src-tauri/target/`: every dependency version and every
+test binary ever built stays in it. On 2026-10-01 `target/debug` had reached
+**97 GB** on the development machine, while a complete rebuild of it needs
+**3.2 GB** and 82 seconds — so almost all of it was accumulation, not need.
+
+```bash
+mise run clean        # reclaims target/debug, keeps release
+```
+
+Worth knowing because of how a full disk announces itself: the **linker** fails,
+and reports it as an opaque `linking with cc failed` with a wall of object
+files. `df -h .` is the first thing to check when a build breaks that way.
+
+The fixture containers are the other few gigabytes (`podman system df`), but
+those are images you want to keep unless you are done with a fixture entirely.

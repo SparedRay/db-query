@@ -210,6 +210,24 @@ run = "podman stop db-query-ollama && podman rm db-query-ollama"
 # three each spend one request on the person's own subscription, which is why
 # this is a task they run rather than part of `check`. `CLI_RECIPE=claude`
 # switches which CLI is exercised.
+# Cargo never prunes `target/`: every dependency version and every test binary
+# you have ever built stays there. Measured 2026-10-01 on this machine —
+# `target/debug` had reached **97 GB**, of which a complete rebuild needed
+# **3.2 GB**, in 82 seconds. So this is cheap, and worth running whenever disk
+# gets tight rather than once it is full (a full disk fails the *linker*, which
+# reports it as a mysterious `cc` error).
+#
+# `release/` and the Windows cross-build are left alone: they are small, and a
+# release rebuild is slow (`lto`, `codegen-units = 1`).
+[tasks.clean]
+description = "Reclaim the debug build tree (keeps release)"
+run = """
+before=$(du -sh src-tauri/target 2>/dev/null | cut -f1)
+rm -rf src-tauri/target/debug
+echo "target/ was $before, now $(du -sh src-tauri/target 2>/dev/null | cut -f1); next build is a full one"
+df -h . | tail -1
+"""
+
 [tasks.test-cli]
 description = "The agent-CLI provider, against a real Copilot or Claude CLI"
 run = """
