@@ -938,3 +938,65 @@ it, which is a feature rather than a fix, and is written down here rather than
 half-done.
 
 **852 UI tests on both engines, 422 Rust, `mise run check` exits 0.**
+
+## 18. Three more, from using it — 2026-10-02
+
+### 18.1 The check before the confirmation is a Flyway run too
+
+> *"when we click on apply. First time it will check on Flyway if theres
+> something to apply but it does not show any loader until we confirm"*
+
+§17 put the spinner on the run and missed the **pre-check**: Apply and Repair
+each ask Flyway what is pending first, so the dialog can name it. That is a
+second JVM start, seconds long, and it reported nothing — so the click sat
+there, and the loader only appeared after the confirmation.
+
+`whileBusy(btn, label, work)` wraps a call with the spinner and puts the undo in
+a `finally` once rather than in each caller. Both pre-checks say "Checking…",
+and the button is given back for the dialog, because nothing is running while
+somebody reads it.
+
+### 18.2 A migrations tab showed the last query's rows
+
+> *"when we open the migration tab it still shows the last result set which
+> creates some confusion"*
+
+The grid is shared with the editor, and `onActivate`'s migrations branch
+**returned before anything repainted it** — so another tab's result set sat
+there looking like Flyway's output. It calls `showResults(tab)` now, which
+already knew what a migrations tab should say.
+
+That exposed the other half: a migrations tab has no `result`, because its
+outcomes are sentences rather than rows, so painting it would have *erased* the
+answer to the repair you just ran. Outcomes are recorded on the tab
+(`MigrationsRef.lastOutcome`) by one function every caller goes through, and
+come back when you do.
+
+### 18.3 The version ran over the description
+
+> *"the migration name is sort of overlapping the migration version"*
+
+Measured rather than eyeballed, and the first measurement was **wrong**: the
+gaps between the three cells were a clean 8px at every window width, so the
+first probe said there was nothing to fix. The gap is between *boxes*. The
+version cell in the migrations view was a fixed `56px`, and `20260214093000`
+needs **93px** in that font — it overflowed its cell by 37 and ran straight over
+the name, at every width, for every timestamp-style version.
+
+`minmax(56px, max-content)`: short versions still line up at 56px, long ones
+take the room they need, and the description — which already ends in an
+ellipsis — is the one that yields. A version is the migration's identity, so it
+is not the thing to truncate.
+
+The lesson worth keeping: **a layout measurement has to measure the thing being
+complained about.** Box geometry looked perfect while text was spilling out of
+it; `scrollWidth > clientWidth` was what found it.
+
+### 18.4 Proof
+
+Five UI tests, all three falsified: a fixed `56px` fails the overflow test,
+dropping the pre-check wrapper fails *"Apply shows the wait while it works out
+what is pending"*, and restoring the early `return` fails *"opening migrations
+clears the editor's result set"*.
+
+**862 UI tests on both engines, 422 Rust, `mise run check` exits 0.**

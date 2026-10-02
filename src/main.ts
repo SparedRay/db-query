@@ -1562,7 +1562,7 @@ function showResultsInner(tab: ScriptTab) {
   if (!tab.result) {
     results.setMessage(
       tab.kind === "migrations"
-        ? "What Flyway did will appear here."
+        ? (tab.migrations?.lastOutcome ?? "What Flyway did will appear here.")
         : connected
           ? "No results yet. Ctrl+Enter to run."
           : "Not connected.",
@@ -2067,6 +2067,10 @@ tabs = new TabManager($("script-tabs"), view, {
       };
       drawProjects();
       syncBusy();
+      // The grid is shared with the editor, and this branch used to return
+      // before anything repainted it — so opening a migrations tab left the
+      // last query's rows on screen, which reads as though they were Flyway's.
+      showResults(tab);
       // Only when it would show something else: switching back to a list you
       // were already looking at must not start a JVM.
       if (migViewShowing !== selectedKey()) void showSelected();
@@ -3366,6 +3370,38 @@ function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
   };
 }
 
+/**
+ * Run something with a spinner on the button that started it.
+ *
+ * Preferred over using `buttonBusy` directly: the undo is in a `finally` here,
+ * once, instead of in every caller.
+ */
+async function whileBusy<T>(
+  btn: HTMLButtonElement,
+  label: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const done = buttonBusy(btn, label);
+  try {
+    return await work();
+  } finally {
+    done();
+  }
+}
+
+/**
+ * Report what Flyway did, and remember it on the tab.
+ *
+ * The grid is shared with the editor, so an outcome left only there is lost the
+ * moment another tab paints over it. Recording it here means every caller keeps
+ * it without having to remember to.
+ */
+function migrationsOutcome(text: string) {
+  results.setMessage(text);
+  const ref = tabs?.active()?.migrations;
+  if (ref) ref.lastOutcome = text;
+}
+
 function migUi(): MigUi {
   return {
     projects: els.migSideBody,
@@ -4064,9 +4100,13 @@ async function applyMigrations(upTo?: string) {
   const { project, env } = target;
   const key = selKey(project.id, env.id);
   const outOfOrder = outOfOrderFor(key);
-  const list = await api
-    .flywayInfo(project.id, env.id, settings.flywayPath, outOfOrder)
-    .catch(() => null);
+  // **Before the confirmation, not after.** This is a second Flyway run — a
+  // JVM start, seconds — asked so the dialog can name what will actually be
+  // applied. It reported nothing at all, so the click sat there: reported as
+  // "it does not show any loader until we confirm".
+  const list = await whileBusy(migUi().apply, "Checking\u2026", () =>
+    api.flywayInfo(project.id, env.id, settings.flywayPath, outOfOrder).catch(() => null),
+  );
   if (!list) return void showSelected();
 
   const pending = list.filter((m) => m.group === "pending");
@@ -4105,7 +4145,7 @@ async function applyMigrations(upTo?: string) {
       stop === -1 ? null : (upTo ?? null),
     );
     const refreshed = await refreshMatchedSchemas(env);
-    results.setMessage(
+    migrationsOutcome(
       `Flyway applied ${out.executed} migration${out.executed === 1 ? "" : "s"} to ${env.id}` +
         (out.target ? ` · now at ${out.target}` : "") +
         (refreshed.length
@@ -4116,7 +4156,7 @@ async function applyMigrations(upTo?: string) {
     // Flyway's own words, verbatim. It names the file, the line and the SQL
     // error, and a paraphrase would throw all three away.
     const failure = err as Partial<FlywayApplyFailed>;
-    results.setMessage(failure.message ?? String(err));
+    migrationsOutcome(failure.message ?? String(err));
     // And if Flyway said the way out is a repair, make one reachable. It is
     // the only signal for a checksum mismatch, which shows up nowhere in the
     // list.
@@ -4184,9 +4224,9 @@ async function repairMigrations() {
   const { project, env } = target;
   const key = selKey(project.id, env.id);
 
-  const list = await api
-    .flywayInfo(project.id, env.id, settings.flywayPath, outOfOrderFor(key))
-    .catch(() => null);
+  const list = await whileBusy(migUi().repair, "Checking\u2026", () =>
+    api.flywayInfo(project.id, env.id, settings.flywayPath, outOfOrderFor(key)).catch(() => null),
+  );
   if (!list) return void showSelected();
   const failed = list.filter((m) => m.group === "failed");
 
@@ -4238,7 +4278,7 @@ async function repairMigrations() {
     );
     migrationsRepairAsked.delete(key);
     const touched = [...out.removed, ...out.deleted, ...out.aligned];
-    results.setMessage(
+    migrationsOutcome(
       touched.length === 0
         ? // Success and "nothing needed doing" are different answers, and
           // reporting the second as the first tells somebody their problem is
@@ -4250,7 +4290,7 @@ async function repairMigrations() {
     );
   } catch (err) {
     // Flyway's own words, verbatim.
-    results.setMessage(String(err));
+    migrationsOutcome(String(err));
   } finally {
     doneBusy();
   }

@@ -22,6 +22,14 @@ export type TabKind = "sql" | "migrations";
 export interface MigrationsRef {
   projectId: string;
   environment: string;
+  /**
+   * What Flyway last did here, so switching away and back shows it again.
+   *
+   * A migrations tab has no `result` — its outcomes are sentences, not rows —
+   * so without this the grid either kept the previous tab's result set or
+   * forgot the answer the moment you looked at something else.
+   */
+  lastOutcome?: string;
 }
 
 export interface ScriptTab {

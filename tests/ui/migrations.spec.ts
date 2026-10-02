@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, commandNames, connect, installBackend, schemaBackend } from "./harness";
+import { calls, commandNames, connect, installBackend, rowsResult, schemaBackend } from "./harness";
 
 /**
  * The migrations pane.
@@ -996,6 +996,22 @@ test("the section collapses and expands from its caret", async ({ page }) => {
  * on the control somebody is already looking at.
  */
 
+/**
+ * Answer the first `flyway_info` normally and gate every call after it.
+ *
+ * The migrations view loads its list on arrival, so gating the command outright
+ * leaves nothing on screen and the click under test never becomes possible. The
+ * pre-check a click makes is the *second* call.
+ */
+function gateAfterFirst<T>(first: T) {
+  let seen = 0;
+  const gate = held();
+  return {
+    stub: () => (seen++ === 0 ? (first as unknown) : gate.promise),
+    release: gate.release,
+  };
+}
+
 /** A gate, so "while Flyway is running" is a state rather than a race. */
 function held() {
   let release!: (v: unknown) => void;
@@ -1065,4 +1081,121 @@ test("a Flyway failure gives the button back", async ({ page }) => {
   const btn = page.locator("#btn-mig-view-repair");
   await expect(btn.locator(".spinner")).toHaveCount(0);
   await expect(btn).toContainText("Repair");
+});
+
+/**
+ * **The check before the confirmation is a Flyway run too.**
+ *
+ * Apply asks Flyway what is pending so the dialog can name it — a second JVM
+ * start, seconds long, which reported nothing. Reported as "it does not show
+ * any loader until we confirm".
+ */
+test("Apply shows the wait while it works out what is pending", async ({ page }) => {
+  const gate = gateAfterFirst(PENDING_ONLY);
+  await withProject(page, { flyway_info: gate.stub });
+  const btn = page.locator("#btn-mig-view-apply");
+
+  await page.click("#btn-mig-view-apply");
+  await expect(btn.locator(".spinner")).toBeVisible();
+  await expect(btn).toContainText("Checking");
+  // And no dialog yet — this is the part that used to look like nothing.
+  await expect(page.locator("dialog.ask")).toHaveCount(0);
+
+  gate.release(PENDING_ONLY);
+  await expect(page.locator("dialog.ask")).toBeVisible();
+  // Given back for the dialog: nothing is running while somebody reads it.
+  await expect(btn.locator(".spinner")).toHaveCount(0);
+});
+
+test("Repair shows the wait while it checks, before asking", async ({ page }) => {
+  const gate = gateAfterFirst(MIGRATIONS);
+  await withProject(page, { flyway_info: gate.stub });
+  const btn = page.locator("#btn-mig-view-repair");
+
+  await page.click("#btn-mig-view-repair");
+  await expect(btn.locator(".spinner")).toBeVisible();
+  await expect(btn).toContainText("Checking");
+  await expect(page.locator("dialog.ask")).toHaveCount(0);
+
+  gate.release(MIGRATIONS);
+  await expect(page.locator("dialog.ask")).toBeVisible();
+});
+
+/**
+ * **A migrations tab must not show the last query's rows.** The grid is shared
+ * with the editor, and activating a migrations tab returned before anything
+ * repainted it — so somebody else's result set sat there looking like Flyway's.
+ */
+test("opening migrations clears the editor's result set", async ({ page }) => {
+  await connect(
+    page,
+    flyway([project()], {
+      statement_at_cursor: () => ({ sql: "SELECT 1", start: 0 }),
+      run_script: () => rowsResult([{ name: "n" }], [[1]]),
+    }),
+  );
+  // A real result in the grid first.
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.type("select 1");
+  await page.keyboard.press("Control+Enter");
+  await expect(page.locator("#grid table")).toBeVisible();
+
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await expect(page.locator(".mig").first()).toBeVisible();
+  // Not the rows, and not silence either.
+  await expect(page.locator("#grid table")).toHaveCount(0);
+  await expect(page.locator("#grid .empty")).toContainText("What Flyway did will appear here");
+});
+
+/** And an outcome survives a trip to another tab and back. */
+test("what Flyway did is still there when you come back", async ({ page }) => {
+  // Connected, so there is a SQL tab to switch away to: opening the
+  // environment on its own creates the only tab there is.
+  await connect(page, flyway([project()]));
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await page.locator(".mig").first().waitFor();
+
+  await page.click("#btn-mig-view-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
+
+  // Away to the SQL tab and back.
+  await page.locator("#script-tabs .stab").first().click();
+  await expect(page.locator("#grid .empty")).not.toContainText("Removed failed migrations");
+
+  await page.locator('#script-tabs .stab:has-text("uat")').click();
+  await expect(page.locator("#grid .empty")).toContainText("Removed failed migrations");
+});
+
+/**
+ * **A version is the migration's identity, so it gets the width it needs.**
+ *
+ * The cell was a fixed 56px, which fits "V1" and spills a timestamp version
+ * over the description: measured, `20260214093000` needs 93px in this font and
+ * overflowed by 37, at every window width.
+ */
+test("a long version does not run over the description", async ({ page }) => {
+  await withProject(page, {
+    // Pending, so the group is open and the cells have geometry to measure.
+    flyway_info: () => [
+      { ...PENDING_ONLY[0], version: "20260214093000", description: "add a column" },
+      { ...PENDING_ONLY[0], version: "1", description: "create widgets" },
+    ],
+  });
+
+  const cells = await page.locator(".mig .v").evaluateAll((els) =>
+    els.map((e) => ({
+      text: e.textContent,
+      overflowsBy: e.scrollWidth - e.clientWidth,
+    })),
+  );
+  expect(cells.length).toBeGreaterThan(0);
+  for (const c of cells) {
+    expect(c.overflowsBy, `version ${c.text} spills out of its cell`).toBeLessThanOrEqual(0);
+  }
+  // Short versions still line up with each other rather than each hugging text.
+  const widths = await page.locator(".mig .v").evaluateAll((els) =>
+    els.map((e) => Math.round(e.getBoundingClientRect().width)),
+  );
+  expect(Math.min(...widths)).toBeGreaterThanOrEqual(56);
 });
