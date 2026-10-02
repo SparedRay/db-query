@@ -30,6 +30,14 @@ export interface MigrationsRef {
    * forgot the answer the moment you looked at something else.
    */
   lastOutcome?: string;
+  /**
+   * Flyway's own report from that run, as the pane shows it.
+   *
+   * Per tab rather than global: the backend keeps only the newest run, and a
+   * tab on `uat` must not show the report from the one you just did on
+   * `development`.
+   */
+  lastReport?: import("./api").FlywayLastRun | null;
 }
 
 export interface ScriptTab {

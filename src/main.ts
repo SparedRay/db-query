@@ -46,7 +46,7 @@ import { icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
-import { TabManager, clearResult, type ScriptTab } from "./tabs";
+import { TabManager, clearResult, type ScriptTab, type TabKind } from "./tabs";
 import {
   ConnectionManager, COLOURS, newConnectionId, type ConnectionEntry,
 } from "./connections";
@@ -127,6 +127,12 @@ const els = {
   aiHttpFields: $<HTMLElement>("ai-http-fields"),
   setIntegrations: $<HTMLElement>("set-integrations"),
   setFlywayRow: $<HTMLElement>("set-flyway-row"),
+  migProgress: $<HTMLElement>("mig-progress"),
+  flywayPane: $<HTMLElement>("flyway-pane"),
+  flywayBody: $<HTMLElement>("flyway-body"),
+  flywayWhen: $<HTMLElement>("flyway-when"),
+  btnFlywayToggle: $<HTMLButtonElement>("btn-flyway-toggle"),
+  resultTabs: $<HTMLElement>("tabs"),
   historyDialog: $<HTMLDialogElement>("history-dialog"),
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
@@ -1562,7 +1568,10 @@ function showResultsInner(tab: ScriptTab) {
   if (!tab.result) {
     results.setMessage(
       tab.kind === "migrations"
-        ? (tab.migrations?.lastOutcome ?? "What Flyway did will appear here.")
+        ? // Unreachable in practice: a migrations tab shows the Flyway pane
+          // rather than the grid. Kept correct rather than removed, because
+          // `showResults` is reachable from the export bar.
+          "Flyway's output is below."
         : connected
           ? "No results yet. Ctrl+Enter to run."
           : "Not connected.",
@@ -2067,10 +2076,10 @@ tabs = new TabManager($("script-tabs"), view, {
       };
       drawProjects();
       syncBusy();
-      // The grid is shared with the editor, and this branch used to return
-      // before anything repainted it — so opening a migrations tab left the
-      // last query's rows on screen, which reads as though they were Flyway's.
-      showResults(tab);
+      // The grid belongs to a query. A migrations tab shows Flyway's output in
+      // its place — see `showResultsSurface`.
+      showResultsSurface("migrations");
+      showFlywayOutput();
       // Only when it would show something else: switching back to a list you
       // were already looking at must not start a JVM.
       if (migViewShowing !== selectedKey()) void showSelected();
@@ -2081,6 +2090,7 @@ tabs = new TabManager($("script-tabs"), view, {
     setDialect(view, tab.dialect);
     setSchema(view, schemaMap);
     applyLintSetting(true);
+    showResultsSurface("sql");
     showResults(tab);
     syncBusy();
     refreshFileNote();
@@ -3370,7 +3380,181 @@ function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
   };
 }
 
+// ------------------------------------------- Flyway's output, where the grid was
+//
+// A migrations tab has no result set: its answers are a sentence and a report.
+// So the pane that holds the SQL grid holds Flyway's output instead — a swap,
+// not a second region, because a tab with two scrolling panes one of which is
+// always empty is worse than either.
+
+/** Whether the output body is open. Per session: a run is the reason to look. */
+let flywayOutputOpen = true;
+
+/** Show either the result grid or Flyway's output, never both. */
+function showResultsSurface(kind: TabKind) {
+  const flyway = kind === "migrations";
+  els.flywayPane.hidden = !flyway;
+  els.resultTabs.hidden = flyway;
+  $("grid").hidden = flyway;
+}
+
+/** One migration's line in the report. */
+function reportRow(m: Record<string, unknown>): HTMLElement {
+  const state = String(m.state ?? "");
+  const row = elem("div", "fw-mig");
+  // Flyway's own words for the state, and our colour: `Success` and `Pending`
+  // are not judgements we make.
+  if (/success|baseline/i.test(state)) row.classList.add("ok");
+  if (/fail|error|undone/i.test(state)) row.classList.add("bad");
+  const ms = typeof m.executionTime === "number" ? `${m.executionTime} ms` : "";
+  row.append(
+    elem("span", "fw-ver", String(m.version ?? m.rawVersion ?? "\u2014")),
+    elem("span", "fw-desc", String(m.description ?? "")),
+    elem("span", "fw-state", [state, ms].filter(Boolean).join(" \u00b7 ")),
+  );
+  return row;
+}
+
 /**
+ * Render what Flyway said.
+ *
+ * `stdout` is a **JSON document** — every operation is run with
+ * `-outputType=json` — so printing it raw would put a wall of braces in a pane
+ * somebody opened to read a report. The fields used here are the ones in the
+ * captured fixtures in `flywaycli.rs`: `flywayVersion`, `database`,
+ * `operation`, `migrations[]` and `error`. Anything that will not parse is
+ * shown verbatim, because a Flyway that printed something unexpected is
+ * exactly when you want to see it unedited.
+ */
+function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRun) {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+  } catch {
+    parsed = null;
+  }
+
+  if (!parsed) {
+    if (run.stdout.trim()) host.append(elem("div", "fw-line", run.stdout.trim()));
+    if (run.stderr.trim()) host.append(elem("div", "fw-line", run.stderr.trim()));
+    if (!run.stdout.trim() && !run.stderr.trim()) {
+      host.append(elem("div", "fw-note", `Flyway printed nothing (exit ${run.code ?? "?"}).`));
+    }
+    return;
+  }
+
+  const head = [
+    parsed.flywayVersion ? `Flyway ${parsed.flywayVersion}` : null,
+    parsed.operation ? String(parsed.operation) : run.op,
+    parsed.database ? `database ${parsed.database}` : null,
+  ]
+    .filter(Boolean)
+    .join("  \u00b7  ");
+  if (head) host.append(elem("div", "fw-head", head));
+
+  const migrations = Array.isArray(parsed.migrations) ? parsed.migrations : [];
+  for (const m of migrations) {
+    host.append(reportRow(m as Record<string, unknown>));
+  }
+
+  const error = parsed.error as Record<string, unknown> | undefined;
+  if (error) {
+    host.append(
+      elem("div", "fw-err", String(error.message ?? "Flyway refused and said nothing more.")),
+    );
+  }
+
+  // Flyway's own stderr, kept verbatim underneath: it is where a JVM warning
+  // or a driver complaint turns up, and those are never in the report.
+  if (run.stderr.trim()) host.append(elem("div", "fw-line", run.stderr.trim()));
+
+  if (!head && migrations.length === 0 && !error && !run.stderr.trim()) {
+    host.append(elem("div", "fw-note", "Flyway reported nothing for this run."));
+  }
+}
+
+/** Paint the output pane for whichever migrations tab is in front. */
+function showFlywayOutput() {
+  const ref = tabs?.active()?.migrations ?? null;
+  els.flywayBody.replaceChildren();
+  els.flywayBody.classList.toggle("hidden", !flywayOutputOpen);
+  els.btnFlywayToggle.textContent = flywayOutputOpen ? "Hide" : "Show";
+  els.btnFlywayToggle.setAttribute("aria-expanded", String(flywayOutputOpen));
+
+  if (!ref?.lastReport && !ref?.lastOutcome) {
+    els.flywayWhen.textContent = "";
+    els.flywayBody.append(
+      elem("div", "fw-note", "Nothing has run here yet. Apply or Repair will report in full."),
+    );
+    return;
+  }
+  els.flywayWhen.textContent = ref.lastReport?.op ? `\u00b7 ${ref.lastReport.op}` : "";
+  // Our sentence first — it is the answer — then Flyway's own account of it.
+  if (ref.lastOutcome) els.flywayBody.append(elem("div", "fw-outcome", ref.lastOutcome));
+  if (ref.lastReport) renderFlywayReport(els.flywayBody, ref.lastReport);
+}
+
+els.btnFlywayToggle.onclick = () => {
+  flywayOutputOpen = !flywayOutputOpen;
+  showFlywayOutput();
+};
+
+/**
+ * Keep the report from the run that just finished.
+ *
+ * Fetched **immediately**, before anything re-reads the list: the backend keeps
+ * only the newest run, and `showSelected` asks Flyway for `info`, which would
+ * replace a migrate's report with that.
+ */
+async function captureFlywayRun() {
+  const ref = tabs?.active()?.migrations;
+  if (!ref) return;
+  ref.lastReport = await api.flywayLastRun().catch(() => null);
+}
+
+/**
+ * L2: what is known while Flyway runs.
+ *
+ * Not a progress bar. With `-outputType=json` Flyway emits one document when
+ * it finishes, so the app knows what it asked for and how long it has waited,
+ * and does **not** know which migration is in flight. The note says so, rather
+ * than animating over it.
+ */
+let migProgressTimer: number | null = null;
+function migProgressShow(title: string, what: string) {
+  const started = Date.now();
+  els.migProgress.hidden = false;
+  els.migProgress.replaceChildren();
+
+  const spinner = elem("span", "spinner");
+  spinner.setAttribute("aria-hidden", "true");
+  const text = elem("div", "mig-progress-text");
+  const line = elem("b", "", title);
+  const detail = elem("div", "mig-progress-what", what);
+  const note = elem("div", "mig-progress-note", "");
+  text.append(line, detail, note);
+  els.migProgress.append(spinner, text);
+  els.migProgress.setAttribute("role", "status");
+
+  const tick = () => {
+    const secs = Math.round((Date.now() - started) / 1000);
+    note.textContent =
+      `Running for ${secs}s. Flyway reports when it finishes, not as it goes.`;
+  };
+  tick();
+  if (migProgressTimer !== null) window.clearInterval(migProgressTimer);
+  migProgressTimer = window.setInterval(tick, 1000);
+}
+
+function migProgressHide() {
+  if (migProgressTimer !== null) window.clearInterval(migProgressTimer);
+  migProgressTimer = null;
+  els.migProgress.hidden = true;
+  els.migProgress.replaceChildren();
+}
+
+/**
+ * Run something with a spinner on the button that started it./**
  * Run something with a spinner on the button that started it.
  *
  * Preferred over using `buttonBusy` directly: the undo is in a `finally` here,
@@ -3397,9 +3581,12 @@ async function whileBusy<T>(
  * it without having to remember to.
  */
 function migrationsOutcome(text: string) {
-  results.setMessage(text);
   const ref = tabs?.active()?.migrations;
   if (ref) ref.lastOutcome = text;
+  // Into the output pane, which is what this tab has instead of a grid. It
+  // used to go through `results.setMessage`, which painted a surface a
+  // migrations tab no longer shows.
+  showFlywayOutput();
 }
 
 function migUi(): MigUi {
@@ -4132,7 +4319,11 @@ async function applyMigrations(upTo?: string) {
   if (go !== "go") return;
 
   const doneBusy = buttonBusy(migUi().apply, "Applying\u2026");
-  migrationsMessage("Flyway is applying…");
+  // What we know: the operation, where, and which migrations were asked for.
+  migProgressShow(
+    `Applying ${pending.length} migration${pending.length === 1 ? "" : "s"} to ${env.id}`,
+    pending.map((m) => (m.version ? `V${m.version}` : m.description)).join(", "),
+  );
   try {
     const out = await api.flywayMigrate(
       project.id,
@@ -4162,6 +4353,13 @@ async function applyMigrations(upTo?: string) {
     // list.
     if (failure.suggestsRepair) migrationsRepairAsked.add(key);
   } finally {
+    // Before `showSelected` below, which asks Flyway for `info` and would
+    // replace this run's report with that one.
+    await captureFlywayRun();
+    // After the capture: the outcome sentence was already painted, and the
+    // report arrives a moment later.
+    showFlywayOutput();
+    migProgressHide();
     doneBusy();
   }
   await showSelected();
@@ -4268,7 +4466,12 @@ async function repairMigrations() {
   if (go !== "go") return;
 
   const doneBusy = buttonBusy(migUi().repair, "Repairing\u2026");
-  migrationsMessage("Flyway is repairing\u2026");
+  migProgressShow(
+    `Repairing the schema history of ${env.id}`,
+    failed.length
+      ? failed.map((m) => (m.version ? `V${m.version}` : m.description)).join(", ")
+      : "realigning checksums",
+  );
   try {
     const out = await api.flywayRepair(
       project.id,
@@ -4292,6 +4495,11 @@ async function repairMigrations() {
     // Flyway's own words, verbatim.
     migrationsOutcome(String(err));
   } finally {
+    await captureFlywayRun();
+    // After the capture: the outcome sentence was already painted, and the
+    // report arrives a moment later.
+    showFlywayOutput();
+    migProgressHide();
     doneBusy();
   }
   await showSelected();

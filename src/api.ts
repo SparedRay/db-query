@@ -606,6 +606,19 @@ export type Recipe = "claude" | "copilot";
 export type AiProvider = Provider | "localCli";
 
 /** Where to send questions. Not a secret — the key is separate. */
+/**
+ * What one Flyway run printed.
+ *
+ * `stdout` is a JSON document, because every operation is run with
+ * `-outputType=json` — so the pane renders it rather than printing it.
+ */
+export interface FlywayLastRun {
+  op: string;
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 export interface AssistantConfig {
   provider: AiProvider;
   baseUrl: string;
@@ -920,6 +933,12 @@ export const api = {
    * is opened, not on every settings dialog.
    */
   flywayVersion: (program: string) => invoke<string>("flyway_version", { program }),
+
+  /**
+   * What Flyway printed on its last run, for the migrations tab's output pane.
+   * `null` before anything has run. Free — it is already in memory.
+   */
+  flywayLastRun: () => invoke<FlywayLastRun | null>("flyway_last_run"),
 
   /** Is this CLI installed and signed in? Free — see `agentcli::probe`. */
   assistantCliProbe: (recipe: Recipe) =>
