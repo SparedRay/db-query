@@ -92,33 +92,36 @@ pub fn disabled_tools(text: &str) -> Option<Vec<String>> {
     )
 }
 
-/// Does what the agent disabled cover everything that could change something?
+/// Which write-capable tools the agent did **not** say it disabled.
 ///
-/// `None` for "it never said", which is itself a failure: the line is how this
-/// path knows the flags worked at all, so its absence is not reassurance.
-pub fn guards_hold(disabled: Option<&Vec<String>>) -> Result<(), String> {
+/// Empty is the good answer. `None` input — it never said — yields the whole
+/// list, because silence is not reassurance.
+///
+/// **This reports; it does not refuse.** It used to refuse, and on the first
+/// real question someone asked it stopped a perfectly good answer: the
+/// `Disabled tools:` line differed from the one every probe here produced, so
+/// the check turned a difference in *wording* into a refusal. Prose was never
+/// the thing protecting anybody — [`Update::ToolCall`] is, and the layers
+/// behind it are:
+///
+/// 1. the allowlist flag, which empties the tool set;
+/// 2. no `--allow-all-tools`, so nothing is approved without being asked;
+/// 3. every request the agent makes of us is answered with an error, since we
+///    advertised no capability — a permission request included;
+/// 4. any `tool_call` at all aborts the turn.
+///
+/// A model cannot act without a `tool_call` reaching us, so that is where the
+/// guarantee lives. What this line adds is corroboration worth recording, and
+/// recording it is now all it does.
+pub fn undisabled(disabled: Option<&Vec<String>>) -> Vec<&'static str> {
     let Some(disabled) = disabled else {
-        return Err(
-            "Copilot CLI did not report disabling its tools, so this answer was stopped. \
-             The assistant is only allowed to run with none."
-                .to_string(),
-        );
+        return MUST_BE_DISABLED.to_vec();
     };
-    let missing: Vec<&str> = MUST_BE_DISABLED
+    MUST_BE_DISABLED
         .iter()
         .copied()
         .filter(|t| !disabled.iter().any(|d| d == t))
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "Copilot CLI left {} available to the model ({}). The assistant is not allowed any \
-         tool that can change something, so this answer was stopped. Please report this — \
-         the flags that remove them have changed.",
-        if missing.len() == 1 { "a tool" } else { "tools" },
-        missing.join(", ")
-    ))
+        .collect()
 }
 
 /// Read one `session/update`'s `update` object.
@@ -375,10 +378,15 @@ impl Agent {
                     if cancelling || stop == "cancelled" {
                         return Ok(None);
                     }
-                    // Checked when the turn ends as well as when the line
-                    // arrives, so a turn that never mentioned its tools is
-                    // refused rather than quietly trusted.
-                    guards_hold(self.disabled.lock().await.as_ref())?;
+                    // A turn that never mentioned its tools is noted once, not
+                    // refused: the refusal that matters is on `tool_call`.
+                    if self.disabled.lock().await.is_none() {
+                        crate::logbook::info(
+                            "assistant",
+                            "Copilot did not say which tools it disabled. Any tool call is \
+                             still refused.",
+                        );
+                    }
                     return Ok(Some(stop.to_string()));
                 }
                 update = updates.recv() => {
@@ -407,9 +415,19 @@ impl Agent {
                     match classify(&update) {
                         Update::Chunk(text) => emit(Outcome::Text(text)),
                         Update::Disabled(names) => {
-                            if let Err(message) = guards_hold(Some(&names)) {
-                                let _ = self.notify("session/cancel", json!({ "sessionId": self.session })).await;
-                                return Err(message);
+                            // Recorded, not enforced. See `undisabled`.
+                            let left = undisabled(Some(&names));
+                            if !left.is_empty() {
+                                crate::logbook::warn(
+                                    "assistant",
+                                    format!(
+                                        "Copilot did not list {} among its disabled tools. \
+                                         No tool can run without a tool_call, which is refused, \
+                                         but the list it gave was: {}",
+                                        left.join(", "),
+                                        names.join(", ")
+                                    ),
+                                );
                             }
                             *self.disabled.lock().await = Some(names);
                         }
@@ -502,26 +520,28 @@ mod tests {
     }
 
     #[test]
-    fn a_full_disabled_list_passes_the_guard() {
+    fn a_full_disabled_list_leaves_nothing_to_report() {
         let names = disabled_tools(DISABLED_LINE).unwrap();
-        assert!(guards_hold(Some(&names)).is_ok());
+        assert!(undisabled(Some(&names)).is_empty());
     }
 
-    /// The case the guard exists for: the flags stopped working and `bash` is
-    /// back. The message has to name it.
+    /// A shorter list is *reported*, by name, and no longer refuses the answer.
+    ///
+    /// It did refuse, and the first real question someone asked was stopped by
+    /// it: the line their CLI produced differed from the one every probe here
+    /// produced, so a difference in wording became a refusal. The guarantee
+    /// never lived in the prose — it lives in `ToolCall` below.
     #[test]
-    fn a_tool_that_can_write_fails_the_guard_by_name() {
-        let names: Vec<String> = ["create", "edit", "sql"].iter().map(|s| s.to_string()).collect();
-        let err = guards_hold(Some(&names)).expect_err("bash is missing from the disabled list");
-        assert!(err.contains("bash"), "{err}");
-        assert!(err.contains("stopped"), "{err}");
+    fn a_missing_write_tool_is_named_rather_than_fatal() {
+        let names: Vec<String> = ["bash", "sql"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(undisabled(Some(&names)), vec!["edit", "create"]);
     }
 
-    /// Saying nothing is not the same as saying nothing is wrong.
+    /// Saying nothing is not the same as saying nothing is wrong — it reports
+    /// everything, and still does not refuse.
     #[test]
-    fn a_turn_that_never_mentioned_its_tools_is_refused() {
-        let err = guards_hold(None).expect_err("silence is not reassurance");
-        assert!(err.contains("did not report"), "{err}");
+    fn silence_reports_every_write_tool() {
+        assert_eq!(undisabled(None), MUST_BE_DISABLED.to_vec());
     }
 
     #[test]

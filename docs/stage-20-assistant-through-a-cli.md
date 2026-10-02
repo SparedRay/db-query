@@ -682,3 +682,56 @@ turn leaves the session usable** (answered again in 1.5 s). Six live tests in
 all, `mise run test-cli`.
 
 **422 Rust tests, 826 UI on both engines, `mise run check` clean.**
+
+## 14. Found in use — the prose guard refused a good answer, 2026-10-01
+
+> *"For copilot I got this after the first question: Copilot CLI left tools
+> available to the model (edit, create). … No response received"*
+
+§12.3 said the ACP path's tool check was the weaker one and §13 shipped it as a
+**hard refusal** anyway. On the first real question anybody asked, it stopped a
+perfectly good answer: the `Disabled tools:` line that CLI produced did not name
+`edit` and `create`, so a difference in the agent's *wording* became a refusal
+with nothing to show for it.
+
+Reproduced first, with the recipe's exact arguments, and the line came back
+complete — `bash, create, dynamic_workflows_manage, edit, …` — so the cause is
+not the flags. Something about that run produced a shorter list, and the honest
+summary is that **we do not know what the line will say**, which is the whole
+problem with having depended on it.
+
+### 14.1 Where the guarantee actually lives
+
+It was never the prose. A model cannot act without a `tool_call` reaching us,
+and four things stand between it and that:
+
+1. the allowlist flag, which empties the tool set;
+2. no `--allow-all-tools`, so nothing is approved without being asked;
+3. every request the agent makes of *us* is answered with an error — we
+   advertised no capability, a permission request included;
+4. any `tool_call` at all cancels the turn and refuses the answer.
+
+So the `Disabled tools:` line is now **recorded, not enforced**: when it fails
+to name a write-capable tool the logbook says so, with the list it did give, and
+the answer continues. The refusal that matters stays exactly where it was.
+
+### 14.2 What this cost, and the lesson
+
+A user's first question, and their confidence that the feature works. The
+mistake was not the check — corroborating a vendor's claim is reasonable — it
+was making a *refusal* out of a signal already documented, two sections
+earlier, as the weak one. **A guard built on prose should warn; only a guard
+built on behaviour should refuse.**
+
+Tests follow the change in meaning rather than being deleted:
+`a_missing_write_tool_is_named_rather_than_fatal` pins that a short list is
+reported by name and is not fatal, and `silence_reports_every_write_tool` pins
+that saying nothing reports everything and still does not refuse.
+
+Not covered by a test, and said plainly: the `tool_call` abort and the refusal
+of agent-side requests are exercised only by the code path, because a CLI with
+no tools cannot be made to call one. They are three lines each, and both would
+be worth a fake ACP agent on stdio if this path grows.
+
+**422 Rust tests, `mise run check` clean. The session path re-verified live:
+3.8 s then 1.8 s.**
