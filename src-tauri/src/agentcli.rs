@@ -53,7 +53,7 @@ use crate::assistant::ChatMessage;
 const NO_SUCH_TOOL: &str = "__db_query_no_tools__";
 
 /// Which CLI. A closed list — see the module docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Recipe {
     Claude,
@@ -194,6 +194,36 @@ impl Recipe {
                 s("-C"),
                 cwd.display().to_string(),
             ],
+        }
+    }
+
+    /// Arguments for holding this CLI open as an ACP session.
+    ///
+    /// The same hardening as [`Self::ask_args`] — the allowlist that matches
+    /// nothing, no custom instructions, no built-in MCP servers, no logging of
+    /// the person's schema — minus the one-shot pieces: there is no `-p`, and
+    /// the output format is the protocol itself rather than JSONL.
+    ///
+    /// Only Copilot has this. Claude's long-lived transport is
+    /// `--input-format stream-json`, which is a different shape and not yet
+    /// built, so Claude still runs one process per message.
+    pub fn session_args(self) -> Option<Vec<String>> {
+        let s = |x: &str| x.to_string();
+        match self {
+            Self::Claude => None,
+            Self::Copilot => Some(vec![
+                s("--acp"),
+                format!("--available-tools={NO_SUCH_TOOL}"),
+                s("--no-custom-instructions"),
+                s("--disable-builtin-mcps"),
+                s("--no-ask-user"),
+                s("--disallow-temp-dir"),
+                s("--no-remote"),
+                s("--no-remote-export"),
+                s("--no-auto-update"),
+                s("--log-level"),
+                s("none"),
+            ]),
         }
     }
 
@@ -471,9 +501,12 @@ pub async fn run(
     recipe: Recipe,
     system: &str,
     messages: &[ChatMessage],
-    cancelled: &tokio::sync::Notify,
+    cancelled: &crate::session::CliCancel,
     mut emit: impl FnMut(StreamEvent),
 ) -> Result<(), String> {
+    if cancelled.was_asked() {
+        return Ok(());
+    }
     let scratch = Scratch::make(system)?;
 
     // Claude replaces its system prompt with ours. Copilot has no such flag —
@@ -530,7 +563,7 @@ pub async fn run(
 
     // Armed before the first read, so a cancel landing in between is not lost —
     // the same shape `session::cancellable` uses for a query.
-    let notified = cancelled.notified();
+    let notified = cancelled.notify.notified();
     tokio::pin!(notified);
     notified.as_mut().enable();
 
@@ -647,6 +680,101 @@ pub async fn run(
     emit(StreamEvent::Done { stop_reason: None });
     let _ = child.wait().await;
     Ok(())
+}
+
+/// Ask through a **kept session**, starting one if needed.
+///
+/// Returns `Ok(false)` when this recipe has no session transport, so the caller
+/// falls back to [`run`]. Today that is Claude; see [`Recipe::session_args`].
+///
+/// A session is reused only while it was primed with the same system prompt.
+/// The schema rides in the first turn, so a session opened in one database is
+/// answering about that one — comparing the whole prompt catches every reason
+/// it could have gone stale without enumerating them.
+pub async fn run_session(
+    state: &crate::session::AppState,
+    recipe: Recipe,
+    system: &str,
+    messages: &[ChatMessage],
+    cancelled: &crate::session::CliCancel,
+    mut emit: impl FnMut(StreamEvent),
+) -> Result<bool, String> {
+    let Some(args) = recipe.session_args() else {
+        return Ok(false);
+    };
+
+    // The newest question only: the session is holding the rest. On the first
+    // turn the rules and the schema go with it, because Copilot has no
+    // system-prompt flag and this is the one place they fit.
+    let question = messages
+        .last()
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
+
+    let existing = {
+        let agents = state.cli_agents.lock().await;
+        agents.get(&recipe).cloned()
+    };
+    let agent = match existing {
+        Some(agent) if agent.primed_with(system) => agent,
+        other => {
+            // Stale or absent. A stale one is closed rather than left running:
+            // it holds a process and a conversation about a schema nobody is
+            // looking at any more.
+            if let Some(old) = other {
+                old.close().await;
+            }
+            let scratch = Scratch::make("")?;
+            let fresh = std::sync::Arc::new(
+                crate::acp::Agent::start(recipe.program(), &args, &scratch.dir, system.to_string())
+                    .await
+                    .map_err(|e| format!("{}: {e}", recipe.label()))?,
+            );
+            // The scratch directory has to outlive the process that is running
+            // in it, so the guard is deliberately leaked here rather than
+            // dropped at the end of this block. It is an empty directory in the
+            // system temp; the alternative is a CLI whose working directory
+            // disappears under it mid-session.
+            std::mem::forget(scratch);
+            state.cli_agents.lock().await.insert(recipe, fresh.clone());
+            fresh
+        }
+    };
+
+    // Said before the first turn as well as after: starting a session is the
+    // slow part, and by here it is already done.
+    emit(StreamEvent::Started);
+
+    let first = messages.len() <= 1;
+    let text = if first {
+        format!("{system}\n\n---\n\n{question}")
+    } else {
+        question
+    };
+
+    let outcome = agent
+        .prompt(&text, cancelled, |o| match o {
+            crate::acp::Outcome::Text(delta) => emit(StreamEvent::Text { delta }),
+            crate::acp::Outcome::Failed(message) => emit(StreamEvent::Failed { message }),
+        })
+        .await;
+
+    match outcome {
+        // Cancelled. The session survives, which is the point of asking it to
+        // stop rather than killing it.
+        Ok(None) => {}
+        Ok(Some(stop_reason)) => emit(StreamEvent::Done {
+            stop_reason: Some(stop_reason),
+        }),
+        Err(message) => {
+            // A broken session is not reused: whatever went wrong, the next
+            // question should start from something known.
+            agent.close().await;
+            state.cli_agents.lock().await.remove(&recipe);
+            emit(StreamEvent::Failed { message });
+        }
+    }
+    Ok(true)
 }
 
 // ------------------------------------------------------------- is it ready?

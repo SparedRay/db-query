@@ -620,3 +620,65 @@ could validate it away. Which is the argument for the readback, not against it.
 Phase 3 is the ACP transport for Copilot first, since that is the main driver.
 Claude keeps the one-shot path until its `--input-format stream-json` transport
 is built, and keeps the stronger check while it does.
+
+## 13. Phase 3 — the kept session, built 2026-10-01
+
+`acp.rs` holds a CLI open as an ACP session: JSON-RPC over its stdin and
+stdout, `initialize` advertising **no filesystem capability**, `session/new`,
+then one `session/prompt` per question. Copilot routes through it; Claude still
+spends a process per message until its `--input-format stream-json` transport is
+built, and keeps the stronger tool check while it does.
+
+Measured, on this machine:
+
+| | before | after |
+|---|---|---|
+| first question | 5.3–11.7 s | 3.7 s |
+| every question after | 5.3–11.7 s | **1.4–1.8 s** |
+| after a cancel | a cold start | 1.5 s — the session lived |
+
+### 13.1 Three things the tests found that the design had wrong
+
+**The `Disabled tools:` line is sent once per session, not once per turn.** The
+guard demanded it every turn, so every turn after the first was refused —
+caught by the live test, whose second question came back with its text and no
+`Done`. The fact belongs to the session, so it is remembered there; what still
+runs per turn is the refusal on any `tool_call`, which is the part that could
+change mid-session.
+
+**A cancel could be lost entirely.** `notify_waiters` wakes whoever is waiting
+at that moment and is otherwise dropped, and starting a session takes
+seconds — so Stop pressed during those seconds, which is exactly when someone
+means it, vanished. The live test cancelled on the first event and then watched
+a 15-second answer arrive in full. `CliCancel` now carries a flag beside the
+`Notify`, the same two-part shape `session::cancellable` uses for a query, and
+both CLI paths check it before spending anything. Falsified: removing the flag
+check makes that test fail again.
+
+**A scratch directory cannot be a local guard.** The one-shot path removes its
+directory when the run ends, which is right. A session outlives the call that
+started it, so the same guard would delete the working directory out from under
+a running CLI. It is deliberately leaked, with a comment saying so.
+
+### 13.2 Cancelling is now polite
+
+Over ACP a cancel is a `session/cancel` notification: the turn ends with
+`stopReason: "cancelled"` and **the session survives**. The one-shot path has to
+kill the process, which costs the next question a cold start. The live test
+asks again afterwards and expects a real answer, which is what makes this a
+claim rather than a hope.
+
+A session is dropped in only two cases, both deliberate: the system prompt
+changed — which is how a different connection, a different schema, or a newly
+expanded table is noticed, without enumerating them — or the turn failed, since
+a broken session should not be the thing the next question starts from.
+
+### 13.3 Proof
+
+8 unit tests on the protocol's pure parts, including that an answer which merely
+*mentions* disabled tools is still an answer, and two live tests:
+**the second question skips the startup** (3.7 s then 1.8 s) and **a cancelled
+turn leaves the session usable** (answered again in 1.5 s). Six live tests in
+all, `mise run test-cli`.
+
+**422 Rust tests, 826 UI on both engines, `mise run check` clean.**

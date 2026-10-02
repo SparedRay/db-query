@@ -1,5 +1,6 @@
 //! Command surface and state registration.
 
+pub mod acp;
 pub mod agentcli;
 pub mod assistant;
 pub mod decode;
@@ -594,17 +595,30 @@ async fn assistant_cli_send(
 ) -> Result<(), String> {
     let system = assistant_system(&state, &connection_id, &db).await;
 
-    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cancel = std::sync::Arc::new(session::CliCancel::default());
     state
         .cli_asks
         .lock()
         .await
         .insert(request_id.clone(), cancel.clone());
 
-    let result = agentcli::run(recipe, &system, &messages, &cancel, |event| {
+    // A kept session where the CLI supports one — measured at 1.85-2.66s a
+    // turn against 5.3-11.7s for a fresh process — and one process per message
+    // where it does not.
+    let kept = agentcli::run_session(&state, recipe, &system, &messages, &cancel, |event| {
         let _ = on_event.send(event);
     })
     .await;
+    let result = match kept {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            agentcli::run(recipe, &system, &messages, &cancel, |event| {
+                let _ = on_event.send(event);
+            })
+            .await
+        }
+        Err(e) => Err(e),
+    };
 
     // Removed however it ended, including the error paths: an entry left behind
     // is a cancel that silently does nothing next time the id is reused.
@@ -619,7 +633,7 @@ async fn assistant_cli_cancel(
     request_id: String,
 ) -> Result<(), String> {
     if let Some(cancel) = state.cli_asks.lock().await.get(&request_id) {
-        cancel.notify_waiters();
+        cancel.ask();
     }
     Ok(())
 }

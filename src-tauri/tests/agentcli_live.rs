@@ -70,7 +70,7 @@ async fn a_probe_answers_without_asking_a_model_anything() {
 #[tokio::test]
 #[ignore = "spends a request on the person's subscription"]
 async fn a_real_cli_answers_with_no_tools_in_reach() {
-    let cancel = tokio::sync::Notify::new();
+    let cancel = CliCancel::default();
     let events = std::sync::Mutex::new(Vec::new());
 
     agentcli::run(
@@ -117,7 +117,7 @@ async fn a_real_cli_answers_with_no_tools_in_reach() {
 #[tokio::test]
 #[ignore = "spends a request on the person's subscription"]
 async fn something_arrives_before_the_first_word() {
-    let cancel = tokio::sync::Notify::new();
+    let cancel = CliCancel::default();
     let marks = std::sync::Mutex::new(Vec::new());
     let started = std::time::Instant::now();
 
@@ -162,7 +162,7 @@ async fn something_arrives_before_the_first_word() {
 #[tokio::test]
 #[ignore = "spends a request on the person's subscription"]
 async fn cancelling_stops_the_reply_rather_than_waiting_it_out() {
-    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cancel = std::sync::Arc::new(CliCancel::default());
     let events = std::sync::Mutex::new(Vec::new());
     let fired = std::sync::atomic::AtomicBool::new(false);
 
@@ -176,7 +176,7 @@ async fn cancelling_stops_the_reply_rather_than_waiting_it_out() {
         |e| {
             events.lock().unwrap().push(e);
             if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                cancel.notify_waiters();
+                cancel.ask();
             }
         },
     )
@@ -189,5 +189,136 @@ async fn cancelling_stops_the_reply_rather_than_waiting_it_out() {
     assert!(
         !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
         "a cancelled reply never reports itself finished: {events:#?}"
+    );
+}
+
+// ------------------------------------------------------- the kept session
+
+use db_query_lib::session::{AppState, CliCancel};
+
+/// Collects a turn, and says how long it took.
+async fn turn(
+    state: &AppState,
+    question: &str,
+    cancel: &std::sync::Arc<CliCancel>,
+    stop_after_first_event: bool,
+) -> (String, Vec<StreamEvent>, std::time::Duration) {
+    let events = std::sync::Mutex::new(Vec::new());
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let used = agentcli::run_session(
+        state,
+        Recipe::Copilot,
+        SYSTEM,
+        &ask(question),
+        cancel,
+        |e| {
+            events.lock().unwrap().push(e);
+            if stop_after_first_event
+                && !fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                cancel.ask();
+            }
+        },
+    )
+    .await
+    .expect("the session should have started");
+    assert!(used, "Copilot has a session transport");
+
+    let took = started.elapsed();
+    let events = events.into_inner().unwrap();
+    let text = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Text { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    (text, events, took)
+}
+
+/// **The session is what Phase 3 is for.** The second question must not pay to
+/// start a process again.
+///
+/// Measured before building this: 5.3–11.7s for a fresh process against
+/// 1.85–2.66s a turn on a session. The assertion is the weaker, stabler claim —
+/// the second turn is faster than the first, which includes the startup the
+/// second one skips.
+///
+/// Also asserts the answer is **only** the answer: a turn's first chunks were
+/// `Info: Disabled tools: …`, on the same channel as the reply, so a naive
+/// renderer would open every answer with two lines of our plumbing.
+///
+/// Spends two requests.
+#[tokio::test]
+#[ignore = "spends two requests on the person's subscription"]
+async fn a_kept_session_answers_the_second_question_without_starting_again() {
+    let state = AppState::default();
+    let cancel = std::sync::Arc::new(CliCancel::default());
+
+    let (first, _, t1) = turn(&state, "Reply with exactly: ONE", &cancel, false).await;
+    let (second, events, t2) = turn(&state, "Reply with exactly: TWO", &cancel, false).await;
+    println!("first turn {t1:?} -> {first:?}; second {t2:?} -> {second:?}");
+
+    assert!(first.to_uppercase().contains("ONE"), "got {first:?}");
+    assert!(second.to_uppercase().contains("TWO"), "got {second:?}");
+    assert!(
+        t2 < t1,
+        "the second turn skipped the startup, so it should be quicker: {t1:?} then {t2:?}"
+    );
+
+    // Not one word of the CLI's own commentary.
+    for answer in [&first, &second] {
+        assert!(!answer.contains("Info: Disabled tools"), "{answer:?}");
+        assert!(!answer.contains("Unknown tool name"), "{answer:?}");
+    }
+    assert!(
+        events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
+        "a finished turn says so"
+    );
+
+    // One process, reused.
+    assert_eq!(state.cli_agents.lock().await.len(), 1);
+}
+
+/// **Cancelling asks the turn to stop; it does not throw the session away.**
+///
+/// The one-shot path has to kill the process, which costs the next question a
+/// cold start. Over ACP a cancel is a notification, the turn ends with
+/// `stopReason: "cancelled"`, and the session is still there — so this asks
+/// again afterwards and expects a real answer.
+///
+/// Spends two requests; a cancelled turn still counts as one.
+#[tokio::test]
+#[ignore = "spends two requests on the person's subscription"]
+async fn a_cancelled_turn_leaves_the_session_usable() {
+    let state = AppState::default();
+    let cancel = std::sync::Arc::new(CliCancel::default());
+
+    let (_, events, took) = turn(
+        &state,
+        "Write a 400 word essay about database indexes.",
+        &cancel,
+        true,
+    )
+    .await;
+    println!("cancelled after {took:?}, {} events", events.len());
+    assert!(
+        !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
+        "a cancelled turn never reports itself finished: {events:#?}"
+    );
+    // The process is still ours, not killed.
+    assert_eq!(
+        state.cli_agents.lock().await.len(),
+        1,
+        "a polite cancel keeps the session"
+    );
+
+    let fresh = std::sync::Arc::new(CliCancel::default());
+    let (answer, _, after) = turn(&state, "Reply with exactly: STILL HERE", &fresh, false).await;
+    println!("next turn {after:?} -> {answer:?}");
+    assert!(
+        answer.to_uppercase().contains("STILL HERE"),
+        "the session should still answer after a cancel, got {answer:?}"
     );
 }
