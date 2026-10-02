@@ -1403,3 +1403,15 @@ dialog.viewer .viewer-note {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--warn); border: 2px solid var(--bg-rail);
 }
+
+/* --- waiting for a reply -------------------------------------------------
+   A spinner and a word that changes, in place of the literal `…` the chat used
+   to show — which was indistinguishable from a one-character answer and from a
+   panel that had died. The word is vague on purpose: see `WAITING_WORDS`. */
+.chat-waiting {
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 0; color: var(--fg-dim); font-size: 13px;
+}
+/* Its own width so the line does not jostle as the word changes. A fixed width
+   would clip the longest; this reserves room for it instead. */
+.chat-waiting-word { min-width: 8.5em; }

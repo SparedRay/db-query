@@ -43,6 +43,95 @@ export interface AssistantDeps {
   remember: (sql: string) => void;
 }
 
+/**
+ * Words shown while a reply is being waited for.
+ *
+ * Deliberately **vague**. A specific one — "reading your schema", "checking the
+ * columns" — would be a claim about what the model is doing, and we have no
+ * idea: all we know is that a process has not answered yet. These say only
+ * "still working", which is the one honest thing there is to say.
+ */
+export const WAITING_WORDS = [
+  "Thinking",
+  "Pondering",
+  "Mulling",
+  "Considering",
+  "Composing",
+  "Drafting",
+  "Puzzling",
+  "Deliberating",
+  "Ruminating",
+  "Weighing",
+  "Sifting",
+  "Percolating",
+  "Noodling",
+  "Reckoning",
+  "Musing",
+];
+
+/** How long each word stays before the next one. */
+const WORD_EVERY = 2600;
+
+/**
+ * A spinner and a word that changes, for anything slower than an eyeblink.
+ *
+ * The chat used to put a literal `…` there, which is indistinguishable from an
+ * answer that is one character long and from a panel that has died. A CLI takes
+ * seconds before its first word, so this is most of what the person sees.
+ *
+ * `role="status"` with a fixed label, and the rotating word `aria-hidden`: a
+ * screen reader should hear "waiting for a reply" once, not a new verb every
+ * two and a half seconds.
+ */
+export function waitingLine(): { el: HTMLElement; stop: () => void } {
+  // A span, not a paragraph: it is put inside `#chat-note`, which is already a
+  // `<p>`, and a paragraph inside a paragraph is not markup. `display: flex`
+  // does the rest.
+  const el = document.createElement("span");
+  el.className = "chat-waiting";
+  el.setAttribute("role", "status");
+  el.setAttribute("aria-label", "Waiting for a reply");
+
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  spinner.setAttribute("aria-hidden", "true");
+
+  const word = document.createElement("span");
+  word.className = "chat-waiting-word";
+  word.setAttribute("aria-hidden", "true");
+
+  let at = Math.floor(Math.random() * WAITING_WORDS.length);
+  const show = () => {
+    word.textContent = `${WAITING_WORDS[at]}…`;
+  };
+  show();
+  el.append(spinner, word);
+
+  // A word that changes is motion too, so a system that asked for less of it
+  // gets one word and no cycling.
+  const still =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const timer = still
+    ? null
+    : window.setInterval(() => {
+        // Never the same word twice in a row: a list that repeats itself looks
+        // stuck, which is the one thing it exists to disprove.
+        at = (at + 1 + Math.floor(Math.random() * (WAITING_WORDS.length - 1))) %
+          WAITING_WORDS.length;
+        show();
+      }, WORD_EVERY);
+
+  return {
+    el,
+    stop: () => {
+      if (timer !== null) window.clearInterval(timer);
+      el.remove();
+    },
+  };
+}
+
 /** What to call a CLI in front of a person. */
 export function cliLabel(recipe: Recipe): string {
   return recipe === "claude" ? "Claude Code" : "Copilot CLI";
@@ -189,9 +278,10 @@ export function createAssistant(deps: AssistantDeps) {
     const body = document.createElement("div");
     reply.append(thinking, body);
 
-    // A visible placeholder from the first frame: a thinking model can take a
-    // while before any text, and an empty bubble reads as a hang.
-    body.textContent = "…";
+    // Visible from the first frame: a model can take a while before any text,
+    // and a CLI takes seconds before its first word.
+    const waiting = waitingLine();
+    body.append(waiting.el);
     scrollToEnd();
 
     setStreaming(true);
@@ -200,10 +290,8 @@ export function createAssistant(deps: AssistantDeps) {
 
     const onEvent = (e: AssistantEvent) => {
       if (e.type === "started") {
-        // The CLI is up. Said out loud because Copilot CLI is silent for a
-        // couple of seconds before its first word, and "…" for that long reads
-        // as a hang — measured at 2.3s against a first token at 3.8s.
-        body.textContent = "…";
+        // The CLI is up and the wait is now the model's rather than the
+        // process's. The line stays; only what can be stopped changes.
         setStreaming(true);
       } else if (e.type === "thinking") {
         thinking.hidden = false;
@@ -245,6 +333,10 @@ export function createAssistant(deps: AssistantDeps) {
       failed = String(err);
     } finally {
       inFlight = null;
+      // `renderAnswer` replaces the body's children, so the line is already
+      // gone once text arrives — but its timer is not, and a turn that failed
+      // before saying anything never rendered at all.
+      waiting.stop();
       setStreaming(false);
     }
 
@@ -294,8 +386,21 @@ export function createAssistant(deps: AssistantDeps) {
         deps.input.focus();
         return;
       }
+      // **Shown before anything is asked.** It used to open only once the
+      // readiness check had answered, and for a CLI that is a second or two of
+      // a click doing nothing at all — reported as looking like the button was
+      // dead. The panel appears, says it is checking, and fills in.
+      const checking = waitingLine();
+      deps.note.replaceChildren(checking.el);
+      deps.send.disabled = true;
+      deps.input.disabled = true;
+      deps.dialog.showModal();
+
       const config = deps.config();
       let ready: boolean;
+      // Set by each branch below; applied once, after the await, so there is
+      // one place that turns the waiting line into an answer.
+      let note = "";
 
       if (config.provider === "localCli" && config.recipe) {
         // A CLI is asked a different question: not "is a key stored" but "is it
@@ -303,7 +408,7 @@ export function createAssistant(deps: AssistantDeps) {
         // asked every time the panel opens rather than cached and trusted.
         const status = await api.assistantCliProbe(config.recipe).catch(() => null);
         ready = (status?.installed ?? false) && (status?.signedIn ?? false);
-        deps.note.textContent = ready
+        note = ready
           ? `${cliLabel(config.recipe)} · signed in on this machine; ` +
             "your schema's table and column names are sent with each question, row data never is."
           : (status?.detail ?? `Could not ask ${cliLabel(config.recipe)} whether it is ready.`);
@@ -313,7 +418,7 @@ export function createAssistant(deps: AssistantDeps) {
           .catch(() => null);
         ready = (status?.ready ?? false) && config.model.trim() !== "";
 
-        deps.note.textContent = !ready
+        note = !ready
           ? status && !status.ready
             ? "No API key set. Add one in Settings to use the assistant."
             : "No model set. Choose one in Settings."
@@ -323,9 +428,10 @@ export function createAssistant(deps: AssistantDeps) {
               : "your schema's table and column names are sent with each question; row data never is.");
       }
 
+      checking.stop();
+      deps.note.textContent = note;
       deps.send.disabled = !ready;
       deps.input.disabled = !ready;
-      deps.dialog.showModal();
       if (ready) deps.input.focus();
     },
   };

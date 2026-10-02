@@ -275,3 +275,111 @@ test("a refused reply says why, in the conversation", async ({ page }) => {
 
   await expect(page.locator(".chat-error")).toContainText("offered the model 21 tools");
 });
+
+// ------------------------------------------------------------- waiting for it
+
+/**
+ * **Anything slower than an eyeblink has to say so** — the rule the rail and the
+ * tree already follow, applied to the two places in the chat that were silent.
+ */
+
+/** A gate the test opens, so "while it is in flight" is a state not a race. */
+function heldProbe() {
+  let open!: (v: unknown) => void;
+  const p = new Promise<unknown>((r) => {
+    open = r;
+  });
+  return { p, open };
+}
+
+/**
+ * Opening the panel used to wait for the readiness check before showing
+ * anything, and for a CLI that is a second or two of a click doing nothing.
+ */
+test("the panel opens before it knows whether the CLI is ready", async ({ page }) => {
+  const held = heldProbe();
+  stream = gate();
+  await withSettings(page, {
+    cliEnabled: ["copilot"],
+    aiProvider: "localCli",
+    aiRecipe: "copilot",
+  });
+  await connect(page, {
+    assistant_status: () => ({ hasKey: true, ready: true, local: false }),
+    assistant_cli_probe: () => held.p,
+    assistant_cli_send: () => stream.promise,
+  });
+
+  await page.click("#btn-assistant");
+  // Open, and saying so, while the probe is still out.
+  await expect(page.locator("#assistant-dialog")).toBeVisible();
+  await expect(page.locator("#chat-note .spinner")).toBeVisible();
+  await expect(page.locator("#chat-note .chat-waiting")).toHaveAttribute(
+    "aria-label",
+    /Waiting/,
+  );
+  // And it does not pretend to be usable yet.
+  await expect(page.locator("#chat-send")).toBeDisabled();
+
+  held.open(SIGNED_IN);
+  await expect(page.locator("#chat-note")).toContainText("signed in on this machine");
+  await expect(page.locator("#chat-note .spinner")).toHaveCount(0);
+  await expect(page.locator("#chat-send")).toBeEnabled();
+});
+
+/**
+ * While a reply is awaited the chat showed a literal `…`, which is
+ * indistinguishable from a one-character answer and from a panel that has died.
+ */
+test("waiting for a reply shows a spinner and a word, then the answer", async ({ page }) => {
+  await boot(page, { enabled: ["copilot"], provider: "localCli", recipe: "copilot" });
+  await ask(page, "which tables hold orders?");
+
+  const waiting = page.locator(".chat-msg.from-assistant .chat-waiting");
+  await expect(waiting).toBeVisible();
+  await expect(waiting.locator(".spinner")).toBeVisible();
+
+  // One of the words, with its ellipsis — not the bare "…" it used to be.
+  const word = await waiting.locator(".chat-waiting-word").textContent();
+  expect(word).toMatch(/^[A-Z][a-z]+…$/);
+  const { WAITING_WORDS } = await import("../../src/assistant");
+  expect(WAITING_WORDS).toContain(word!.replace("…", ""));
+
+  // The rotating word is hidden from assistive tech; the line speaks once.
+  await expect(waiting.locator(".chat-waiting-word")).toHaveAttribute("aria-hidden", "true");
+  await expect(waiting).toHaveAttribute("role", "status");
+
+  await sendOnChannel(page, "assistant_cli_send", "onEvent", [
+    { type: "started" },
+    { type: "text", delta: "SELECT 1;" },
+    { type: "done", stopReason: null },
+  ]);
+  stream.release();
+
+  await expect(page.locator(".chat-msg.from-assistant")).toContainText("SELECT 1;");
+  await expect(waiting).toHaveCount(0);
+});
+
+/** The `started` event must not clear the line — the wait is not over yet. */
+test("the line survives the CLI starting up", async ({ page }) => {
+  await boot(page, { enabled: ["copilot"], provider: "localCli", recipe: "copilot" });
+  await ask(page, "hello");
+  await sendOnChannel(page, "assistant_cli_send", "onEvent", [{ type: "started" }]);
+
+  await expect(page.locator(".chat-waiting .spinner")).toBeVisible();
+  await expect(page.locator("#chat-send")).toHaveText("Stop");
+  stream.release();
+});
+
+/** A turn that fails before saying anything still clears it. */
+test("a failed reply leaves no spinner behind", async ({ page }) => {
+  await boot(page, { enabled: ["copilot"], provider: "localCli", recipe: "copilot" });
+  await ask(page, "hello");
+  await sendOnChannel(page, "assistant_cli_send", "onEvent", [
+    { type: "failed", message: "Copilot CLI is not signed in." },
+  ]);
+  stream.release();
+
+  await expect(page.locator(".chat-error")).toContainText("not signed in");
+  await expect(page.locator(".chat-waiting")).toHaveCount(0);
+});
