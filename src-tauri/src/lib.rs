@@ -18,6 +18,7 @@ pub mod lint;
 pub mod logbook;
 pub mod mcp;
 pub mod mysql;
+pub mod proc;
 pub mod profiles;
 pub mod schema;
 pub mod secrets;

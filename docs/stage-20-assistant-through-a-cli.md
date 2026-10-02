@@ -859,3 +859,82 @@ The gutter was confirmed from the mockup before it was built: `padding-right`
 when a pane is short enough not to scroll.
 
 **846 UI tests on both engines, 422 Rust, `mise run check` clean.**
+
+## 17. No console window, and a loader on the button — 2026-10-02
+
+> *"When we click on Repair on migration (And probably on apply) it does not
+> show a loader. Just the cmd opening externally on windows … any call to
+> external tools like flyway opens a external cmd"*
+
+Two reports, and the second explains the first. Apply and Repair **did** disable
+themselves and write "Flyway is applying…" beside the list — but on Windows,
+spawning a console program from a GUI app opens a console window in front of
+it, so neither was visible. The click looked inert because the feedback was
+behind `cmd.exe`.
+
+### 17.1 One helper, six spawn sites
+
+`proc.rs` builds every `Command` with `CREATE_NO_WINDOW` on Windows, and is the
+only place that flag appears. It is a module rather than a flag added where the
+problem was noticed because **Flyway was not the only one**: the app spawns
+external programs in six places, and three of them are the agent CLIs, which
+would have flashed a console window **on every question asked of the
+assistant**. The next spawn site should be born with it.
+
+Nothing is lost by hiding the window. Every call site already captures stdout
+and stderr — `output()`, or a piped reader — so the window never held anything
+the app did not have. It only showed it sooner, and over the top.
+
+### 17.2 Verified without a Windows machine
+
+The branch that matters cannot run here, so it was checked two other ways
+rather than assumed:
+
+* `cargo check --target x86_64-pc-windows-msvc` fails in this environment — a
+  dependency's build script wants MSVC's `lib.exe` — so the module's Windows
+  path was compiled on its own with `rustc --target x86_64-pc-windows-msvc`,
+  which passes. That proves `std::os::windows::process::CommandExt` and
+  `creation_flags` are what the code thinks they are.
+* `creation_flags` on the **async** command was read from the vendored source:
+  `~/.cargo/registry/.../tokio-1.53.1/src/process/mod.rs:675`, inside
+  `cfg_windows!`, delegating to std's. Read 2026-10-02. That it is behind
+  `cfg_windows!` is also why the call needs the `#[cfg(windows)]` block: off
+  Windows the method does not exist.
+
+`mut` is used only by that block, so every other platform warned about an
+unused `mut`. Allowed narrowly with `#[cfg_attr(not(windows), allow(unused_mut))]`
+rather than dropped, which would have broken the Windows build.
+
+### 17.3 The wait is on the button
+
+`buttonBusy` puts a spinner in a button, returns the undo, and the callers run
+it in a `finally` so a thrown error cannot leave a control spinning for good. It
+also sets `aria-busy`, because a spinner nobody can see is not feedback.
+
+Three UI tests, two falsified: reverting to "disable, no spinner" fails the
+spinner test, and dropping the `finally` fails *"a Flyway failure gives the
+button back"*.
+
+The first attempt at that first falsification **passed**, which was not
+evidence of a weak test: the patch searched for a real `…` while the source
+holds the six-character `…` escape, so nothing was edited and the feature
+was still intact. Re-run against the actual text, it fails as it should. A
+falsification that passes is a claim about the patch until the patch is proven
+to have landed.
+
+### 17.4 Also fixed
+
+`flywaycli`'s not-found error still said *"set the path to it in Settings →
+Integrations"* — a tab renamed in §16. It says **Migrations** now.
+
+### 17.5 Still open: showing Flyway's output
+
+The second half of the request — *"maybe we can still show the console output on
+a debug window"* — is **not built**. Today the logbook records only
+`"<op> exited <code>"`, and the output survives solely inside a failure's
+message, so a successful run's console text is discarded. Doing it properly
+means keeping the last run's output and giving the migrations view a way to open
+it, which is a feature rather than a fix, and is written down here rather than
+half-done.
+
+**852 UI tests on both engines, 422 Rust, `mise run check` exits 0.**

@@ -983,3 +983,86 @@ test("the section collapses and expands from its caret", async ({ page }) => {
   await expect(page.locator("#mig-side")).not.toHaveClass(/collapsed/);
   await expect(page.locator("#mig-side-body")).toBeVisible();
 });
+
+// ------------------------------------------------------- waiting for Flyway
+
+/**
+ * **The button that started it is where the waiting shows.**
+ *
+ * Apply and Repair disabled themselves and wrote "Flyway is applying…" beside
+ * the list, and on Windows neither was visible: spawning Flyway opened a
+ * console window over the app, so the click looked like it had done nothing.
+ * The window is gone (`proc.rs` passes `CREATE_NO_WINDOW`), and the wait is now
+ * on the control somebody is already looking at.
+ */
+
+/** A gate, so "while Flyway is running" is a state rather than a race. */
+function held() {
+  let release!: (v: unknown) => void;
+  const promise = new Promise<unknown>((r) => {
+    release = r;
+  });
+  return { promise, release };
+}
+
+test("Repair shows a spinner on its own button until Flyway answers", async ({ page }) => {
+  const gate = held();
+  await withProject(page, { flyway_repair: () => gate.promise });
+
+  await page.click("#btn-mig-view-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+
+  const btn = page.locator("#btn-mig-view-repair");
+  await expect(btn.locator(".spinner")).toBeVisible();
+  await expect(btn).toContainText("Repairing");
+  await expect(btn).toBeDisabled();
+  // Said out loud, for anyone who cannot see it turn.
+  await expect(btn).toHaveAttribute("aria-busy", "true");
+
+  gate.release({ actions: ["Removed failed migrations"], removed: [], deleted: [], aligned: [] });
+  await expect(btn.locator(".spinner")).toHaveCount(0);
+  await expect(btn).not.toHaveAttribute("aria-busy", "true");
+  await expect(btn).toContainText("Repair");
+});
+
+test("Apply shows a spinner on its own button until Flyway answers", async ({ page }) => {
+  const gate = held();
+  // `PENDING_ONLY`, because the default fixture has a failed migration and
+  // Flyway will not apply anything until that is repaired — the Apply button is
+  // correctly disabled there.
+  await withProject(page, {
+    flyway_info: () => PENDING_ONLY,
+    flyway_migrate: () => gate.promise,
+  });
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  const btn = page.locator("#btn-mig-view-apply");
+  await expect(btn.locator(".spinner")).toBeVisible();
+  await expect(btn).toContainText("Applying");
+  await expect(btn).toBeDisabled();
+
+  gate.release({ executed: 1, target: "2" });
+  await expect(btn.locator(".spinner")).toHaveCount(0);
+});
+
+/**
+ * A failure must not leave a button spinning: the undo runs in a `finally`, so
+ * the control comes back however the call ended.
+ */
+test("a Flyway failure gives the button back", async ({ page }) => {
+  await withProject(page, {
+    flyway_repair: () => {
+      throw new Error("Flyway was not found at \"flyway\".");
+    },
+  });
+
+  await page.click("#btn-mig-view-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+
+  await expect(page.locator("#grid .empty")).toContainText("was not found");
+  const btn = page.locator("#btn-mig-view-repair");
+  await expect(btn.locator(".spinner")).toHaveCount(0);
+  await expect(btn).toContainText("Repair");
+});
