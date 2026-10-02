@@ -138,10 +138,15 @@ pub async fn version(program: &str) -> Result<String, String> {
         .find(|l| l.starts_with("Flyway") && l.contains(|c: char| c.is_ascii_digit()))
     {
         Some(line) => Ok(line.to_string()),
-        None if out.status.success() => Ok("Flyway answered, but did not say which version.".into()),
+        None if out.status.success() => {
+            Ok("Flyway answered, but did not say which version.".into())
+        }
         None => Err(format!(
             "`{asked}` ran but is not Flyway: {}",
-            text.lines().find(|l| !l.trim().is_empty()).unwrap_or("it printed nothing").trim()
+            text.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("it printed nothing")
+                .trim()
         )),
     }
 }
