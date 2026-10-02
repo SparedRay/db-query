@@ -413,7 +413,39 @@ pub struct AppState {
     /// A CLI reply needs this and an HTTP one does not: dropping an HTTP
     /// request ends it, while a child process carries on talking to a server
     /// and spending the person's quota until something kills it.
-    pub cli_asks: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    pub cli_asks: Mutex<HashMap<String, Arc<CliCancel>>>,
+    /// CLIs held open as a session, one per recipe.
+    ///
+    /// Worth keeping because measurement says so: a Copilot process costs
+    /// 5.3-11.7s to start and 1.85-2.66s a turn once it is up. The session also
+    /// holds the conversation, so the schema travels once rather than with
+    /// every question.
+    pub cli_agents: Mutex<HashMap<crate::agentcli::Recipe, Arc<crate::acp::Agent>>>,
+}
+
+/// A request for a CLI reply to stop.
+///
+/// **A flag as well as a `Notify`**, for the reason `cancellable` exists above:
+/// `notify_waiters` wakes whoever is waiting *at that moment* and is otherwise
+/// lost. Starting a CLI session takes seconds, and Stop pressed during those
+/// seconds is exactly when someone means it most — so the flag is what carries
+/// a cancel that arrived before anything was listening. Found by a live test
+/// whose cancel vanished into a 15-second answer.
+#[derive(Default)]
+pub struct CliCancel {
+    pub asked: std::sync::atomic::AtomicBool,
+    pub notify: tokio::sync::Notify,
+}
+
+impl CliCancel {
+    pub fn ask(&self) {
+        self.asked.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn was_asked(&self) -> bool {
+        self.asked.load(Ordering::SeqCst)
+    }
 }
 
 /// sqlx errors are verbose and full of internals. Surface the part a human
