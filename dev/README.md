@@ -72,9 +72,7 @@ the wire format once, by hand, against something real.
 ## When the disk fills up
 
 `cargo` never prunes `src-tauri/target/`: every dependency version and every
-test binary ever built stays in it. On 2026-10-01 `target/debug` had reached
-**97 GB** on the development machine, while a complete rebuild of it needs
-**3.2 GB** and 82 seconds — so almost all of it was accumulation, not need.
+test binary ever built stays in it.
 
 ```bash
 mise run clean        # reclaims target/debug, keeps release
@@ -83,6 +81,39 @@ mise run clean        # reclaims target/debug, keeps release
 Worth knowing because of how a full disk announces itself: the **linker** fails,
 and reports it as an opaque `linking with cc failed` with a wall of object
 files. `df -h .` is the first thing to check when a build breaks that way.
+
+### What the space actually is
+
+Measured 2026-10-03, after one day of ordinary work (edit, `cargo test`,
+`cargo clippy --all-targets`, a few live suites):
+
+| | |
+|---|---|
+| `target/debug/deps` | 12 G — every build's rlibs and test binaries, old hashes kept |
+| `target/debug/incremental` | 7 G — per-edit recompilation state |
+| `target/debug/build` | 1.4 G — build script output |
+| `target/release` | 2.7 G |
+| `dev/.flyway` | 902 M — the pinned Flyway CLI, with its own JRE |
+| **a fresh `cargo test --lib`** | **3.2 G, 79 s** |
+
+So **21 G of the 24 G was accumulation, not need** — the fresh number is the one
+to compare against. Everything above is in `.gitignore`; the tracked repository
+is about 18 MB, and its largest file is 172 KB.
+
+### The one knob, measured
+
+`debug = "line-tables-only"` on the dev profile builds **2.4 G in 69 s** instead
+of 3.2 G in 79 s, and panic backtraces keep full `file:line:column` — verified
+by panicking on purpose and reading the frames. What it costs is variable
+inspection in a debugger.
+
+**It is deliberately not the default**, because it treats the wrong problem: it
+would have made 21 G into 16 G, while `mise run clean` makes it 0. Set it per
+run when disk is tight and a debugger is not:
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test --manifest-path src-tauri/Cargo.toml
+```
 
 The fixture containers are the other few gigabytes (`podman system df`), but
 those are images you want to keep unless you are done with a fixture entirely.
