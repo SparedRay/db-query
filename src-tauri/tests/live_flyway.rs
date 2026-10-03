@@ -722,3 +722,55 @@ async fn a_failed_migrate_explains_itself_without_its_stack_trace() {
         "and the noise is still stack traces, which the pane must not show"
     );
 }
+
+/// **The capture path, end to end.** `flyway_last_run` is what the migrations
+/// tab's output pane reads, and until now it was only ever tested with a stub:
+/// the UI tests hand the pane a document, and the live tests read the `Finished`
+/// that `run` returns. Nobody checked that the thing in between — the store
+/// written at the end of a real run — holds that run's output.
+#[tokio::test]
+#[ignore]
+async fn the_last_run_store_holds_what_flyway_just_printed() {
+    clean("probe").await;
+    let out = migrate("probe", vec!["-target=2".into()]).await;
+
+    let kept = flywaycli::last_run().expect("a run just finished, so there is one to show");
+    assert_eq!(kept.op, "migrate", "the pane names the operation from this");
+    assert_eq!(kept.code, out.code);
+    assert_eq!(
+        kept.stdout, out.stdout,
+        "the pane renders this document, so it has to be the one Flyway produced"
+    );
+    assert_eq!(kept.stderr, out.stderr);
+
+    // And it is renderable: the same fields the pane reaches for.
+    let v: serde_json::Value =
+        serde_json::from_str(&kept.stdout).expect("the stored document still parses");
+    assert_eq!(v["operation"], "migrate");
+    assert!(v["flywayVersion"].is_string());
+}
+
+/// **Why the UI captures the report immediately.**
+///
+/// The store keeps one run, and re-reading the list is itself a Flyway run —
+/// `showSelected` asks for `info` the moment an apply finishes. So a UI that
+/// fetched the report afterwards would show the `info` instead of the migrate
+/// it just did. This pins the overwrite, which was previously only a comment.
+#[tokio::test]
+#[ignore]
+async fn a_later_run_replaces_the_stored_one() {
+    clean("probe").await;
+    migrate("probe", vec!["-target=2".into()]).await;
+    assert_eq!(
+        flywaycli::last_run().expect("the migrate is stored").op,
+        "migrate"
+    );
+
+    info("probe").await;
+    assert_eq!(
+        flywaycli::last_run().expect("the info is stored now").op,
+        "info",
+        "the store keeps the newest run, which is why the UI copies the report onto the tab \
+         before it re-reads the list"
+    );
+}
