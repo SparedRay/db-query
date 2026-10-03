@@ -1260,3 +1260,126 @@ test, not a fixture — and it is not built.
 So "end to end" splits in three, and all three now have something: the UI
 against stubs (878 tests), the backend against real Flyway (17), and the whole
 app by hand (the recipe in `dev/README.md`).
+
+## 23. Three from using it, and a preference that was never lost — 2026-10-03
+
+> *"when we first open the migration tab it still shows only: Asking flyway…
+> not a proper loader. Also lets fix a small bug when closing an empty tab
+> (only one present) it deselects the selected table. Lastly we much check the
+> COpilot CLI and Claude CLI check. Seems like the choice of having it active
+> is not stored"*
+
+### 23.1 The loader the migration tab never got
+
+§19 built L2 — the strip that says what Flyway was asked, of which
+environment, and for how long — and wired it to Apply and Repair. It was not
+wired to `info`, which is the call the tab makes **on arrival**, so the first
+thing anybody saw was one grey line of text where the list goes. `info` starts
+a JVM and talks to the server like everything else does; there was no reason
+for it to be the one wait that looked like a failed load.
+
+`showSelected` now shows the same strip, and one detail came out of writing it:
+the list below is cleared **only when the environment changed**. Refresh
+re-asks the environment already on screen, and blanking its rows to paint them
+again a second later is a flash that says something changed when nothing has.
+
+Two tests, both falsified: the strip appears on first open with no `.mig-empty`
+sentence anywhere, and Refresh keeps the rows under the spinner.
+
+### 23.2 Closing the last tab moved the schema you were in
+
+A connection is never left with no tab, so closing its only one mints a
+replacement. The replacement arrived with no database, and `onCreated`'s
+"open on the schema you were just in" could not help: it reads `tabs.active()`,
+and the closed tab is already out of the list by then, so the fallback took the
+*connection's* database instead. Measured by breaking the fix: the tree's
+highlight jumped from `warehouse` back to `poc`.
+
+So closing an empty buffer silently changed what an unqualified table name
+meant. `close` now hands the departing tab's database to the replacement,
+which also issues the `USE` that makes the new tab's session agree.
+
+### 23.3 The CLI choice was stored. In two places.
+
+This one was not a bug in the code that stores it.
+
+The frontend saves and reloads it correctly — a test that enables the
+integration, picks the provider, reloads and looks again passes unchanged. And
+the value really was on disk. From this machine, 2026-10-03:
+
+```
+~/.local/share/com.dbquery.poc/localstorage/
+  http_localhost_1420.localstorage   "cliEnabled":["copilot","claude"] …
+  tauri_localhost_0.localstorage     db-query.theme = system
+```
+
+**`localStorage` belongs to the webview's origin, and this app has two of
+them**: `http://localhost:1420` under `mise run dev`, `tauri://localhost`
+installed. The second file above is the packaged build's, created by running
+`src-tauri/target/release/db-query` for ten seconds — it holds a theme and
+nothing else. Every preference chosen in one build is invisible to the other,
+and a webview data directory cleared by an installer takes the lot.
+
+Connections, tabs and history never had the problem, because all three live in
+the app config directory — `~/.config/com.dbquery.poc/`, shared by every build.
+`workspace.rs` has given "kept out of the webview's own storage" as a property
+worth having since Stage 9. Preferences were the one durable thing that had
+not joined them, so:
+
+* **`src-tauri/src/prefs.rs`** — `preferences.json` beside the others, 0600,
+  written atomically, a corrupt file kept aside and reported rather than
+  deleted. Rust stores the frontend's settings object **verbatim and
+  uninterpreted**: the shape belongs to `settings.ts`, which validates every
+  field on the way in because the file may have been written by another
+  version, and declaring those fields twice is how two descriptions drift.
+* **`localStorage` stays, as the cache.** It is the only store that can be read
+  synchronously, and these values are needed in the first frame — a font size
+  fetched over IPC is a font size applied after the editor has been drawn in
+  the wrong one.
+* **`src/boot.ts`** is now the entry: it copies the file into the cache, then
+  imports `main.ts`. When the file holds nothing it does the opposite, once,
+  so the launch that introduces this keeps choices somebody has already made.
+
+### 23.4 What the entry split cost, and the fix for it
+
+`main.ts` is no longer what the page loads, so the window is painted from
+`index.html` before any handler is attached — a gap one local file read wide.
+Thirteen UI tests failed on it immediately, all in the same way: a click landed
+on a control that did nothing, and the dialog never opened.
+
+That is a real property, not a test artefact, so it is marked rather than left
+to timing. `main.ts` sets `data-ready` on the last line of its module
+evaluation; the harness grew `visit()` and `relaunch()`, and **every** spec now
+navigates through them instead of calling `goto` itself. Forty-four call sites,
+one place that knows about the wait.
+
+### 23.5 What is tested, and what is still only measured
+
+Six Rust tests on the file (round-trip including a field from a future version,
+replacement, the corrupt case, 0600) and five UI tests on the frontend half:
+the file wins over an empty cache, a change reaches the file, an existing
+cache is carried up into it, an unreadable file explains itself, and a backend
+that never answers still yields a usable window.
+
+What no test covers is the sentence this whole section rests on — that the
+installed build and the dev build now read the same preferences. That needs two
+different webviews, which is the gap §22.2 already named.
+
+So it was measured by hand, in the packaged build, against a scratch XDG root
+so that nothing real was touched — `app_config_dir` resolves to
+`$XDG_CONFIG_HOME/<identifier>` and the webview's storage to
+`$XDG_DATA_HOME/<identifier>` (`tauri-2.11.5/src/path/desktop.rs:238` and
+`:256`, read 2026-10-03). Both directions, 2026-10-03:
+
+* **file → webview.** A planted `preferences.json` (`fontSize` 19, `theme`
+  dark, `cliEnabled: ["copilot"]`, a nonsense `flywayPath`) came back out of
+  the packaged build's **own** `localStorage`, every field intact. The theme
+  key being `dark` rather than absent is the second half of the result: it is
+  written by `applySettings`, so it proves `main.ts` was reached — the dynamic
+  import works under `tauri://localhost` with `default-src 'self'`, which is
+  the one thing the dev server could not have told us.
+* **webview → file.** The file was then deleted and the build launched again.
+  It came back, `0600`, holding the same settings — the one-time hand-up, in
+  the real app.
+
+The recipe is in `dev/README.md`.

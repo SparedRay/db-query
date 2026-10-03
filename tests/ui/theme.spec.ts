@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { installBackend, schemaBackend } from "./harness";
+import { installBackend, relaunch, schemaBackend, visit } from "./harness";
 
 /**
  * Light and dark.
@@ -18,7 +18,7 @@ const editorBg = (page: Page) =>
 async function boot(page: Page, scheme: "dark" | "light" = "dark") {
   await page.emulateMedia({ colorScheme: scheme });
   await installBackend(page, schemaBackend);
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#btn-settings")).toBeVisible();
 }
 
@@ -35,7 +35,7 @@ test("follows the system by default, in both directions", async ({ page }) => {
   await expect(page.locator("html")).toHaveAttribute("data-theme-pref", "system");
 
   await page.emulateMedia({ colorScheme: "dark" });
-  await page.reload();
+  await relaunch(page);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
@@ -71,7 +71,7 @@ test("an explicit choice overrides the system and survives a reload", async ({ p
   await chooseTheme(page, "light"); // against a dark system
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
-  await page.reload();
+  await relaunch(page);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("html")).toHaveAttribute("data-theme-pref", "light");
 });

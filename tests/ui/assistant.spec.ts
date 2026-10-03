@@ -1,7 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  calls, connect, editorText, installBackend, schemaBackend, sendOnChannel, settingsSection,
-} from "./harness";
+import { calls, connect, editorText, installBackend, relaunch, schemaBackend, sendOnChannel, settingsSection, visit } from "./harness";
 
 /**
  * The assistant chat.
@@ -195,7 +193,7 @@ test("with no key the chat says so and cannot be used", async ({ page }) => {
     ...schemaBackend,
     assistant_status: () => ({ hasKey: false, ready: false, local: false }),
   });
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-assistant");
 
   await expect(page.locator("#chat-note")).toContainText("No API key set");
@@ -331,7 +329,7 @@ test("the choice survives a reload", async ({ page }) => {
   await page.fill("#set-ai-model", "some-model");
   await page.locator("#set-ai-model").blur();
 
-  await page.reload();
+  await relaunch(page);
   await page.click("#btn-settings");
   await settingsSection(page, "assistant");
   await expect(page.locator("#set-ai-base")).toHaveValue("https://api.openai.com/v1");

@@ -1,12 +1,5 @@
 import { expect, test } from "@playwright/test";
-import {
-  commandNames,
-  connect,
-  installBackend,
-  openDatabase,
-  rowsResult,
-  schemaBackend,
-} from "./harness";
+import { commandNames, connect, installBackend, openDatabase, rowsResult, schemaBackend, visit } from "./harness";
 
 /**
  * Every bug in this file was shipped, found by hand, and fixed before a stage
@@ -72,7 +65,7 @@ test("a failed connection leaves no rail icon and shows its error in the dialog"
       throw new Error("Access denied — check the username and password.");
     },
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.click("#btn-connect");
   await page.click("#conn-ok");
@@ -174,7 +167,7 @@ test("cancelling the delete prompt deletes nothing", async ({ page }) => {
  */
 test("with no connection there is no tab and no tab-bar plus button", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#script-tabs .stab")).toHaveCount(0);
   await expect(page.locator("#script-tabs .stab-add")).toHaveCount(0);
 });
@@ -345,7 +338,7 @@ test("saved connections appear in the rail at boot, without contacting anything"
       warning: null,
     }),
   });
-  await page.goto("/");
+  await visit(page);
 
   await expect(page.locator(".rail-item")).toHaveCount(1);
   await expect(page.locator(".rail-item")).toHaveClass(/offline/);
@@ -369,7 +362,7 @@ test("clicking a saved connection with a remembered password connects without pr
     list_tables: () => [],
     list_routines: () => [],
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.locator(".rail-item").click();
   await expect(page.locator(".rail-item.live")).toHaveCount(1);
@@ -390,7 +383,7 @@ test("a saved connection with no stored password opens the editor instead", asyn
       warning: null,
     }),
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.locator(".rail-item").click();
   await expect(page.locator("#conn-dialog")).toBeVisible();
@@ -412,7 +405,7 @@ test("a failed stored-password connect reports why", async ({ page }) => {
       throw new Error("No password is stored for this connection.");
     },
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.locator(".rail-item").click();
   await expect(page.locator("#grid")).toContainText(/No password is stored/);
@@ -427,7 +420,7 @@ test("a corrupt profile file surfaces its warning", async ({ page }) => {
       warning: "Saved connections could not be read. The file was kept as connections.json.corrupt-123.",
     }),
   });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#grid")).toContainText(/could not be read/);
 });
 
@@ -510,7 +503,7 @@ test("a result too big for the window scrolls, and stays on screen", async ({ pa
  */
 test("the connect button says Disconnect while a connection is live", async ({ page }) => {
   await installBackend(page, { ...schemaBackend });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#btn-connect")).toHaveText("Connect");
 
   await page.click("#btn-connect");
@@ -556,7 +549,7 @@ test("a connection that needs no secret connects without asking", async ({ page 
       capabilities: { engine: "elasticsearch", namespaceLabel: "catalog" },
     }),
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.locator(".rail-item").click();
 
@@ -577,7 +570,7 @@ test("an absent needsSecret is treated as needing one", async ({ page }) => {
       warning: null,
     }),
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.locator(".rail-item").click();
   await expect(page.locator("#conn-dialog")).toBeVisible();

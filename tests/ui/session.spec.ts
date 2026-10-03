@@ -1,13 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  type Backend,
-  calls,
-  commandNames,
-  editorText,
-  fireEvent,
-  installBackend,
-  schemaBackend,
-} from "./harness";
+import { calls, commandNames, editorText, fireEvent, installBackend, schemaBackend, type Backend, visit } from "./harness";
 
 /**
  * Tabs remembered across restarts.
@@ -95,7 +87,7 @@ async function boot(page: Page, extra: Backend = {}) {
     connect_saved: () => CONN,
     ...extra,
   });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator(".rail-item")).toHaveCount(1);
 }
 

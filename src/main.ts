@@ -2135,7 +2135,15 @@ files = createFileUx({
 // Read before anything can be written, or the first keystroke would save an
 // empty session over the remembered one.
 void session.boot().then((warning) => {
-  if (warning) results.setMessage(warning);
+  // A preferences file that could not be read is said in the same slot, and
+  // from inside the same step: `boot.ts` found it before this module existed,
+  // and reporting it on the way past here would only have it painted over by
+  // the empty state that boot draws a moment later.
+  //
+  // The session's own warning wins if both happened. That one is about
+  // somebody's unsaved work; preferences can be chosen again.
+  const message = warning ?? window.__PREFS_WARNING__;
+  if (message) results.setMessage(message);
 });
 
 // The sidebar's migrations section, filled at boot. It reads the project files
@@ -3954,14 +3962,26 @@ async function showSelected() {
   if (!t) {
     ui.detail.hidden = true;
     migViewShowing = "";
+    migProgressHide();
     return migrationsMessage("Choose an environment in the sidebar.");
   }
   const key = selKey(t.project.id, t.env.id);
   if (!migrationsOutOfOrder.has(key)) migrationsOutOfOrder.set(key, t.project.outOfOrder);
+  const switched = migViewShowing !== key;
   migViewShowing = key;
   showEnvironmentDetail(t.project, t.env);
 
-  migrationsMessage("Asking Flyway…");
+  // **The same loader Apply and Repair use.** `info` starts a JVM and talks to
+  // the server, so it is seconds of waiting like any other Flyway call, and it
+  // used to announce itself with one grey line of text where the list goes —
+  // which is how the first open of the tab came to look like a failed load.
+  //
+  // The list below is cleared only when it belonged to another environment.
+  // Re-asking the one already on screen keeps its rows under the spinner,
+  // because blanking them and painting them again is a flash that says
+  // something changed when nothing did.
+  if (switched) ui.list.replaceChildren();
+  migProgressShow(`Asking Flyway about ${t.env.id}`, "flyway info");
   try {
     const list = await api.flywayInfo(t.project.id, t.env.id, settings.flywayPath, outOfOrderFor(key));
     if (selectedKey() !== key) return;
@@ -3974,6 +3994,11 @@ async function showSelected() {
     // Flyway's own words. It explains itself well, and paraphrasing would
     // replace an instruction with a summary.
     migrationsMessage(String(err));
+  } finally {
+    // Only the ask that is still the current one puts the panel away: a late
+    // answer for an environment you have left would otherwise hide the spinner
+    // belonging to the environment you are now waiting on.
+    if (selectedKey() === key) migProgressHide();
   }
 }
 
@@ -4567,3 +4592,17 @@ async function openMigration(m: import("./api").FlywayMigration) {
     results.setMessage(String(err));
   }
 }
+
+/**
+ * **Wired up.**
+ *
+ * Everything above is module evaluation, and `boot.ts` imports this module only
+ * once the preferences are in place — so between the window being painted from
+ * `index.html` and this line, the controls are on screen with no handlers on
+ * them. In the app that gap is one local file read; for the tests it is the
+ * difference between clicking a button and clicking a picture of one, so it is
+ * marked rather than left to timing.
+ *
+ * Nothing in the app reads it.
+ */
+document.documentElement.dataset.ready = "1";

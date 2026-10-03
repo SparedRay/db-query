@@ -760,6 +760,24 @@ export interface SessionLoad {
   warning: string | null;
 }
 
+/**
+ * What the preferences file held.
+ *
+ * `settings` is null when there is nothing stored yet, which is the signal to
+ * hand up whatever the webview's own storage still holds — that is how an
+ * existing installation's choices move into the file instead of being reset
+ * by the change that introduced it.
+ *
+ * Deliberately not typed as `Settings`: this comes off disk and may have been
+ * written by another version, so it is an unknown object until
+ * `settings.load` has had a look at every field.
+ */
+export interface PrefsLoad {
+  settings: Record<string, unknown> | null;
+  /** Set when the file was unreadable and moved aside. */
+  warning: string | null;
+}
+
 export interface OpenedFile {
   path: string;
   name: string;
@@ -893,6 +911,13 @@ export const api = {
   // --- the remembered session. Rust owns the file; the shape is ours.
   loadSession: () => invoke<SessionLoad>("load_session"),
   saveSession: (session: SessionStore) => invoke<void>("save_session", { session }),
+
+  // --- the remembered preferences. Same division of labour, and for the same
+  // reason the session is kept this side of the webview: a store that belongs
+  // to an origin is lost the moment the app is run a different way. See
+  // `prefs.rs` and `src/boot.ts`.
+  prefsLoad: () => invoke<PrefsLoad>("prefs_load"),
+  prefsSave: (settings: Record<string, unknown>) => invoke<void>("prefs_save", { settings }),
 
   // --- the assistant. It has no tools and no connection: it writes SQL into
   // the editor and the user runs it, like every other generated-SQL path here.

@@ -1,7 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  CONN_INFO, calls, commandNames, connect, installBackend, openDatabase, schemaBackend,
-} from "./harness";
+import { CONN_INFO, calls, commandNames, connect, installBackend, openDatabase, schemaBackend, visit } from "./harness";
 
 /**
  * Anything slower than an eyeblink has to say so.
@@ -68,7 +66,7 @@ async function bootSaved(page: Page, connectSaved: () => Promise<unknown>) {
     list_profiles: () => ({ profiles: [SAVED], warning: null }),
     connect_saved: connectSaved,
   });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator(".rail-item")).toHaveCount(1);
 }
 
@@ -311,6 +309,45 @@ test("a new tab keeps the database the last one was on", async ({ page }) => {
     .filter((c) => c.cmd === "open_tab")
     .map((c) => c.args.tabId as string);
   expect(uses).toContain(opened[opened.length - 1]);
+});
+
+/**
+ * **And closing the last tab keeps it too.**
+ *
+ * A connection is never left with no tab, so closing its only one mints a
+ * replacement — and the replacement fell back to the *connection's* database,
+ * moving the tree's highlight off the schema somebody was working in. Closing
+ * an empty buffer therefore changed what an unqualified table name meant.
+ * Reported from use; measured by breaking the fix, which puts the highlight
+ * back on `poc`.
+ */
+test("closing the only tab keeps the database it was on", async ({ page }) => {
+  await connect(page, {
+    ...schemaBackend,
+    connect: () => ({ ...CONN_INFO, databases: ["poc", "warehouse"] }),
+    use_database: () => null,
+  });
+
+  await page.locator('.node.db:has-text("warehouse")').click();
+  await page.locator('.node.group:has-text("Tables")').waitFor();
+  await expect(page.locator(".node.db.db-active")).toHaveText(/warehouse/);
+
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(1);
+  await page.click("#script-tabs .stab .stab-mark");
+  // Still one: the replacement.
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(1);
+
+  await expect(page.locator(".node.db.db-active")).toHaveText(/warehouse/);
+  // And the replacement's own session was moved there, so an unqualified name
+  // in it means what the tree says it means.
+  const uses = (await calls(page))
+    .filter((c) => c.cmd === "use_database")
+    .map((c) => c.args as { tabId: string; db: string });
+  const opened = (await calls(page))
+    .filter((c) => c.cmd === "open_tab")
+    .map((c) => c.args.tabId as string);
+  const newest = opened[opened.length - 1];
+  expect(uses.some((u) => u.tabId === newest && u.db === "warehouse")).toBe(true);
 });
 
 /** And the connection's own database still costs no round trip. */

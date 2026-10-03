@@ -1,13 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  type Backend,
-  calls,
-  commandNames,
-  editorText,
-  fireEvent,
-  installBackend,
-  schemaBackend,
-} from "./harness";
+import { calls, commandNames, editorText, fireEvent, installBackend, relaunch, schemaBackend, type Backend, visit } from "./harness";
 
 /**
  * Queries arriving from an MCP client.
@@ -84,7 +76,7 @@ async function connected(page: Page, extra: Backend = {}) {
     connect_saved: () => CONN,
     ...extra,
   });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator(".rail-item")).toHaveCount(1);
   await page.locator(".rail-item").click();
   await expect(page.locator(".rail-item.live")).toHaveCount(1);
@@ -386,7 +378,7 @@ test("the server comes back on at boot when it was left on", async ({ page }) =>
   await page.locator("#set-mcp-on").check();
   await expect(page.locator("#set-mcp-live")).toBeVisible();
 
-  await page.reload();
+  await relaunch(page);
   await expect
     .poll(async () => (await commandNames(page)).filter((c) => c === "mcp_start").length, {
       timeout: 5000,
@@ -416,7 +408,7 @@ test("a boot that cannot bind reports it and keeps the preference", async ({ pag
     },
     mcp_stop: () => ({ running: false, port: null, url: null }),
   });
-  await page.reload();
+  await relaunch(page);
 
   await expect(page.locator("#grid .empty")).toContainText("did not start");
   await expect(page.locator("#grid .empty")).toContainText("address in use");
@@ -460,7 +452,7 @@ test("a boot retries a port that is busy for a moment", async ({ page }) => {
 
   // A restart is a fresh process: nothing is listening until boot binds again.
   running = false;
-  await page.reload();
+  await relaunch(page);
 
   await expect.poll(async () => attempts, { timeout: 5000 }).toBeGreaterThanOrEqual(3);
   await openIntegrations(page);

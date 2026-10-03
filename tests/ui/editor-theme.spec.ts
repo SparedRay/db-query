@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { connect, schemaBackend } from "./harness";
+import { connect, relaunch, schemaBackend } from "./harness";
 
 /**
  * That every syntax colour is readable on the ground it is drawn on.
@@ -131,7 +131,7 @@ async function keywordColour(page: Page): Promise<string> {
 test("the chosen preset comes back after a restart", async ({ page }) => {
   await connect(page, schemaBackend);
   await choose(page, "dark", "muted");
-  await page.reload();
+  await relaunch(page);
   await expect(page.locator("html")).toHaveAttribute("data-editor-theme", "muted");
 });
 

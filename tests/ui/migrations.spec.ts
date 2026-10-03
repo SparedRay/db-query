@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, commandNames, connect, installBackend, rowsResult, schemaBackend } from "./harness";
+import { calls, commandNames, connect, installBackend, rowsResult, schemaBackend, visit } from "./harness";
 
 /**
  * The migrations pane.
@@ -129,7 +129,7 @@ function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
 /** The sidebar section, with nothing connected and no environment opened. */
 async function openApp(page: Page, extra: Record<string, unknown> = {}) {
   await installBackend(page, flyway([project()], extra));
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#mig-side")).toBeVisible();
 }
 
@@ -155,7 +155,7 @@ const infoCalls = async (page: Page) =>
 
 test("with no projects the sidebar says what to do, and asks Flyway nothing", async ({ page }) => {
   await installBackend(page, flyway([]));
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#mig-side")).toBeVisible();
 
   await expect(page.locator(".mig-empty")).toContainText(/No Flyway projects yet/);
@@ -166,7 +166,7 @@ test("with no projects the sidebar says what to do, and asks Flyway nothing", as
 
 test("adding a project stores its path and lands on its environment", async ({ page }) => {
   await installBackend(page, flyway([]));
-  await page.goto("/");
+  await visit(page);
   await page.click("#mig-side .mig-empty button");
 
   await page.locator(".mig").first().waitFor();
@@ -181,7 +181,7 @@ test("adding a project stores its path and lands on its environment", async ({ p
 
 test("the section's Add button adds a project too", async ({ page }) => {
   await installBackend(page, flyway([]));
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-mig-side-add");
   await expect(page.locator("#mig-side .mig-envrow")).toHaveCount(2);
 });
@@ -210,7 +210,7 @@ test("a project whose file cannot be read stays listed and says why", async ({ p
       }),
     ]),
   );
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#mig-side")).toBeVisible();
 
   await expect(page.locator(".mig-project-error")).toContainText("No such file or directory");
@@ -299,7 +299,7 @@ test("an answer for an environment you have left is dropped", async ({ page }) =
       },
     }),
   );
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#mig-side")).toBeVisible();
   await page.click('#mig-side .mig-envrow[data-env="development"]');
 
@@ -1207,6 +1207,49 @@ test("a long version does not run over the description", async ({ page }) => {
 });
 
 // ------------------------------------------- L2 and L3: waiting, and the output
+
+/**
+ * **The first open of the tab waits the way everything else does.**
+ *
+ * `flyway_info` starts a JVM and talks to the server, so it is the same
+ * seconds of waiting as an apply — but it used to announce itself with one
+ * grey line of text where the list goes, which read as a list that had failed
+ * to load rather than as work in progress. Reported from use.
+ */
+test("the first open of the tab waits with the loader, not a line of text", async ({ page }) => {
+  const gate = held();
+  await openApp(page, { flyway_info: () => gate.promise });
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+
+  const strip = page.locator("#mig-progress");
+  await expect(strip).toBeVisible();
+  await expect(strip.locator(".spinner")).toBeVisible();
+  await expect(strip).toContainText("Asking Flyway about uat");
+  await expect(strip.locator(".mig-progress-what")).toHaveText("flyway info");
+  // And no grey sentence pretending to be the list.
+  await expect(page.locator("#mig-view-list .mig-empty")).toHaveCount(0);
+
+  gate.release(MIGRATIONS);
+  await expect(page.locator(".mig").first()).toBeVisible();
+  await expect(strip).toBeHidden();
+});
+
+/**
+ * Re-asking the environment already on screen keeps its rows under the
+ * spinner. Blanking them and painting them again is a flash that says
+ * something changed when nothing has.
+ */
+test("refreshing keeps the rows on screen while it re-asks", async ({ page }) => {
+  const gate = gateAfterFirst(MIGRATIONS);
+  await withProject(page, { flyway_info: gate.stub });
+
+  await page.click("#btn-mig-view-refresh");
+  await expect(page.locator("#mig-progress")).toBeVisible();
+  await expect(page.locator(".mig").first()).toBeVisible();
+
+  gate.release(MIGRATIONS);
+  await expect(page.locator("#mig-progress")).toBeHidden();
+});
 
 /**
  * **L2. The strip says what is known and admits what is not.**

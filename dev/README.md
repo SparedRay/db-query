@@ -150,3 +150,57 @@ output pane rendering a document Flyway actually produced.
 **`FLYWAY_BIN`** points the *Rust live tests* at a different binary; the app
 reads the Settings field instead, so the two can disagree deliberately — a
 system Flyway in the app, the pinned one under test.
+
+## Checking that preferences survive being run a different way
+
+`localStorage` belongs to the **webview's origin**, and this app has two of
+them — `http://localhost:1420` under `mise run dev`, `tauri://localhost`
+installed. That is why preferences live in `preferences.json` in the app config
+directory now, with `localStorage` as the cache; `src-tauri/src/prefs.rs` has
+the measurement. No automated test can cover it, because it needs two
+different webviews, so here is the check by hand:
+
+```bash
+ls ~/.config/com.dbquery.poc/                      # preferences.json, shared
+ls ~/.local/share/com.dbquery.poc/localstorage/    # one file per origin
+```
+
+To read what an origin's cache actually holds (it is SQLite, and the app holds
+a write-ahead log, so copy all three files):
+
+```bash
+cd "$(mktemp -d)"
+for f in ~/.local/share/com.dbquery.poc/localstorage/tauri_localhost_0.localstorage*; do
+  cp "$f" "ls.sqlite${f##*.localstorage}"
+done
+python3 -c "
+import sqlite3
+for k, v in sqlite3.connect('ls.sqlite').execute('select key, value from ItemTable'):
+    print(k, '=', v if isinstance(v, str) else bytes(v).decode('utf-16-le'))
+"
+```
+
+The property to check: change a setting in one build, start the other, and it
+is there. `preferences.json` should hold the same object, and the other
+origin's cache should have been overwritten with it at boot.
+
+### Without touching anything real
+
+Both paths resolve from XDG, so the packaged build can be run against a
+scratch root — `app_config_dir` is `$XDG_CONFIG_HOME/com.dbquery.poc` and the
+webview's storage is `$XDG_DATA_HOME/com.dbquery.poc`:
+
+```bash
+ISO=$(mktemp -d); mkdir -p "$ISO/config/com.dbquery.poc" "$ISO/data"
+printf '{"version":1,"settings":{"fontSize":19,"theme":"dark"}}'   > "$ISO/config/com.dbquery.poc/preferences.json"
+XDG_CONFIG_HOME="$ISO/config" XDG_DATA_HOME="$ISO/data"   ./src-tauri/target/release/db-query
+```
+
+Close it and read `$ISO/data/com.dbquery.poc/localstorage/` with the snippet
+above: `db-query.settings` should hold what was planted, and `db-query.theme`
+should say `dark` — that second key is written by `applySettings`, so it is
+also the proof that `main.ts` was reached at all, which is what the dev server
+cannot tell you about the custom protocol and the CSP.
+
+Delete `preferences.json`, launch again, and it comes back `0600` with the same
+settings: that is the one-time hand-up from the cache.

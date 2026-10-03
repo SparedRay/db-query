@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, commandNames, connect, sendOnChannel, withSettings } from "./harness";
+import { calls, commandNames, connect, relaunch, sendOnChannel, withSettings } from "./harness";
 
 /**
  * The assistant, answered by a CLI the person is already signed into.
@@ -382,4 +382,46 @@ test("a failed reply leaves no spinner behind", async ({ page }) => {
 
   await expect(page.locator(".chat-error")).toContainText("not signed in");
   await expect(page.locator(".chat-waiting")).toHaveCount(0);
+});
+
+// -------------------------------------------------- surviving a new launch
+
+/**
+ * **The choice outlives the window.** Reported from use: every launch needed
+ * the integration enabling and the provider choosing all over again.
+ *
+ * This test passed the day it was written, which is what located the real
+ * fault — not the saving, but *where* it was saved. See `prefs.spec.ts`. It is
+ * kept because it is the reported symptom stated as an assertion, and because
+ * it covers the cache half of the two stores.
+ *
+ * Deliberately no `withSettings`. Its init script re-runs on every navigation
+ * and rewrites `cliEnabled`, `aiProvider` and `aiRecipe` — the three keys this
+ * test is watching — so a relaunch would be answered by the harness rather
+ * than by the app, and the test would pass whatever the app did.
+ */
+test("the enabled integration and the chosen CLI survive a new launch", async ({ page }) => {
+  stream = gate();
+  await connect(page, {
+    assistant_status: () => ({ hasKey: true, ready: true, local: false }),
+    assistant_cli_probe: () => SIGNED_IN,
+    assistant_cli_send: () => stream.promise,
+    assistant_cli_cancel: () => null,
+    assistant_send: () => stream.promise,
+  });
+  await openSettings(page);
+  await page.click('.integration[data-recipe="copilot"] input[type="checkbox"]');
+  await page.selectOption("#set-ai-preset", { label: "Copilot CLI" });
+  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+
+  await relaunch(page);
+
+  // The button is the part that needs no dialog: if the provider came back,
+  // this says so before anything is opened.
+  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+  await openSettings(page);
+  await expect(
+    page.locator('.integration[data-recipe="copilot"] input[type="checkbox"]'),
+  ).toBeChecked();
+  await expect(page.locator("#set-ai-preset option:checked")).toHaveText("Copilot CLI");
 });
