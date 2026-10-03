@@ -1,13 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  CONN_INFO,
-  MYSQL_CAPS,
-  calls,
-  connect,
-  installBackend,
-  openDatabase,
-  schemaBackend,
-} from "./harness";
+import { CONN_INFO, MYSQL_CAPS, calls, connect, installBackend, openDatabase, schemaBackend, visit } from "./harness";
 
 /**
  * The rail of saved connections: what each button says it is, and what order
@@ -57,7 +49,7 @@ const ELASTIC = {
 
 async function railOf(page: Page, profiles: unknown[]) {
   await installBackend(page, { list_profiles: () => ({ profiles, warning: null }) });
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator(".rail-item")).toHaveCount(profiles.length);
 }
 
@@ -142,7 +134,7 @@ const READ_ONLY_MYSQL = { ...MYSQL_CAPS, writes: false, readOnly: true };
 
 test("ticking Read-only saves it with the profile", async ({ page }) => {
   await installBackend(page, schemaBackend);
-  await page.goto("/");
+  await visit(page);
 
   await page.click("#btn-connect");
   await page.click("#conn-read-only");
@@ -216,7 +208,7 @@ test("saving an edit reconnects, so a change to the flag applies at once", async
     connect_saved: () => ({ ...CONN_INFO, capabilities: READ_ONLY_MYSQL }),
     list_profiles: () => ({ profiles: [{ ...MYSQL, readOnly: true }], warning: null }),
   });
-  await page.goto("/");
+  await visit(page);
   await page.locator(".rail-item").click();
   await expect(page.locator(".rail-item.live")).toHaveCount(1);
 

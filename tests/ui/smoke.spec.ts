@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { calls, installBackend } from "./harness";
+import { calls, installBackend, visit } from "./harness";
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
@@ -9,7 +9,7 @@ test.beforeEach(async ({ page }) => {
 
 test("boots, mounts the editor, and asks the backend for its defaults", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
 
   await expect(page.locator("#rail")).toHaveCount(1);
   await expect(page.locator("#editor .cm-editor")).toBeVisible();
@@ -31,7 +31,7 @@ test("boots, mounts the editor, and asks the backend for its defaults", async ({
  */
 test("copy and export are disabled when there is nothing to export", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
 
   await expect(page.locator("#btn-copy")).toBeDisabled();
   await expect(page.locator("#btn-copy-head")).toBeDisabled();
@@ -45,6 +45,6 @@ test("copy and export are disabled when there is nothing to export", async ({ pa
  */
 test("no connection means no tabs, and no error", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
   await expect(page.locator("#script-tabs .stab")).toHaveCount(0);
 });

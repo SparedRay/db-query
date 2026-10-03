@@ -471,6 +471,9 @@ export class TabManager {
     mtimeMs?: number | null;
     /** Opened by something other than the person at the keyboard. */
     origin?: TabOrigin;
+    /** The database to start on, when the caller knows it and `onCreated`
+     *  cannot — see `close`. Otherwise left to that hook. */
+    activeDb?: string | null;
   }): ScriptTab {
     const connectionId = opts?.connectionId ?? this.activeConnectionId;
     if (!connectionId) {
@@ -501,7 +504,7 @@ export class TabManager {
       ...emptyResultState(),
       sourceTable: opts?.sourceTable ?? null,
       busy: false,
-      activeDb: null,
+      activeDb: opts?.activeDb ?? null,
       serverConnId: 0,
       untitledNumber,
       origin: opts?.origin ?? "own",
@@ -555,8 +558,17 @@ export class TabManager {
     if (siblings.length === 0 && tab.connectionId !== null) {
       // Never zero tabs on a connection — its workspace would have nowhere to
       // type, and switching to it would show an empty pane.
+      //
+      // **The replacement starts on the database the closed tab was on.**
+      // `onCreated` means to carry it over, but it cannot: it reads
+      // `active()`, and the closed tab is already out of `this.tabs` by the
+      // time it runs — so the fallback took the *connection's* database
+      // instead, moving the tree's highlight and the completions off the
+      // schema somebody was working in (or clearing them, for a connection
+      // with no database of its own). Closing an empty buffer therefore
+      // changed what an unqualified table name meant.
       this.activeId = null;
-      this.create({ connectionId: tab.connectionId });
+      this.create({ connectionId: tab.connectionId, activeDb: tab.activeDb });
       return;
     }
     if (this.activeId === id) {

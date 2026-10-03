@@ -73,6 +73,11 @@ export const baseBackend: Backend = {
   // Every boot reads the session file. Stubbed as "nothing remembered" so no
   // other test has to think about it, and overridden by the ones that do.
   load_session: () => ({ session: { version: 1, connections: [] }, warning: null }),
+  // And the preferences file, before anything else — `src/boot.ts`. "Nothing
+  // stored" by default, which is what leaves `withSettings` in charge of the
+  // localStorage cache for every test that does not care about the file.
+  prefs_load: () => ({ settings: null, warning: null }),
+  prefs_save: () => null,
   save_session: () => null,
   open_tab: () => null,
   close_tab: () => null,
@@ -434,9 +439,39 @@ export const schemaBackend: Backend = {
 };
 
 /** Boot, connect through the real dialog, and land with a schema tree. */
+/**
+ * Wait until the app has wired the window up.
+ *
+ * `index.html` is a complete static shell, so the buttons exist before any
+ * handler is on them — and since `src/boot.ts` fetches the preferences before
+ * importing `src/main.ts`, that gap is now an IPC round trip wide rather than
+ * nothing. A click inside it lands on a control that does nothing, which shows
+ * up as a dialog that never opens.
+ *
+ * `main.ts` sets `data-ready` on the last line of its module evaluation.
+ */
+export async function ready(page: Page) {
+  await page.locator("html[data-ready]").waitFor();
+}
+
+/**
+ * Load the app and wait for it to be usable. **Every test navigates this way**
+ * rather than calling `goto` itself, so that nothing has to remember the wait.
+ */
+export async function visit(page: Page) {
+  await page.goto("/");
+  await ready(page);
+}
+
+/** A fresh launch of the same window — the same wait applies. */
+export async function relaunch(page: Page) {
+  await page.reload();
+  await ready(page);
+}
+
 export async function connect(page: Page, extra: Backend = {}) {
   await installBackend(page, { ...schemaBackend, ...extra });
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.locator("#conn-dialog").waitFor({ state: "visible" });
   await page.click("#conn-ok");

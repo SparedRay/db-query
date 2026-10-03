@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, installBackend, schemaBackend, type Backend } from "./harness";
+import { calls, installBackend, schemaBackend, type Backend, visit } from "./harness";
 
 /**
  * Self-update.
@@ -21,7 +21,7 @@ const AVAILABLE = {
 
 async function boot(page: Page, extra: Backend = {}) {
   await installBackend(page, { ...schemaBackend, ...extra });
-  await page.goto("/");
+  await visit(page);
 }
 
 const btn = "#btn-update";

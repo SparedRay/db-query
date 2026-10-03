@@ -1,10 +1,26 @@
 // Preferences that outlive a session.
 //
-// Kept in localStorage rather than in the Rust config file: none of it is a
-// secret, none of it is needed before the window exists, and the config file's
-// job is connections. Reads are defensive — storage throws outright in some
+// # Two stores, one of them authoritative
+//
+// `localStorage` is read here because it is the only store available
+// synchronously, and these values are needed before the first frame — a font
+// size fetched over IPC is a font size applied after the editor has already
+// been drawn in the wrong one.
+//
+// But it is a **cache, not the record**. The record is a file in the app
+// config directory, beside `connections.json` and `session.json`, written
+// through on every save and copied into `localStorage` by `src/boot.ts`
+// before this module is ever read. It had to be: a webview's storage belongs
+// to its *origin*, and this app has two — `http://localhost:1420` when run
+// with `mise run dev`, `tauri://localhost` when installed — so a preference
+// chosen in one build was invisible to the other, and an installer that
+// resets the webview's data directory took the lot. That is what was behind
+// "enabling the CLI integration never sticks". See `src-tauri/src/prefs.rs`.
+//
+// Reads stay defensive either way — storage throws outright in some
 // embeddings, and a value written by a future version must not break this one.
 
+import { api } from "./api";
 import type { AiProvider, Recipe } from "./api";
 import type { ThemePref } from "./theme";
 
@@ -184,7 +200,8 @@ export const AI_PRESETS: Array<{
   },
 ];
 
-const KEY = "db-query.settings";
+/** Exported for `src/boot.ts`, which seeds this key from the file. */
+export const KEY = "db-query.settings";
 
 /**
  * A number inside the range the UI can actually produce, or the default.
@@ -281,6 +298,11 @@ export function save(s: Settings) {
     // Unavailable storage means the change applies to this session only, which
     // is better than refusing to apply it at all.
   }
+  // And through to the file, which is what makes the change outlive this
+  // origin. Unawaited and swallowed on purpose: a preference that has already
+  // been applied and cached must not raise a dialog because a disk was full,
+  // and the next save will try again.
+  void api.prefsSave(s as unknown as Record<string, unknown>).catch(() => {});
 }
 
 /**

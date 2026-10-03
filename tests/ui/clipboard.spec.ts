@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { installBackend, rowsResult } from "./harness";
+import { installBackend, rowsResult, visit } from "./harness";
 
 /**
  * The question Stage 3 could not answer.
@@ -66,7 +66,7 @@ async function connectAndRun(page: import("@playwright/test").Page, result: unkn
     run_script: () => result,
     use_database: () => null,
   });
-  await page.goto("/");
+  await visit(page);
 
   await page.click("#btn-connect");
   await expect(page.locator("#conn-dialog")).toBeVisible();

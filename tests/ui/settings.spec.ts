@@ -1,12 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import {
-  calls,
-  commandNames,
-  connect,
-  installBackend,
-  schemaBackend,
-  settingsSection,
-} from "./harness";
+import { calls, commandNames, connect, installBackend, relaunch, schemaBackend, settingsSection, visit } from "./harness";
 
 /**
  * The settings dialog: appearance, session defaults, and the manual update
@@ -74,7 +67,7 @@ test("settings survive a reload", async ({ page }) => {
   await page.uncheck("#set-autolimit");
   await page.click("#set-close");
 
-  await page.reload();
+  await relaunch(page);
   await expect.poll(async () => (await codeStyle(page)).size).toBe("15px");
   await expect(page.locator("#chk-autolimit")).not.toBeChecked();
 });
@@ -88,7 +81,7 @@ test("session defaults are applied to the controls at boot", async ({ page }) =>
   await page.fill("#set-timeout", "30");
   await page.locator("#set-timeout").dispatchEvent("change");
   await page.click("#set-close");
-  await page.reload();
+  await relaunch(page);
 
   await expect(page.locator("#chk-lint")).not.toBeChecked();
   await expect(page.locator("#num-timeout")).toHaveValue("30");
@@ -123,7 +116,7 @@ test("a nonsense stored setting falls back instead of breaking the app", async (
       JSON.stringify({ fontSize: 900, timeoutSecs: -5, browseLimit: 0, fontFamily: "Comic Sans" }),
     );
   });
-  await page.goto("/");
+  await visit(page);
 
   const s = await codeStyle(page);
   expect(s.size).toBe("12px");

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, editorText, installBackend, schemaBackend } from "./harness";
+import { calls, connect, editorText, installBackend, schemaBackend, visit } from "./harness";
 
 /**
  * Query history — deferred since Stage 0, and on every backlog since.
@@ -214,7 +214,7 @@ test("Ctrl+H opens it, and pressing it again does not throw", async ({ page }) =
 /** Without a connection there is nowhere to put a tab; it must say so. */
 test("with no connection, history still opens and is not connection-scoped", async ({ page }) => {
   await installBackend(page, { ...schemaBackend, history_search: () => [hit()] });
-  await page.goto("/");
+  await visit(page);
 
   await page.click("#btn-history");
   await expect(page.locator("#history-dialog")).toBeVisible();

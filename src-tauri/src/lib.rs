@@ -18,6 +18,7 @@ pub mod lint;
 pub mod logbook;
 pub mod mcp;
 pub mod mysql;
+pub mod prefs;
 pub mod proc;
 pub mod profiles;
 pub mod schema;
@@ -108,6 +109,21 @@ fn load_session(app: tauri::AppHandle) -> Result<workspace::LoadOutcome, String>
 #[tauri::command]
 fn save_session(app: tauri::AppHandle, session: workspace::SessionStore) -> Result<(), String> {
     workspace::save(&config_dir(&app)?, &session)
+}
+
+/// The preferences, from the config directory rather than the webview's own
+/// storage — see [`prefs`] for the measurement that moved them there.
+#[tauri::command]
+fn prefs_load(app: tauri::AppHandle) -> Result<prefs::LoadOutcome, String> {
+    Ok(prefs::load(&config_dir(&app)?))
+}
+
+#[tauri::command]
+fn prefs_save(
+    app: tauri::AppHandle,
+    settings: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    prefs::save(&config_dir(&app)?, &settings)
 }
 
 /// Save a profile, and optionally its password.
@@ -2045,6 +2061,8 @@ pub fn run() {
             history_clear,
             load_session,
             save_session,
+            prefs_load,
+            prefs_save,
             app_defaults,
             generate_select,
             generate_drop,

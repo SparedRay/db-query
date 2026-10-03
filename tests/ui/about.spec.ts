@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installBackend, settingsSection } from "./harness";
+import { installBackend, settingsSection, visit } from "./harness";
 
 /**
  * The licence notices, reachable from inside the app.
@@ -25,7 +25,7 @@ async function openSettings(page: import("@playwright/test").Page) {
 
 test("the licences are readable from settings", async ({ page }) => {
   await installBackend(page, { third_party_licenses: () => NOTICES });
-  await page.goto("/");
+  await visit(page);
   await openSettings(page);
 
   await settingsSection(page, "about");
@@ -45,7 +45,7 @@ test("a build with no generated file says how to generate one", async ({ page })
       throw new Error("This build carries no licence file. Run:\n\n    npm run attribution");
     },
   });
-  await page.goto("/");
+  await visit(page);
   await openSettings(page);
 
   await settingsSection(page, "about");
@@ -57,7 +57,7 @@ test("a build with no generated file says how to generate one", async ({ page })
 /** Nothing is fetched until it is asked for — settings open on every launch. */
 test("opening settings does not read the licence file", async ({ page }) => {
   await installBackend(page, { third_party_licenses: () => NOTICES });
-  await page.goto("/");
+  await visit(page);
   await openSettings(page);
 
   const names = await page.evaluate(

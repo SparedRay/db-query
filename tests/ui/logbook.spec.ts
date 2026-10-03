@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { calls, connect, installBackend, logNotes, openDatabase, schemaBackend } from "./harness";
+import { calls, connect, installBackend, logNotes, openDatabase, schemaBackend, visit } from "./harness";
 
 /**
  * The logbook, from the side that writes to it.
@@ -42,7 +42,7 @@ test("every command the UI sends is recorded by name", async ({ page }) => {
  */
 test("a password reaches the backend and never reaches the log", async ({ page }) => {
   await installBackend(page, schemaBackend);
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.locator("#conn-dialog").waitFor({ state: "visible" });
   await page.fill("#conn-dialog input[name=password]", "hunter2-do-not-log-me");
@@ -67,7 +67,7 @@ test("a failed command is recorded as an error, with what went wrong", async ({ 
       throw new Error("the server went away");
     },
   });
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.click("#conn-ok");
   // Opening the database is what asks for the tables, and what fails.
@@ -89,7 +89,7 @@ test("a failed command is recorded as an error, with what went wrong", async ({ 
  */
 test("an uncaught error reaches the log instead of vanishing", async ({ page }) => {
   await installBackend(page, schemaBackend);
-  await page.goto("/");
+  await visit(page);
 
   await page.evaluate(() => {
     // Thrown from a timer, so it is genuinely uncaught rather than caught by
@@ -108,7 +108,7 @@ test("an uncaught error reaches the log instead of vanishing", async ({ page }) 
 
 test("an unhandled rejection reaches the log too", async ({ page }) => {
   await installBackend(page, schemaBackend);
-  await page.goto("/");
+  await visit(page);
 
   await page.evaluate(() => {
     void Promise.reject(new Error("a promise nobody caught"));
@@ -136,7 +136,7 @@ test("a routine command is quiet when it works and loud when it does not", async
       throw new Error("the disk is full");
     },
   });
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.click("#conn-ok");
   await page.click("#script-tabs .new-tab, #script-tabs button:last-child");

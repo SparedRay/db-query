@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { commandNames, connect, editorText, installBackend } from "./harness";
+import { commandNames, connect, editorText, installBackend, visit } from "./harness";
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
@@ -192,7 +192,7 @@ test("a conflicting save asks rather than overwriting", async ({ page }) => {
 
 test("remember-password is only offered for a connection being saved", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
 
   await expect(page.locator("#conn-remember-row")).toBeVisible();
@@ -204,7 +204,7 @@ test("remember-password is only offered for a connection being saved", async ({ 
 
 test("an ad-hoc connection is not written down", async ({ page }) => {
   await installBackend(page, { connect: () => ({ id: "c1", serverVersion: "8.4.0", databases: ["poc"], currentDatabase: null }) });
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.uncheck("#conn-save");
   await page.click("#conn-ok");
@@ -215,7 +215,7 @@ test("an ad-hoc connection is not written down", async ({ page }) => {
 
 test("Cancel closes the connection dialog without connecting", async ({ page }) => {
   await installBackend(page);
-  await page.goto("/");
+  await visit(page);
   await page.click("#btn-connect");
   await page.click("#conn-cancel");
   await expect(page.locator("#conn-dialog")).toBeHidden();
