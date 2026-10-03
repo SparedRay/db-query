@@ -1214,3 +1214,49 @@ would earn its place is CI, so a run does not fetch 584 MB — still not built.
 
 **878 UI tests on both engines, 422 Rust, 15 live Flyway tests, `mise run
 check` exits 0.**
+
+## 22. The capture path, tested against real Flyway — 2026-10-03
+
+> *"if I install flyway locally we can create a fixture so we can debug the
+> behavior end to end right?"*
+
+**Nothing needs installing**, which is worth saying before anything else:
+`mise run flyway-up` already fetches the pinned 13.5.0 into `dev/.flyway`. That
+is why `which flyway` finds nothing on a machine that can run the whole Flyway
+suite. Hand-debugging works today, and `dev/README.md` now has the recipe —
+including the one detail that trips it up, that the app's **Flyway command**
+setting must be given the absolute path of the pinned binary, because empty
+means "whatever is on the PATH" and the pinned copy deliberately is not.
+
+The question did find something, though.
+
+### 22.1 A gap in what §21 claimed
+
+§21 said the live tests pin "the contract between the backend and the pane".
+They did not. They asserted the `Finished` that `run` returns, and the UI tests
+asserted a document pasted into them — while the thing **in between**, the store
+that `flyway_last_run` reads, had no live coverage at all. That store is what
+actually feeds the pane.
+
+Two tests now cover it:
+
+* **the stored run is the run that just happened** — same stdout, same exit
+  code, same operation, and still parseable. Falsified by removing the
+  `remember` call.
+* **a later run replaces it** — a migrate, then an `info`, and the store holds
+  the `info`. This is why the UI copies the report onto the tab *before*
+  `showSelected` re-reads the list, which until now was asserted only by a
+  comment. Falsified by making `info` not overwrite.
+
+17 live Flyway tests.
+
+### 22.2 What still cannot be automated
+
+The UI and the real backend together. The Playwright harness stubs `invoke`, so
+a test either drives the real UI against stubs or the real backend without a
+UI. Closing that would mean driving a built Tauri binary — a different kind of
+test, not a fixture — and it is not built.
+
+So "end to end" splits in three, and all three now have something: the UI
+against stubs (878 tests), the backend against real Flyway (17), and the whole
+app by hand (the recipe in `dev/README.md`).

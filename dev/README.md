@@ -86,3 +86,36 @@ files. `df -h .` is the first thing to check when a build breaks that way.
 
 The fixture containers are the other few gigabytes (`podman system df`), but
 those are images you want to keep unless you are done with a fixture entirely.
+
+## Debugging migrations end to end, by hand
+
+Nothing needs installing: `mise run flyway-up` fetches the pinned 13.5.0 into
+`dev/.flyway`, which is why `which flyway` finds nothing on a machine that can
+already run the Flyway tests.
+
+```bash
+mise run db-up        # MySQL, in podman
+mise run flyway-up    # the pinned CLI + flyway_dev, flyway_qa, flyway_probe
+mise run dev          # the real app, real backend
+```
+
+Then, in the app:
+
+1. **Settings → Migrations → Flyway command**: paste the absolute path printed
+   by `realpath dev/.flyway/flyway-13.5.0/flyway`. The row above the field
+   reports the version once it answers, which is the quickest check that the
+   path is right. Leaving it empty means "whatever is on the PATH", and the
+   pinned copy deliberately is not.
+2. **Migrations sidebar → add project** → `dev/flyway/flyway.toml`.
+3. Pick **`probe`**. It exists to be thrown away — the live tests clean it — so
+   it is the one to experiment in. `development` ends at a deliberately broken
+   V4, which is the interesting case: apply it and the output pane shows the
+   three that ran, then why the fourth stopped.
+
+This exercises everything the stubs cannot: the real spawn (including
+`CREATE_NO_WINDOW` on Windows), the progress strip while a JVM starts, and the
+output pane rendering a document Flyway actually produced.
+
+**`FLYWAY_BIN`** points the *Rust live tests* at a different binary; the app
+reads the Settings field instead, so the two can disagree deliberately — a
+system Flyway in the app, the pinned one under test.
