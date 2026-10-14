@@ -89,6 +89,7 @@ export function createSessionPersistence(deps: {
         dialect: tab.dialect,
         encoding: tab.encoding,
         lineEnding: tab.lineEnding,
+        bom: tab.bom,
         mtimeMs: tab.mtimeMs,
         // The only copy, or nothing at all.
         text: tab.filePath === null || dirty ? tabs.textOf(tab) : null,
@@ -152,6 +153,7 @@ export function createSessionPersistence(deps: {
       dialect: stored.dialect || "mysql",
       encoding: stored.encoding || "utf-8",
       lineEnding: stored.lineEnding || "lf",
+      bom: stored.bom ?? false,
       mtimeMs: null,
       contents: stored.text ?? "",
       baseline: stored.text ?? "",
@@ -193,6 +195,7 @@ export function createSessionPersistence(deps: {
         dialect: file.dialect,
         encoding: file.encoding,
         lineEnding: file.lineEnding,
+        bom: file.bom ?? false,
         mtimeMs: file.mtimeMs,
         contents: file.contents,
         baseline: file.contents,
@@ -209,6 +212,9 @@ export function createSessionPersistence(deps: {
       dialect: file.dialect,
       encoding: file.encoding,
       lineEnding: file.lineEnding,
+      // From the file as it is now, not from the session file: whether a file
+      // has a BOM is a fact about the bytes on disk.
+      bom: file.bom ?? false,
       mtimeMs: stored.mtimeMs,
       contents: stored.text,
       baseline: file.contents,

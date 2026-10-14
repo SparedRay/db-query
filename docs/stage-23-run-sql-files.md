@@ -619,6 +619,59 @@ running its first statement fails the same way. Stripping it in
 `files::read_file` fixes both, and is the right place precisely because both
 paths read through it.
 
+## 9b. Built so far
+
+### 9b.1 The foundation: a BOM off the text, and two ways to read a span — 2026-10-14
+
+The three findings from §9 that could be acted on before any new surface
+exists, each of which fixes something that was already wrong.
+
+**The BOM comes off the text and stays on the file.** `files::read_file` strips
+a leading U+FEFF and records `bom` on `OpenedFile`; `save_file` takes it and
+puts it back. Symmetrical with `line_ending`, which has worked this way since
+Stage 1, and symmetrical for the same reason: the editor wants normalised text
+and the file's owner wants their bytes. Writing the file back without its BOM
+would be a second wrong — a diff with a line in it that nobody changed.
+
+It is **recorded, not inferred**, and it rides on the tab through the session
+file, so a restored tab still saves correctly. On restore it is taken from the
+file as it is now rather than from the session file, because whether a file has
+a BOM is a fact about the bytes on disk.
+
+This fixes a **latent editor bug that predates this stage**: open a BOM'd `.sql`
+today, press Ctrl+Enter on the first statement, and MySQL answers 1064 pointing
+at a character nobody can see. Two UI tests pin the marker's round trip through
+the tab, and the Rust tests cover the file: a BOM survives, a plain file never
+gains one, a BOM *and* CRLF both survive together, and only a **leading** U+FEFF
+counts — one in the middle of a file is a zero-width no-break space, which is
+content, and a reader that strips every one of them is corrupting data to tidy
+an encoding marker.
+
+**`split::line_of`** turns a byte offset into a 1-based line by counting newline
+bytes, which is right because UTF-8 encodes nothing but `\n` as `0x0A`. An
+offset past the end answers with the last line rather than panicking: a line
+number is for a person to read, and refusing to produce one is never the more
+useful failure.
+
+**`split::first_code_byte`** answers §9.1's finding — a span owns the comment
+above it — and took a correction worth keeping. Built on `mask_noncode` it
+failed its own test: that mask blanks a string literal's *quotes* as well as its
+contents, so `'hi'` looked like no code at all. "No code" means "nothing to
+run", so the consequence would have been a **silently skipped file**, which is
+the failure this project least wants to ship.
+
+So the masker gained a fourth question — `mask_comments`, comments blanked and
+everything else verbatim — from the same scanner that already answers the other
+three. That is the module's own pattern (*"two different questions, so two
+different masks — sharing one scanner"*) and it keeps `first_code_byte` from
+holding a second opinion about where a comment ends, which would eventually
+disagree with the first about something like `a--b`.
+
+Both falsified: not stripping the BOM fails two file tests, and putting
+`first_code_byte` back on `mask_noncode` fails the literal case.
+
+**478 Rust unit tests, 483 UI on Chromium, 482 + 1 engine-skip on WebKit.**
+
 ## 10. Engines
 
 Gated by a capability, not an engine name — the rule `engine.rs` states for

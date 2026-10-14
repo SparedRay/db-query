@@ -705,6 +705,8 @@ export interface StoredTab {
   dialect: string;
   encoding: string;
   lineEnding: string;
+  /** The file began with a UTF-8 BOM, so a Save puts one back. */
+  bom?: boolean;
   /** The mtime the baseline came from, so the save-time conflict check
    *  still has something to compare against after a restart. */
   mtimeMs: number | null;
@@ -863,6 +865,10 @@ export interface OpenedFile {
   encoding: string;
   /** "lf" | "crlf" */
   lineEnding: string;
+  /** The file began with a UTF-8 BOM, which `contents` has had removed —
+   *  MySQL refuses a statement that starts with one. Recorded so a Save
+   *  writes the file back the way its owner had it. */
+  bom: boolean;
   mtimeMs: number;
   /** Large enough that the UI should warn and ease off linting. */
   large: boolean;
@@ -1228,10 +1234,19 @@ export const api = {
   supportedFileTypes: () => invoke<FileTypeSpec[]>("supported_file_types"),
   openFileDialog: () => invoke<OpenedFile | null>("open_file_dialog"),
   readFile: (path: string) => invoke<OpenedFile>("read_file", { path }),
-  saveFile: (path: string, contents: string, expectMtime: number | null, lineEnding: string) =>
-    invoke<SaveOutcome>("save_file", { path, contents, expectMtime, lineEnding }),
-  saveFileDialog: (suggestedName: string, contents: string, lineEnding: string) =>
-    invoke<SavedFile | null>("save_file_dialog", { suggestedName, contents, lineEnding }),
+  saveFile: (
+    path: string,
+    contents: string,
+    expectMtime: number | null,
+    lineEnding: string,
+    bom: boolean,
+  ) => invoke<SaveOutcome>("save_file", { path, contents, expectMtime, lineEnding, bom }),
+  saveFileDialog: (
+    suggestedName: string,
+    contents: string,
+    lineEnding: string,
+    bom: boolean,
+  ) => invoke<SavedFile | null>("save_file_dialog", { suggestedName, contents, lineEnding, bom }),
 
   // --- stateless
   /** The statement under the cursor, and where it starts in `sql`. */

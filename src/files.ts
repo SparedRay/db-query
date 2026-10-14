@@ -70,6 +70,7 @@ export function createFileUx(deps: FileUxDeps): FileUx {
       active.dialect = f.dialect;
       active.encoding = f.encoding;
       active.lineEnding = f.lineEnding;
+      active.bom = f.bom ?? false;
     } else {
       tabs.create({
         contents: f.contents,
@@ -78,6 +79,7 @@ export function createFileUx(deps: FileUxDeps): FileUx {
         dialect: f.dialect,
         encoding: f.encoding,
         lineEnding: f.lineEnding,
+        bom: f.bom ?? false,
         mtimeMs: f.mtimeMs,
       });
     }
@@ -118,7 +120,7 @@ export function createFileUx(deps: FileUxDeps): FileUx {
     // Snapshot before the await: anything typed during the write stays unsaved.
     const snapshot = tabs.docOf(tab);
     const text = snapshot.toString();
-    const outcome = await api.saveFile(path, text, expectMtime, tab.lineEnding);
+    const outcome = await api.saveFile(path, text, expectMtime, tab.lineEnding, tab.bom);
 
     if (outcome.type === "conflict") {
       const pick = await choose(
@@ -136,12 +138,13 @@ export function createFileUx(deps: FileUxDeps): FileUx {
         tab.mtimeMs = fresh.mtimeMs;
         tab.encoding = fresh.encoding;
         tab.lineEnding = fresh.lineEnding;
+        tab.bom = fresh.bom ?? false;
         refreshNote();
         return false;
       }
       if (pick !== "overwrite") return false;
       // Explicit overwrite: drop the expectation and write.
-      const forced = await api.saveFile(path, text, null, tab.lineEnding);
+      const forced = await api.saveFile(path, text, null, tab.lineEnding, tab.bom);
       if (forced.type !== "saved") return false;
       tabs.markSaved(tab, {
         path,
@@ -166,7 +169,12 @@ export function createFileUx(deps: FileUxDeps): FileUx {
   async function saveAs(tab: ScriptTab): Promise<boolean> {
     const snapshot = tabs.docOf(tab);
     try {
-      const saved = await api.saveFileDialog(tab.title, snapshot.toString(), tab.lineEnding);
+      const saved = await api.saveFileDialog(
+        tab.title,
+        snapshot.toString(),
+        tab.lineEnding,
+        tab.bom,
+      );
       if (!saved) return false; // cancelled
       tabs.markSaved(tab, {
         path: saved.path,

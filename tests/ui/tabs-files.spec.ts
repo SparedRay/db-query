@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { commandNames, connect, editorText, installBackend, visit } from "./harness";
+import { calls, commandNames, connect, editorText, installBackend, visit } from "./harness";
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
@@ -16,6 +16,7 @@ const FILE = {
   dialect: "mysql",
   encoding: "utf-8",
   lineEnding: "lf",
+  bom: false,
   mtimeMs: 1_700_000_000_000,
   large: false,
 };
@@ -142,6 +143,54 @@ test("saving a file-backed tab writes to its own path and clears the dirty mark"
   await page.keyboard.press("Control+s");
   await expect(page.locator("#script-tabs .stab.dirty")).toHaveCount(0);
   expect(await commandNames(page)).toContain("save_file");
+});
+
+/**
+ * **A BOM the file came with goes back on it.**
+ *
+ * MySQL refuses a statement beginning with U+FEFF, so `read_file` strips it
+ * and the editor never sees one — which leaves the open question this pins:
+ * does Save then quietly write a different file than the one that was opened?
+ * The marker rides on the tab and comes back on the save call.
+ */
+test("a file opened with a BOM is saved with its BOM", async ({ page }) => {
+  await connect(page, {
+    open_file_dialog: () => ({ ...FILE, bom: true, name: "notepad.sql" }),
+    supported_file_types: () => [{ label: "SQL", extensions: ["sql"] }],
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+
+  await page.keyboard.press("Control+o");
+  // The editor got the text without it; a BOM in the buffer is a syntax error
+  // waiting to be run. (Checked for its absence rather than for exact text:
+  // `editorText` goes through `innerText`, which normalises trailing newlines.)
+  const shown = await editorText(page);
+  expect(shown).toContain("SELECT 1;");
+  expect(shown).not.toContain("\uFEFF");
+
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.type(" -- edited");
+  await page.keyboard.press("Control+s");
+
+  const save = (await calls(page)).filter((c) => c.cmd === "save_file").pop();
+  expect(save?.args.bom).toBe(true);
+});
+
+/** And a file that had none does not acquire one. */
+test("a file opened without a BOM is saved without one", async ({ page }) => {
+  await connect(page, {
+    open_file_dialog: () => FILE,
+    supported_file_types: () => [{ label: "SQL", extensions: ["sql"] }],
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+
+  await page.keyboard.press("Control+o");
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.type(" -- edited");
+  await page.keyboard.press("Control+s");
+
+  const save = (await calls(page)).filter((c) => c.cmd === "save_file").pop();
+  expect(save?.args.bom).toBe(false);
 });
 
 /** An untitled tab has no path, so Save must become Save As. */
