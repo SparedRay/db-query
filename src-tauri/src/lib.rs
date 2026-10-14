@@ -28,6 +28,7 @@ pub mod secrets;
 pub mod session;
 pub mod split;
 pub mod sqlfiles;
+pub mod sqlfilesrun;
 pub mod sqlfmt;
 pub mod sqlgen;
 pub mod update;

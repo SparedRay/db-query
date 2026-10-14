@@ -111,36 +111,41 @@ pub struct ScriptResult {
     pub reconnected: bool,
 }
 
-/// Stream a single row-returning statement straight to a file, unbounded.
+/// How often a long stream reports where it is.
 ///
-/// This is the only path in the app that is **not** capped by [`MAX_ROWS`], and
-/// it exists precisely because that cap makes "export what is shown" a partial
-/// answer for a truncated result. Rows are written as they arrive and never all
-/// held at once, so exporting a table larger than memory works.
+/// Stage 23 §9.4 measured CSV at about 64,000 rows a second, so this is roughly
+/// four reports a second — often enough to look alive, rare enough that the
+/// reporting is not the work.
+const PROGRESS_EVERY_ROWS: usize = 25_000;
+
+/// Stream one row-returning statement to a file, unbounded, on a connection the
+/// caller owns.
 ///
-/// Runs on the tab's own exec connection under the same `running` flag as
-/// `run_script`, so the existing cancel button and `KILL QUERY` machinery apply
-/// unchanged — an export of ten million rows must be stoppable.
-pub async fn stream_to_file(
-    state: &AppState,
-    tab_id: &str,
+/// **The row loop, in one place.** It has two callers with genuinely different
+/// surroundings — a tab, which owns a connection shared with the editor and
+/// expresses cancellation through its own atomics, and a job, which owns a
+/// private connection and expresses it as a closure. What they must *not*
+/// differ about is the part that is easy to get subtly wrong: when the buffer
+/// is flushed, that a cancelled stream still writes what it had, and that the
+/// `.part` file never outlives the attempt. Two copies of this would eventually
+/// disagree about one of those, and a user would find out.
+///
+/// This is also the only path in the app that is **not** capped by
+/// [`MAX_ROWS`], which is the whole reason it exists: that cap makes "export
+/// what is shown" a partial answer for a truncated result.
+///
+/// Returns rows written, bytes written, and whether it stopped early.
+pub async fn stream_rows_to_file(
+    conn: &mut sqlx::MySqlConnection,
     sql: &str,
     path: &std::path::Path,
     mut write_row: impl FnMut(&MySqlRow, &mut String) -> Result<(), String>,
     header: impl FnOnce(&MySqlRow) -> Result<String, String>,
+    cancelled: impl Fn() -> bool,
+    mut progress: impl FnMut(usize, u64),
 ) -> Result<(usize, u64, bool), String> {
     use futures_util::StreamExt;
     use std::io::Write;
-
-    let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
-    let mut guard = tab.exec.lock().await;
-    session::ensure_exec(&mut guard, &tab).await?;
-    let conn = guard
-        .as_mut()
-        .expect("ensure_exec guarantees a live connection");
-
-    tab.cancel_requested.store(false, Ordering::SeqCst);
-    tab.running.store(true, Ordering::SeqCst);
 
     // Write to a sibling temp file and rename at the end, so an interrupted or
     // cancelled export never leaves a half-written file wearing the real name.
@@ -154,16 +159,33 @@ pub async fn stream_to_file(
             .map_err(|e| format!("Cannot create {}: {e}", tmp.display()))?;
         let mut written = 0usize;
         let mut bytes = 0u64;
-        let mut cancelled = false;
+        let mut stopped = false;
         let mut buf = String::new();
+        let mut next_report = PROGRESS_EVERY_ROWS;
         // Consumed on the first row, which is the only place the column
         // metadata exists — a stream has none before its first row arrives.
         let mut header = Some(header);
 
-        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
+        // **`persistent(false)`, and it is not a performance tweak.**
+        //
+        // sqlx caches prepared statements per connection by SQL text, and
+        // MySQL resolves some things — `DATABASE()` among them — when a
+        // statement is *prepared*. Two files in a batch holding the same
+        // `SELECT DATABASE()`, with a `USE` between them, otherwise get the
+        // answer from before the `USE`: no error, wrong CSV. Stage 23 §9.5
+        // measured it and §9b.3 caught it in the runner's own live test.
+        //
+        // Not persistent means prepared afresh, so prepare time is execute
+        // time. Still the binary protocol, so nothing about decoding changes
+        // (`sqlx-mysql-0.9.0/src/connection/executor.rs:124-150`, read
+        // 2026-10-14). The cost is one prepare per statement, which against a
+        // result set big enough to stream is nothing.
+        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+            .persistent(false)
+            .fetch(&mut *conn);
         while let Some(row) = stream.next().await {
-            if tab.cancel_requested.load(Ordering::SeqCst) {
-                cancelled = true;
+            if cancelled() {
+                stopped = true;
                 break;
             }
             let row = row.map_err(|e| session::friendly(&e))?;
@@ -181,6 +203,12 @@ pub async fn stream_to_file(
                 bytes += buf.len() as u64;
                 buf.clear();
             }
+            if written >= next_report {
+                // Including what is still buffered, so the number does not
+                // sit still between flushes.
+                progress(written, bytes + buf.len() as u64);
+                next_report = written + PROGRESS_EVERY_ROWS;
+            }
         }
         drop(stream);
 
@@ -189,17 +217,18 @@ pub async fn stream_to_file(
         bytes += buf.len() as u64;
         file.sync_all()
             .map_err(|e| format!("Cannot flush {}: {e}", tmp.display()))?;
-        Ok::<_, String>((written, bytes, cancelled))
+        Ok::<_, String>((written, bytes, stopped))
     }
     .await;
 
-    tab.running.store(false, Ordering::SeqCst);
-
     match result {
-        Ok((written, bytes, cancelled)) => {
+        Ok((written, bytes, stopped)) => {
+            // **A cancelled stream still keeps its file.** The rows it did
+            // write are real rows, and the caller is told how many — throwing
+            // them away would be a second decision nobody asked for.
             std::fs::rename(&tmp, path)
                 .map_err(|e| format!("Cannot finish writing {}: {e}", path.display()))?;
-            Ok((written, bytes, cancelled))
+            Ok((written, bytes, stopped))
         }
         Err(e) => {
             // A failed export leaves nothing behind wearing the real name.
@@ -207,6 +236,48 @@ pub async fn stream_to_file(
             Err(e)
         }
     }
+}
+
+/// Stream a statement to a file **on a tab's connection**, under its running
+/// flag.
+///
+/// The tab-flavoured caller of [`stream_rows_to_file`]: it borrows the editor's
+/// connection and takes cancellation from the tab's atomics, so the existing
+/// cancel button and `KILL QUERY` machinery apply unchanged — an export of ten
+/// million rows must be stoppable.
+pub async fn stream_to_file(
+    state: &AppState,
+    tab_id: &str,
+    sql: &str,
+    path: &std::path::Path,
+    write_row: impl FnMut(&MySqlRow, &mut String) -> Result<(), String>,
+    header: impl FnOnce(&MySqlRow) -> Result<String, String>,
+) -> Result<(usize, u64, bool), String> {
+    let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
+    let mut guard = tab.exec.lock().await;
+    session::ensure_exec(&mut guard, &tab).await?;
+    let conn = guard
+        .as_mut()
+        .expect("ensure_exec guarantees a live connection");
+
+    tab.cancel_requested.store(false, Ordering::SeqCst);
+    tab.running.store(true, Ordering::SeqCst);
+
+    let watching = Arc::clone(&tab);
+    let result = stream_rows_to_file(
+        conn,
+        sql,
+        path,
+        write_row,
+        header,
+        || watching.cancel_requested.load(Ordering::SeqCst),
+        // A tab has no progress strip for this; the grid is told when it ends.
+        |_, _| {},
+    )
+    .await;
+
+    tab.running.store(false, Ordering::SeqCst);
+    result
 }
 
 /// What became of a statement we were waiting on.
@@ -289,6 +360,17 @@ where
 
 /// First bare word of the statement, uppercased, read from the masked text so
 /// a leading comment or a quoted identifier cannot fool it.
+/// The keyword a statement starts with, upper-cased.
+///
+/// Public because `classify` is not the only question somebody asks about a
+/// statement's first word — the batch runner needs to know a `USE` when it
+/// sees one, and "does it start with those three bytes" says yes to
+/// `USER_COUNT()`. One definition of the leading word, so the two cannot
+/// disagree.
+pub fn leading_keyword_of(sql: &str) -> String {
+    leading_keyword(&split::mask_noncode(sql))
+}
+
 fn leading_keyword(masked: &str) -> String {
     masked
         .trim_start_matches(|c: char| c.is_whitespace() || c == '(')

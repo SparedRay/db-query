@@ -725,6 +725,69 @@ prove.
 
 **514 Rust tests (496 unit, 9 scan, 9 measurement), check clean.**
 
+### 9b.3 The runner, and the two things its live test caught — 2026-10-14
+
+**One row loop, two surroundings.** `exec::stream_to_file` was the right loop in
+the wrong place (§6.1), so the loop came out as
+`exec::stream_rows_to_file(conn, …, cancelled, progress)` and
+`stream_to_file` became its tab-flavoured caller — borrowing the editor's
+connection and reading cancellation from the tab's atomics. What the two must
+not differ about is the easy-to-get-subtly-wrong part: when the buffer flushes,
+that a cancelled stream still writes what it had, and that the `.part` file
+never outlives the attempt.
+
+`sqlfilesrun::run` is shaped like `dumprun`: its own connection, `Progress`
+over a channel, cancel polled between files, between statements and between
+rows. Non-row statements go through **`raw_sql`, not `query`** — a script holds
+`CREATE PROCEDURE`, `USE`, `SET`, `FLUSH`, and sqlx's ordinary path prepares,
+which MySQL refuses for some of those.
+
+Three unit tests carry what is pure (every skip reason is a sentence, `USE` is
+recognised behind the comment its span owns, report paths are relative); five
+live tests carry the rest. Two of them found things.
+
+#### The CSV said `poc` while the report said `information_schema`
+
+The `USE`-moves-the-next-file test failed with the report right and the **data
+wrong** — which is the worse way round. §9.5's trap, biting the feature this
+time: `sqlx::query` sets `persistent: true`, sqlx caches prepared statements per
+connection by SQL text, and MySQL resolves `DATABASE()` when a statement is
+*prepared*. Two files holding the same `SELECT DATABASE()` with a `USE` between
+them got the first file's answer, with no error anywhere.
+
+Fixed with `.persistent(false)` on the streaming path, read from the vendored
+source rather than guessed: `arguments: Some(_)` with `persistent` false takes
+`prepare_statement` instead of `get_or_prepare_statement`, so prepare time is
+execute time, and it stays on the binary protocol so nothing about decoding
+changes (`sqlx-mysql-0.9.0/src/connection/executor.rs:124-150` and
+`sqlx-core-0.9.0/src/query.rs:685-689`, read 2026-10-14). The cost is one
+prepare per statement, against a result set big enough to be worth streaming.
+
+It falsifies: with the cache back on, that test fails and the other four pass —
+which is exactly what makes it dangerous. **Still open, deliberately:** the
+editor's own `run_script` has the same staleness in principle. Fixing it there
+means a prepare per statement for every query anybody runs, which is a
+measurement this stage has not made.
+
+#### Files run in path order, so a subfolder lands last
+
+The folder run failed at `daily/08-nested.sql` because `99-teardown.sql` had
+already dropped its table: paths sort as paths, and `d` is greater than `9`. The
+runner was right and the fixture's numbering was wrong — a scheme spanning
+folders does not mean what it looks like.
+
+The teardown is now `zz-teardown.sql`, the fixture README says why, and the live
+test **asserts the order** rather than only depending on it, so a reader sees
+what the name is for. Worth knowing before anybody numbers their own folder.
+
+**Also built:** stop-on-error leaves the files after it reported as `NotRun` —
+the row a report by omission drops; a cancelled CSV is kept and marked
+**partial**, because a silently truncated CSV is one somebody opens in a
+spreadsheet and believes; and a read-only connection's refusal names the
+connection rather than claiming MySQL cannot write.
+
+**503 Rust unit tests, 9 scan, 9 measurement, 5 live runner.**
+
 ## 10. Engines
 
 Gated by a capability, not an engine name — the rule `engine.rs` states for

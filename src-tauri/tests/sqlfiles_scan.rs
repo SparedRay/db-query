@@ -57,8 +57,8 @@ fn the_fixture_folder_scans_to_the_numbers_the_preview_shows() {
             "05-notes.sql",
             "06-no-semicolon.sql",
             "07-bom.sql",
-            "99-teardown.sql",
             "daily/08-nested.sql",
+            "zz-teardown.sql",
         ],
         "alphabetical by path, which is why people number their scripts"
     );
@@ -68,11 +68,11 @@ fn the_fixture_folder_scans_to_the_numbers_the_preview_shows() {
 
     // 04 cannot be split and 05 has nothing to run, so seven of the nine run.
     assert_eq!(s.runnable_files, 7);
-    // 01: 3 · 02: 1 · 03: 3 · 06: 1 · 07: 1 · 99: 2 · daily/08: 1
+    // 01: 3 · 02: 1 · 03: 3 · 06: 1 · 07: 1 · daily/08: 1 · zz: 2
     assert_eq!(s.statements, 12);
     // 02, 03×3, 06, 07, daily/08.
     assert_eq!(s.outputs, 7);
-    // 01's DROP, CREATE, INSERT and 99's two DROPs.
+    // 01's DROP, CREATE, INSERT and the teardown's two DROPs.
     assert_eq!(s.writes, 5);
 }
 
@@ -188,8 +188,8 @@ fn the_writing_statements_name_themselves_with_a_line() {
         ("01-setup.sql", 2, "DROP TABLE IF EXISTS batch_probe"),
         ("01-setup.sql", 3, "CREATE TABLE batch_probe (id INT"),
         ("01-setup.sql", 4, "INSERT INTO batch_probe VALUES ("),
-        ("99-teardown.sql", 2, "DROP PROCEDURE IF EXISTS batch_p"),
-        ("99-teardown.sql", 3, "DROP TABLE IF EXISTS batch_probe"),
+        ("zz-teardown.sql", 2, "DROP PROCEDURE IF EXISTS batch_p"),
+        ("zz-teardown.sql", 3, "DROP TABLE IF EXISTS batch_probe"),
     ];
     assert_eq!(writes.len(), expected.len(), "{writes:#?}");
     for (got, want) in writes.iter().zip(expected) {
@@ -230,8 +230,8 @@ fn the_kinds_are_what_the_counts_are_built_on() {
             ("03-report.sql", vec![Select, Select, RowReturning]),
             ("06-no-semicolon.sql", vec![Select]),
             ("07-bom.sql", vec![Select]),
-            ("99-teardown.sql", vec![Other, Other]),
             ("daily/08-nested.sql", vec![Select]),
+            ("zz-teardown.sql", vec![Other, Other]),
         ]
     );
 }

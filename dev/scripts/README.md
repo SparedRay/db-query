@@ -11,4 +11,11 @@ Not SQL, so the runner ignores it — which is itself one of the cases.
 | `06-no-semicolon.sql` | No trailing semicolon, which a file has and an editor buffer usually does not |
 | `07-bom.sql` | Saved with a UTF-8 BOM, the way Notepad does. Fails with MySQL error 1064 unless the reader strips it |
 | `daily/08-nested.sql` | In a subfolder, so the output path mirrors rather than flattens |
-| `99-teardown.sql` | Drops what `01` made, so the fixture is re-runnable |
+| `zz-teardown.sql` | Drops what `01` made, so the fixture is re-runnable |
+
+**Why `zz-` and not `99-`.** Files run in order of their **path**, so
+`daily/08-nested.sql` sorts after every top-level file — `d` is greater than
+`9`. With the teardown called `99-` it dropped the table before the nested
+script read from it, and the nested script failed. That is the runner behaving
+correctly and a numbering scheme spanning folders being wrong, which is worth
+knowing before you number your own.
