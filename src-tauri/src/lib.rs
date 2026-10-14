@@ -27,6 +27,7 @@ pub mod schema;
 pub mod secrets;
 pub mod session;
 pub mod split;
+pub mod sqlfiles;
 pub mod sqlfmt;
 pub mod sqlgen;
 pub mod update;
@@ -841,6 +842,52 @@ async fn export_schema_cancel(
         cancel.ask();
     }
     Ok(())
+}
+
+// ------------------------------------------------- running a folder of scripts
+
+/// Ask what running a folder would do, without running any of it.
+///
+/// The dialog's preview and its write confirmation are both this answer
+/// (§4.1), and the runner will use the same plan — so a confirmation cannot
+/// describe a different run from the one that happens.
+///
+/// On a blocking pool because it reads every file in the folder. The editor's
+/// own `read_file` is a synchronous command and gets away with it for one file
+/// at a time; two hundred of them would hold the UI thread for as long as the
+/// disk takes.
+#[tauri::command]
+async fn sqlfiles_scan(
+    state: State<'_, AppState>,
+    connection_id: String,
+    dir: String,
+    recursive: bool,
+) -> Result<sqlfiles::Scan, String> {
+    // Before the folder is read, so an engine that cannot do this says so
+    // rather than producing a plan nobody can run.
+    let server = session::server(&state, &connection_id).await?;
+    if !server.capabilities.script_files {
+        return Err(format!(
+            "{} cannot run a folder of SQL scripts.",
+            server.capabilities.engine
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        sqlfiles::read_and_scan(std::path::Path::new(&dir), recursive)
+    })
+    .await
+    .map_err(|e| format!("The folder scan did not finish: {e}"))?
+}
+
+/// Pick the folder of scripts, or the folder the CSVs go in.
+///
+/// Two separate picks by §3.2's decision: the scripts may live somewhere
+/// shared or read-only, and inputs never mix with outputs.
+#[tauri::command]
+async fn sqlfiles_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    Ok(pick_folder(&app)
+        .await?
+        .map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// A directory, for the one-file-per-database layout.
@@ -2271,6 +2318,8 @@ pub fn run() {
             prefs_save,
             export_catalogue,
             export_destination,
+            sqlfiles_scan,
+            sqlfiles_pick_folder,
             export_schema,
             export_schema_cancel,
             app_defaults,

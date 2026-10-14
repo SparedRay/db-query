@@ -336,6 +336,8 @@ export interface Capabilities {
    *  Separate from `streamingExport`, which is about one result set: an index
    *  with a mapping has no CREATE statement to dump at all. */
   schemaExport: boolean;
+  /** A folder of `.sql` scripts can be run and its results written out. */
+  scriptFiles: boolean;
   rowCap: "clientLimit" | "serverPageSize";
   /** What this engine calls the thing `USE` switches between. */
   namespaceLabel: string;
@@ -835,6 +837,50 @@ export type DumpProgress =
   | { type: "rows"; rows: number; bytes: number }
   | { type: "finished" };
 
+/** Stage 23: what running a folder of `.sql` files would do. */
+export type SqlStatementKind = "select" | "rowReturning" | "modify" | "session" | "other";
+
+export type SqlFileVerdict =
+  | { type: "ready" }
+  /** Comments and whitespace: listed, because somebody put it in the folder. */
+  | { type: "nothingToRun" }
+  /** A DELIMITER block, which cannot be split per statement. */
+  | { type: "cannotSplit" }
+  | { type: "cannotRead"; reason: string };
+
+export interface SqlFileStatement {
+  start: number;
+  end: number;
+  /** 1-based line of the statement's **code**, not of the comment above it. */
+  line: number;
+  kind: SqlStatementKind;
+  returnsRows: boolean;
+  /** It writes, so the confirmation names it. */
+  writes: boolean;
+  /** The statement's first line, for the confirmation. */
+  preview: string;
+  /** Where its CSV goes, relative to the destination. */
+  output: string | null;
+}
+
+export interface SqlFileScanned {
+  /** Relative to the source folder, `/`-separated on every platform. */
+  path: string;
+  verdict: SqlFileVerdict;
+  statements: SqlFileStatement[];
+}
+
+export interface SqlFilesScan {
+  files: SqlFileScanned[];
+  /** Files that will actually run — not `files.length`. */
+  runnableFiles: number;
+  statements: number;
+  /** CSVs this run would write. */
+  outputs: number;
+  /** Statements that write. The number the confirmation is about. */
+  writes: number;
+}
+
 /** Where an export will go, and what it would land on top of. */
 export interface ExportDestination {
   /** Carried straight back to `exportSchema`. We never build one. */
@@ -1188,6 +1234,21 @@ export const api = {
 
   exportSchemaCancel: (requestId: string) =>
     invoke<void>("export_schema_cancel", { requestId }),
+
+  // --- running a folder of SQL files (Stage 23).
+
+  /** A folder, for the scripts or for the CSVs. `null` if dismissed. */
+  sqlfilesPickFolder: () => invoke<string | null>("sqlfiles_pick_folder"),
+
+  /**
+   * What running `dir` would do, without running any of it.
+   *
+   * The preview and the write confirmation are both this answer, and the run
+   * uses the same plan — so a confirmation cannot describe a different run
+   * from the one that happens.
+   */
+  sqlfilesScan: (connectionId: string, dir: string, recursive: boolean) =>
+    invoke<SqlFilesScan>("sqlfiles_scan", { connectionId, dir, recursive }),
 
   /** Delimited text for the clipboard. The frontend owns the clipboard call. */
   clipboardText: (result: ResultSet, options: CsvOptions) =>

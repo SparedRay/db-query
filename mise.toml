@@ -35,6 +35,10 @@ run = [
   # if `split` ever changes its mind about a leading comment, the design that
   # was built on the answer should fail here.
   "cargo test --manifest-path src-tauri/Cargo.toml --test measure_sqlfiles",
+  # Stage 23: the scan against `dev/scripts`, the folder that holds each case
+  # on purpose. Needs no server, so there is no excuse for postponing it — the
+  # dialog's own backend call is exactly the gap Stage 22 §9b.7 fell into.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test sqlfiles_scan",
   "node --test scripts/set-version.test.mjs",
   "node --test scripts/attribution.test.mjs",
 ]

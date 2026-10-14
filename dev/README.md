@@ -159,6 +159,23 @@ output pane rendering a document Flyway actually produced.
 reads the Settings field instead, so the two can disagree deliberately — a
 system Flyway in the app, the pinned one under test.
 
+## A folder of scripts: `dev/scripts`
+
+Stage 23's batch runner reads a folder, so the fixture *is* a folder.
+`dev/scripts/README.md` lists what each file is there to prove — a `DELIMITER`
+block, a file of only comments, a missing trailing semicolon, a UTF-8 BOM, three
+result sets in one file, and one in a subfolder so the output path has to mirror
+rather than flatten.
+
+`01-setup.sql` creates `batch_probe` and `99-teardown.sql` drops it, so the
+folder can be run twice and leaves `poc` as it was found. Nothing needs starting
+first beyond `mise run db-up`.
+
+`cargo test --test sqlfiles_scan` reads these files from disk and asserts the
+numbers the dialog's preview shows. **If you edit one of them, that test is
+where it fails** — deliberately, because a fixture that drifts from what the
+tests expect is a fixture that proves nothing.
+
 ## Driving the schema export by hand
 
 The Playwright tests stub `invoke`, so nothing automated has ever had the
