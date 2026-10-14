@@ -1,7 +1,12 @@
 # Stage 23 — Run a folder of SQL files, and keep every row
 
-**Status:** 📋 Planned — 2026-10-14. UX settled with four decisions (§3.2); six
-facts to measure before building (§9).
+**Status:** 📋 Planned — 2026-10-14. UX settled with seven decisions (§3.5);
+six facts to measure before building (§9).
+
+The first draft of this plan described the architecture — a job, its own
+connection — and called that the UX. It was not: *how do you reach it, what
+does it look like while it runs, and how do the results arrive* were all
+answered by pointing at Stage 22. §3 is the answer to those three questions.
 
 ---
 
@@ -38,35 +43,173 @@ this feature is mostly *which* of these it assembles.
 **The one piece that does not fit as it stands** is `stream_to_file`: it takes a
 `tab_id`, locks that tab's connection and flips its `running` flag. See §6.1.
 
-## 3. Where it lives
+## 3. The surfaces
 
-A **job**, not a tab — the same argument Stage 22 §6.1 made and this inherits.
-A folder of scripts over a million-row table runs for minutes; holding
-somebody's editor hostage for that is wrong, and the CSV streaming wants one
-connection for its whole run anyway.
+Underneath, it is a **job, not a tab** — the same argument Stage 22 §6.1 made
+and this inherits. A folder of scripts over a million-row table runs for
+minutes; holding somebody's editor hostage for that is wrong, and the CSV
+streaming wants one connection for its whole run anyway.
 
-So: its own connection from the pool, the job strip with Stop, and the report
-in the results surface. The app stays usable while it runs.
+That is the architecture. What follows is the part a user sees.
 
-**Entry points.** The rail's connection menu, and the database node's context
-menu — the second one because of §3.1.
+### 3.1 Reaching it: a rail button
 
-### 3.1 Which database it runs against is part of the job
+The rail has four tool buttons — assistant, history, schema, settings. This
+becomes the fifth, because it is a **task you come back to**, not a property of
+a connection you happen to be pointing at:
+
+```
+┌──┬──────────────┬──────────────────────┐
+│🔵│ poc          │  editor              │
+│🔵│  ▸ tables    │                      │
+│  │  ▸ views     │                      │
+│──┤              │                      │
+│🤖│              │  assistant   Ctrl+K  │
+│🕐│              │  history     Ctrl+H  │
+│🗂│              │  schema              │
+│▶▤│              │  run SQL files  ←    │
+│⚙ │              │  settings            │
+└──┴──────────────┴──────────────────────┘
+```
+
+**`Ctrl+B`** opens it, for batch. Not `Ctrl+Shift+R`, the obvious mnemonic:
+WebKitGTK claims it as reload, and a shortcut that reloads the app under
+`mise run dev` and works when packaged is the worst kind of difference.
+
+**The button is never disabled, however bad the news.** Stage 20 §11.1 settled
+that for the assistant: opening the panel is how you read *why* it is not
+ready, so taking the click away hides the explanation behind the thing needing
+explanation. With no connection open the dialog opens and says so.
+
+Because the rail supplies no connection, the dialog asks for one — a connection
+and a database select at the top, defaulted to the active connection and its
+current database. That is the one thing the rail entry costs, and §3.4 is why
+it is worth stating rather than inheriting invisibly.
+
+It is also offered on the **database node's context menu**, where it arrives
+with both already answered.
+
+### 3.2 While it runs: the strip, and nothing else
+
+The dialog **closes** when Run is pressed. A job does not live in a modal —
+that was Stage 21's whole lesson about the assistant, and a dump of forty
+tables behind a modal is the same mistake with a different noun.
+
+What is left on screen is the job strip, in the band above the result tabs
+where Flyway's has been since Stage 20:
+
+```
+┌────────────────────────────────────────────────────┐
+│ ◐  Running 3 of 7 · 02-orders.sql          [Stop] │
+│    statement 2 of 4 · 1,284,000 rows · 42.1 MB    │
+│    Running for 48s.                               │
+└────────────────────────────────────────────────────┘
+│ [query.sql] [report.sql]                          │
+│  …your grid, your tabs, your editor, all live     │
+```
+
+**"Without interrupting other things" is a guarantee, not a hope**, and it has
+a mechanism: the job holds **its own connection**, so a tab's queries keep
+running while it works. Three things follow, and each is a test rather than a
+claim (§8):
+
+* the strip lives outside the tab system, so switching tabs does not disturb
+  it and it does not disturb the tabs;
+* the editor takes typing, and **a query runs and returns, while the job is
+  mid-stream** — that is the own-connection claim, and only a live test can
+  prove it;
+* Stop lands inside a result rather than after it, because cancellation is
+  polled between rows.
+
+**One job at a time**, across kinds: there is one strip, and two jobs reporting
+into it would make both illegible. A second Run — or a schema export started
+while this is running — finds the button disabled with the reason on it, rather
+than a dialog that opens and then refuses.
+
+**Quitting mid-run is a gap this stage closes.** `files.confirmQuit` asks about
+unsaved buffers today and says nothing about a running job, so a dump or a
+batch run dies silently on quit. The confirmation gains a line naming it. That
+fixes it for the schema export too, which has the same hole.
+
+### 3.3 When it finishes: a report that outlives the tab
+
+**The report is the deliverable**, which is exactly why today's export report
+is the wrong model: it goes through `results.setMessage` into `#grid`, and
+`onActivate` repaints the grid per tab — so switching tabs or running one query
+destroys it. Stage 20 §19 had already learned this for Flyway (*"an outcome
+left only there is lost the moment another tab paints over it"*) and solved it
+with a pane; this does the same.
+
+When the run ends the strip is replaced in place by `#job-report`:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ SQL files · 7 files · 14 CSVs · 2,412,118 rows      │
+│ stopped at 05-bad.sql:12                            │
+│ /home/me/out     [Copy path] [Copy report] [Hide]   │
+├─────────────────────────────────────────────────────┤
+│ ✓ 01-setup.sql     2 statements · wrote 3 rows      │
+│ ✓ 02-orders.sql    orders.csv                       │
+│                    1,284,000 rows · 42.1 MB         │
+│ ✓ 03-report.sql    report.csv                       │
+│                    report-2.csv                     │
+│                    report-3.csv                     │
+│ ⊘ 04-proc.sql      DELIMITER — skipped              │
+│ ✗ 05-bad.sql:12    Unknown column 'x' in 'field …'  │
+│ – 06-later.sql     not run (stopped)                │
+│ – 07-last.sql      not run (stopped)                │
+└─────────────────────────────────────────────────────┘
+```
+
+Five properties, each deliberate:
+
+1. **It is a band, not a replacement.** The grid keeps its place and is pushed
+   down, so a report does not hide the query you ran next. `#flyway-pane`
+   replaces the grid because a migrations tab has no result set; this is not
+   that case. The band scrolls at a max height, so forty files do not eat the
+   pane.
+2. **It survives**, because it is outside the tab system — the whole point.
+   Switch tabs, run queries, come back; it is still there.
+3. **One line per file, in the order they ran** (§4.2), with a glyph for each
+   of the four outcomes: ran, skipped-with-reason, failed, and **not run**. That
+   last one is the honest consequence of stop-on-error (§4.3) and the easiest
+   to leave out: a report that lists five successes and one failure, saying
+   nothing of the two files it never reached, is a report that lies by omission.
+4. **Dismissed with Hide**, or replaced by the next run. Not kept across
+   restarts: it describes files on disk, and the files are the durable part.
+5. **Both Copy buttons go through `wireCopyButton`**, so each says what
+   happened — Stage 21's rule, earned by a Copy that failed silently.
+
+`Copy path` is there because **the folder is the real result and the app cannot
+open it.** Only `tauri-plugin-dialog` and `tauri-plugin-updater` are in the
+tree; `tauri-plugin-opener` would be a new dependency, a licence to read from
+source and a capability entry, and it was declined for now on purpose rather
+than smuggled in for one button. If it is ever added, `Open folder` belongs
+here and `Copy path` can stay.
+
+**Nothing pops up, and no OS notification is sent.** A run that finishes while
+the window is in the background leaves the report waiting; nothing is lost by
+not looking. `tauri-plugin-notification` is the same trade as the opener — a
+dependency and a first-run permission prompt — and was declined for the same
+reason.
+
+### 3.4 Which database it runs against is part of the job
 
 A script full of unqualified names means a different thing in two schemas, and
 this feature runs scripts somebody may not have read. So the database is
-**stated in the dialog**, not inherited invisibly: opened from a database node
-it is that node, from the rail it is the connection's current database, and the
-job issues one `USE` before the first file.
+**stated in the dialog** (§3.1), not inherited invisibly, and the job issues one
+`USE` before the first file.
 
 A `USE` *inside* a script changes it from there on — that is MySQL, not
 something to fight — so the report names the database each file actually ran
-against. §9.5 measures that it behaves as expected before the report is written
-to claim it.
+against. §9.5 measures that before the report is written to claim it.
 
-### 3.2 The four decisions
+### 3.5 The seven decisions
 
-Settled with the user on 2026-10-14, before any code:
+Settled with the user on 2026-10-14, before any code. The first four are about
+what it does, the last three about how it is seen — and the second set took a
+second pass, because the first draft of this plan answered them by pointing at
+Stage 22 instead of designing them.
 
 1. **Writes run, and are confirmed first.** Taking "execute all scripts"
    literally, with the dialog counting and naming the writing statements before
@@ -77,6 +220,10 @@ Settled with the user on 2026-10-14, before any code:
 3. **A failure stops the run.** Nothing after it is attempted. See §4.3.
 4. **One CSV per result set** — `name.csv`, `name-2.csv`, `name-3.csv`. See
    §4.4.
+5. **A rail button and `Ctrl+B`**, not only a context menu. See §3.1.
+6. **A report pane in the results band**, not text in the grid, because the
+   report is what you ran the job for. See §3.3.
+7. **In-app only** — no OS notification, and no new plugin for it. See §3.3.
 
 ## 4. The dialog
 
@@ -215,6 +362,26 @@ offset into a 1-based line is new, and §9.6 measures it against multi-byte
 characters, because "count the newlines" is right and "divide by something" is
 the bug.
 
+### 6.4 A band that outlives the tabs
+
+`#flyway-pane` is the closest thing and the wrong shape: it *replaces* the grid,
+which is right for a migrations tab that has no result set and wrong for a
+report you want to read beside the query you ran next. `#job-report` is a band
+in the strip's slot — one that pushes the grid down, scrolls at a max height,
+and is owned by nothing in the tab system.
+
+The honest cost: it is a third thing that can occupy that band, after
+`#mig-progress` and `#job-strip`. Two of those three are already one element
+reused (Stage 22), and this is the first that must coexist with the strip
+rather than replace it, because a run ends by turning one into the other.
+
+### 6.5 A quit that knows a job is running
+
+`files.confirmQuit` asks about unsaved buffers. Nothing asks about a job, so a
+schema export or a batch run dies silently on quit today. One predicate — *is a
+job running, and which* — fixes both, and it belongs next to the one-job-at-a-
+time rule in §3.2 rather than being invented twice.
+
 ## 7. What is out of scope
 
 * **`DELIMITER` files are listed and skipped.** `split` returns the whole buffer
@@ -247,7 +414,21 @@ the bug.
   through a different path. The dialog's backend calls are the gap in the
   middle, and they are covered deliberately now rather than by a user.
 * **UI, stubbed backend** — the preview table, the write confirmation naming
-  statements, the overwrite confirmation, Stop mid-run, and the report.
+  statements, the overwrite confirmation, Stop mid-run, and the report. Four of
+  these are §3's claims and have been asserted nowhere before:
+  * the report **survives**: finish a run, switch tabs, run a query, and it is
+    still on screen. The export's report fails this today, which is why §3.3
+    exists;
+  * the report lists **not run** files after a stop, which is the row a
+    report-by-omission would leave out;
+  * a second job finds Run **disabled with the reason on it**, rather than a
+    dialog that opens and then refuses;
+  * the rail button **opens with no connection** and says so, rather than being
+    disabled (Stage 20 §11.1).
+* **Live, the non-interruption guarantee** — the one claim in §3.2 that a
+  stubbed `invoke` cannot touch. Start a run streaming a large table, and on
+  another tab run a query and get its rows back while the job is still mid-
+  stream. Without its own connection this blocks, and the test says so.
 
 ## 9. The six facts to measure first
 
