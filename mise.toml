@@ -50,6 +50,10 @@ run = "npx playwright test"
 description = "Tests needing the MySQL fixture (see dev/README.md) and a keychain"
 run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --test live_mysql -- --ignored --test-threads=1",
+  # `--skip measure`: the batch-size measurements read a million rows four
+  # times and load three scripts. They are kept as tests so the numbers can be
+  # reproduced, not run as part of a suite.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test live_export_probe -- --ignored --test-threads=1 --skip measure",
   "cargo test --manifest-path src-tauri/Cargo.toml --test keychain -- --ignored",
 ]
 

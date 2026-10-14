@@ -87,6 +87,36 @@ impl Engine for MysqlEngine {
         schema::mysql_routine_ddl(server, ns, name, kind).await
     }
 
+    async fn triggers(
+        &self,
+        server: &ServerConn,
+        ns: &str,
+    ) -> Result<Vec<schema::TriggerRef>, String> {
+        schema::mysql_triggers(server, ns).await
+    }
+
+    async fn events(&self, server: &ServerConn, ns: &str) -> Result<Vec<schema::EventRef>, String> {
+        schema::mysql_events(server, ns).await
+    }
+
+    async fn object_ddl(
+        &self,
+        server: &ServerConn,
+        ns: &str,
+        name: &str,
+        kind: schema::ObjectDdl,
+    ) -> Result<schema::ObjectDefinition, String> {
+        schema::mysql_object_ddl(server, ns, name, kind).await
+    }
+
+    async fn view_dependencies(
+        &self,
+        server: &ServerConn,
+        ns: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        schema::mysql_view_dependencies(server, ns).await
+    }
+
     async fn run_script(
         &self,
         state: &AppState,

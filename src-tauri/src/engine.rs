@@ -67,6 +67,13 @@ pub struct Capabilities {
     pub migrations: bool,
     /// Export can stream row-at-a-time rather than holding the whole result.
     pub streaming_export: bool,
+    /// A whole schema can be written out as a script that recreates it.
+    ///
+    /// Separate from [`streaming_export`](Self::streaming_export), which is
+    /// about *a result set*. This one asks whether the engine has `CREATE`
+    /// statements to dump at all — an index with a mapping does not, and
+    /// offering "export schema" there would promise a file that cannot exist.
+    pub schema_export: bool,
     pub row_cap: RowCap,
     /// What this engine calls the thing `USE` switches between. MySQL says
     /// "database", Elasticsearch says "catalog", Snowflake says "schema" —
@@ -90,6 +97,7 @@ impl Capabilities {
             cancellation: true,
             migrations: true,
             streaming_export: true,
+            schema_export: true,
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
         }
@@ -189,6 +197,47 @@ pub trait Engine: Send + Sync {
         name: &str,
         kind: crate::schema::RoutineKind,
     ) -> Result<String, String>;
+
+    // --- Stage 22. Only an engine with `schema_export` is ever asked these,
+    // so the default is the honest empty answer rather than an error: an
+    // engine with no triggers has no triggers, which is not a failure.
+
+    async fn triggers(
+        &self,
+        _server: &crate::session::ServerConn,
+        _ns: &str,
+    ) -> Result<Vec<crate::schema::TriggerRef>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn events(
+        &self,
+        _server: &crate::session::ServerConn,
+        _ns: &str,
+    ) -> Result<Vec<crate::schema::EventRef>, String> {
+        Ok(Vec::new())
+    }
+
+    /// The creation statement for a trigger or an event, with the session
+    /// settings it has to run under.
+    async fn object_ddl(
+        &self,
+        _server: &crate::session::ServerConn,
+        _ns: &str,
+        name: &str,
+        _kind: crate::schema::ObjectDdl,
+    ) -> Result<crate::schema::ObjectDefinition, String> {
+        Err(format!("This engine has no definition to show for {name}."))
+    }
+
+    /// `(viewer, viewed)` among views, for the ordering in Stage 22 §4.3.
+    async fn view_dependencies(
+        &self,
+        _server: &crate::session::ServerConn,
+        _ns: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
 
     /// Run a whole script.
     ///
@@ -310,6 +359,7 @@ mod tests {
         assert!(c.routines);
         assert!(c.cancellation);
         assert!(c.streaming_export);
+        assert!(c.schema_export);
         assert_eq!(c.row_cap, RowCap::ClientLimit);
         assert_eq!(c.namespace_label, "database");
     }
@@ -351,6 +401,7 @@ mod tests {
             cancellation: true,
             migrations: false,
             streaming_export: false,
+            schema_export: false,
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),
         }

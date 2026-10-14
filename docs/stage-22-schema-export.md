@@ -356,6 +356,37 @@ is a full index scan, so it is 0.2 s here and minutes on a hundred million.
 The dialog keeps the estimate, one query for a whole database, and labels it
 `~`.
 
+## 9b. Built so far — 2026-10-14
+
+The foundation, which is the part that is pure and the part that is subtle.
+
+* **`Capabilities::schema_export`** — a capability, not a check on the engine's
+  name, per `engine.rs`'s own rule. MySQL sets it; Elasticsearch does not,
+  because an index has a mapping rather than a `CREATE` statement, and the
+  menu items will simply not appear there.
+* **Introspection** for triggers, events and view dependencies, none of which
+  existed: `schema::{triggers, events, object_ddl, view_dependencies}`, routed
+  through the `Engine` trait like everything else, with empty-answer defaults
+  so an engine without triggers is not an error.
+* **`dump.rs`** — the assembler. Pure: it takes definitions somebody else
+  fetched and decides what the file says and in what order. 17 unit tests.
+
+### 9b.1 What the live tests caught that the unit tests could not
+
+`ACTION_ORDER` is **`INT UNSIGNED`**, not `BIGINT`. Decoding it as `i64` fails
+outright. The unit tests build their own `TriggerRef`s and would have agreed
+with the wrong type forever — the live test is what put a real column through
+a real decode.
+
+That is the whole argument for the live half, and it earned its place on the
+first run.
+
+### 9b.2 Still to build
+
+The runner and its connection (§6.1), the appending writer (§6.2), the job
+strip (§6.3), the commands, and the dialog. Then the round-trip test in §8,
+which is the one that proves the claim the rest only serves.
+
 ## 10. Engines
 
 Gated by a new `Capabilities::schema_export`, not by the engine's name — the

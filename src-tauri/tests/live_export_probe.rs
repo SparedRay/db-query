@@ -7,6 +7,8 @@
 //!
 //!     cargo test --test live_export_probe -- --ignored --nocapture --test-threads=1
 
+use db_query_lib::schema::{self, ObjectDdl};
+use db_query_lib::session::{self, AppState, ConnProfile};
 use sqlx::{Connection, Executor, MySqlConnection, Row};
 use std::time::Instant;
 
@@ -283,4 +285,143 @@ async fn measure_load_time_by_batch_size() {
             longest as f64 / 1_048_576.0,
         );
     }
+}
+
+// ------------------------------- the introspection, against the real server
+
+const C: &str = "c-export";
+
+fn probe_profile() -> ConnProfile {
+    ConnProfile {
+        id: C.into(),
+        name: C.into(),
+        colour: "#3b82f6".into(),
+        host: "127.0.0.1".into(),
+        port: 3306,
+        user: "root".into(),
+        database: Some("export_probe".into()),
+        allow_invalid_certs: true,
+        kind: Default::default(),
+        url: String::new(),
+        auth: Default::default(),
+        no_password: false,
+        read_only: false,
+    }
+}
+
+async fn connected() -> AppState {
+    let state = AppState::default();
+    session::connect(&state, probe_profile(), "devpassword".into())
+        .await
+        .expect("connect failed — `mise run db-up && mise run export-probe-up`?");
+    state
+}
+
+/// **The ordering that is recorded nowhere else.**
+///
+/// The fixture has two `BEFORE INSERT` triggers on `t`. Their relative order
+/// exists only in `ACTION_ORDER`, and `SHOW CREATE TRIGGER` emits no
+/// `FOLLOWS`/`PRECEDES` to carry it — so this is the one place the app can
+/// learn it, and the unit tests in `dump` are only as good as this is.
+#[tokio::test]
+#[ignore = "needs the live fixture"]
+async fn triggers_come_back_with_the_order_only_the_server_knows() {
+    let state = connected().await;
+    let found = schema::triggers(&state, C, "export_probe").await.unwrap();
+
+    let on_t: Vec<_> = found
+        .iter()
+        .filter(|t| t.table == "t" && t.timing == "BEFORE" && t.event == "INSERT")
+        .collect();
+    assert_eq!(on_t.len(), 2, "the fixture has two: {found:#?}");
+    let ordered = db_query_lib::dump::order_triggers(&found);
+    let names: Vec<&str> = ordered
+        .iter()
+        .filter(|t| t.table == "t" && t.timing == "BEFORE")
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(names, ["t_before_ins", "t_before_ins2"]);
+    assert_eq!(on_t.iter().map(|t| t.action_order).min(), Some(1));
+    assert_eq!(on_t.iter().map(|t| t.action_order).max(), Some(2));
+}
+
+/// And its text round-trips, with the `sql_mode` it was written under.
+#[tokio::test]
+#[ignore = "needs the live fixture"]
+async fn a_trigger_definition_comes_back_whole() {
+    let state = connected().await;
+    let def = schema::object_ddl(&state, C, "export_probe", "t_after_ins", ObjectDdl::Trigger)
+        .await
+        .unwrap();
+
+    assert!(def.body.contains("TRIGGER"), "{}", def.body);
+    assert!(def.body.contains("t_after_ins"), "{}", def.body);
+    // The body names `audit` unqualified, which is why the script must `USE`
+    // before creating triggers.
+    assert!(def.body.contains("audit"), "{}", def.body);
+    assert!(
+        !def.sql_mode.is_empty(),
+        "the sql_mode is what makes it mean the same"
+    );
+    assert_eq!(def.time_zone, None, "triggers have no time zone; events do");
+
+    // And the definer is there to be stripped, which is the only reason the
+    // stripping exists.
+    assert!(def.body.contains("DEFINER="), "{}", def.body);
+    assert!(!db_query_lib::dump::strip_definer(&def.body).contains("DEFINER="));
+}
+
+/// An event carries a time zone, because its `STARTS` is an absolute timestamp
+/// read in one.
+#[tokio::test]
+#[ignore = "needs the live fixture"]
+async fn an_event_comes_back_with_its_time_zone() {
+    let state = connected().await;
+    let found = schema::events(&state, C, "export_probe").await.unwrap();
+    assert_eq!(
+        found.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+        ["e_daily"]
+    );
+
+    let def = schema::object_ddl(&state, C, "export_probe", "e_daily", ObjectDdl::Event)
+        .await
+        .unwrap();
+    assert!(def.body.contains("EVENT"), "{}", def.body);
+    assert!(
+        def.body.contains("STARTS"),
+        "an absolute time: {}",
+        def.body
+    );
+    assert!(def.time_zone.is_some(), "which is read in a time zone");
+}
+
+/// **§9.1 against the server rather than against the note that records it.**
+///
+/// The fixture's chain is `v3 → v2 → v1 → t`. Only the view-to-view edges come
+/// back, and sorting by them produces an order that can actually be run.
+#[tokio::test]
+#[ignore = "needs the live fixture"]
+async fn views_sort_into_an_order_that_can_be_created() {
+    let state = connected().await;
+    let edges = schema::view_dependencies(&state, C, "export_probe")
+        .await
+        .unwrap();
+
+    // v1 reads only a base table, so it has no edge here at all.
+    assert!(
+        edges.contains(&("v2".to_string(), "v1".to_string())),
+        "{edges:?}"
+    );
+    assert!(
+        edges.contains(&("v3".to_string(), "v2".to_string())),
+        "{edges:?}"
+    );
+    assert!(
+        !edges.iter().any(|(_, viewed)| viewed == "t"),
+        "base tables are not constraints: {edges:?}"
+    );
+
+    let order =
+        db_query_lib::dump::order_views(&["v3".into(), "v2".into(), "v1".into()], &edges).unwrap();
+    assert_eq!(order, ["v1", "v2", "v3"]);
 }

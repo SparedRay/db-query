@@ -46,6 +46,10 @@ pub fn capabilities() -> Capabilities {
         migrations: false,
         // Results arrive whole; there is no row-at-a-time source to stream from.
         streaming_export: false,
+        // An index has a mapping, not a CREATE statement. There is no script
+        // that recreates it in the sense this feature means, so the export is
+        // not offered rather than offered and disappointing.
+        schema_export: false,
         row_cap: RowCap::ServerPageSize,
         // Elasticsearch's own word, and the name of the request field.
         namespace_label: "catalog".into(),
