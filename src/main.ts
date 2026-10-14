@@ -110,7 +110,9 @@ const els = {
   btnSettings: $<HTMLButtonElement>("btn-settings"),
   btnHistory: $<HTMLButtonElement>("btn-history"),
   btnAssistant: $<HTMLButtonElement>("btn-assistant"),
-  assistantDialog: $<HTMLDialogElement>("assistant-dialog"),
+  app: $<HTMLElement>("app"),
+  chatPane: $<HTMLElement>("chat-pane"),
+  msplit: $<HTMLElement>("msplit"),
   chatLog: $<HTMLElement>("chat-log"),
   chatInput: $<HTMLTextAreaElement>("chat-input"),
   chatSend: $<HTMLButtonElement>("chat-send"),
@@ -1806,7 +1808,15 @@ els.btnCancel.onclick = async () => {
 
 // ---------------------------------------------------------------- splitters
 
-function draggable(handle: HTMLElement, axis: "x" | "y") {
+/**
+ * A drag handle.
+ *
+ * `x-end` is the mirror of `x`: the assistant dock grows from the right edge,
+ * so its width is the pointer's distance from that edge rather than from the
+ * origin. Measuring it the same way as the schema would make the panel shrink
+ * as you dragged it wider.
+ */
+function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     handle.classList.add("dragging");
@@ -1814,6 +1824,13 @@ function draggable(handle: HTMLElement, axis: "x" | "y") {
       if (axis === "x") {
         const w = Math.min(Math.max(140, ev.clientX), window.innerWidth - 260);
         document.documentElement.style.setProperty("--sidebar-w", `${w}px`);
+      } else if (axis === "x-end") {
+        // The floor is the four buttons of a SQL block's action row; the
+        // ceiling leaves the editor usable rather than letting the chat eat
+        // the window.
+        const from = window.innerWidth - ev.clientX;
+        const w = Math.min(Math.max(260, from), Math.max(260, window.innerWidth - 420));
+        document.documentElement.style.setProperty("--chat-w-set", `${w}px`);
       } else {
         const rect = els.main.getBoundingClientRect();
         const h = Math.min(Math.max(80, ev.clientY - rect.top), rect.height - 120);
@@ -1832,9 +1849,7 @@ function draggable(handle: HTMLElement, axis: "x" | "y") {
 
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
-
-// The migrations pane grows from the right, so its splitter measures the other
-// way — the pointer's distance from the window edge, not from the origin.
+draggable(els.msplit, "x-end");
 
 /**
  * Lay the buffer out — the selection if there is one, otherwise the whole tab.
@@ -2569,11 +2584,77 @@ const history = createHistory({
 els.btnHistory.onclick = () => void history.open();
 
 /**
+ * Open and close the assistant dock.
+ *
+ * Same shape as `toggleSchema` on the other side, and for the same reasons:
+ * the width lives in a variable the close does not touch, and the pane is
+ * `hidden` as well as zero-width so a closed panel cannot take Tab or hold
+ * focus.
+ *
+ * Not remembered across launches, which matches the schema pane and the two
+ * splitters. The decision there — recorded at `toggleSchema` — is that
+ * starting in a state you cannot remember choosing is a worse first second
+ * than reopening something. A 380px column missing from the window on launch,
+ * with no memory of having asked for it, is exactly that.
+ */
+let chatOpen = false;
+function toggleChat(open: boolean) {
+  chatOpen = open;
+  els.app.classList.toggle("chat-closed", !open);
+  els.chatPane.hidden = !open;
+  els.msplit.hidden = !open;
+  els.btnAssistant.setAttribute("aria-pressed", String(open));
+  els.btnAssistant.classList.toggle("on", open);
+}
+
+const chatPanel = {
+  isOpen: () => chatOpen,
+  open: () => toggleChat(true),
+  close: () => toggleChat(false),
+};
+
+/**
+ * Where a proposed statement goes when Run is pressed.
+ *
+ * **The active tab if it is spare, otherwise a new one.** Spare means a buffer
+ * nobody has touched: no file behind it, and not dirty — so it still holds
+ * exactly the starter text `tabs.create` put there, or nothing. Anything
+ * typed, and anything read from a file, is left alone and gets a new tab
+ * instead. The rule errs towards a spare tab rather than towards overwriting,
+ * because one of those costs a tab and the other costs somebody's work.
+ *
+ * Either way the SQL is in a buffer before it runs, so the editor shows what
+ * ran, undo puts it back, and history records it like anything typed by hand.
+ */
+function tabForProposal(sql: string): ScriptTab | null {
+  if (!tabs.activeConnection()) return null;
+  const current = tabs.active();
+  const spare =
+    current !== null &&
+    current.kind === "sql" &&
+    current.filePath === null &&
+    !tabs.isDirty(current);
+  if (spare && current) {
+    // One undo step, so the starter text — or whatever was there — comes back
+    // with a single Ctrl+Z. `replaceRange` isolates history for exactly this.
+    replaceRange(view, {
+      from: 0,
+      to: view.state.doc.length,
+      insert: sql,
+      cursor: sql.length,
+    });
+    return current;
+  }
+  return tabs.create({ contents: sql });
+}
+
+/**
  * The assistant. It writes SQL; you run it — see `assistant.ts` and
- * `assistant.rs` for why that is the design and not a limitation.
+ * `assistant.rs` for why that is the design and not a limitation. Run is one
+ * click rather than two, and still a click.
  */
 const assistant = createAssistant({
-  dialog: els.assistantDialog,
+  panel: chatPanel,
   log: els.chatLog,
   input: els.chatInput,
   send: els.chatSend,
@@ -2590,9 +2671,11 @@ const assistant = createAssistant({
     connectionId: conns.active()?.profile.id ?? null,
     db: tabs.active()?.activeDb ?? null,
   }),
+  // None of these close the panel any more. Closing it was how a modal
+  // apologised for being in the way; a dock is not, and shutting it after one
+  // insert would throw away the conversation that produced the statement.
   insert: (sql) => {
     insertAtCursor(view, sql);
-    els.assistantDialog.close();
     view.focus();
   },
   openInTab: (sql) => {
@@ -2601,13 +2684,27 @@ const assistant = createAssistant({
       return;
     }
     tabs.create({ contents: sql });
-    els.assistantDialog.close();
   },
+  run: (sql) => {
+    const tab = tabForProposal(sql);
+    if (!tab) {
+      results.setMessage("Open a connection first — a statement runs against one.");
+      return;
+    }
+    void run(sql);
+  },
+  copy: (sql) => copyText(sql),
+  // Asked per block as it is drawn, so a statement proposed before you
+  // connected is offered properly once you have.
+  canRun: () => connected && tabs.activeConnection() !== null,
   // So history can say a statement came from the assistant rather than from you.
   remember: (sql) => void api.rememberProposal(sql).catch(() => {}),
 });
 
-els.btnAssistant.onclick = () => void assistant.open();
+els.btnAssistant.onclick = () => {
+  if (chatPanel.isOpen()) chatPanel.close();
+  else void assistant.open();
+};
 
 // ---------------------------------------------------- integrations, and warming
 //
@@ -3154,12 +3251,12 @@ window.addEventListener("keydown", (e) => {
   // Any open dialog owns the keyboard. Ctrl+T inside the connection form should
   // not open a tab behind it, and `showModal()` on an already-open dialog
   // throws — which is what Ctrl+H would otherwise do to the history list.
-  if (
-    els.dialog.open ||
-    els.settingsDialog.open ||
-    els.historyDialog.open ||
-    els.assistantDialog.open
-  ) {
+  // The assistant is deliberately absent from this list. It is a pane now, not
+  // a modal, so it does not own the keyboard — Ctrl+B and Ctrl+T have to keep
+  // working while you are reading a proposed query, which is the whole point
+  // of it not being a modal. Its own textarea stops `Enter` from reaching
+  // anything else, and that is the only key it needs.
+  if (els.dialog.open || els.settingsDialog.open || els.historyDialog.open) {
     return;
   }
 
@@ -3175,7 +3272,10 @@ window.addEventListener("keydown", (e) => {
     toggleSchema(!schemaOpen);
   } else if (e.key === "k" || e.key === "K") {
     e.preventDefault();
-    void assistant.open();
+    // A toggle, like Ctrl+B. The panel takes width while it is open, so the
+    // shortcut that opens it has to be the one that gives the width back.
+    if (chatPanel.isOpen()) chatPanel.close();
+    else void assistant.open();
   } else if (e.key === "h" || e.key === "H") {
     e.preventDefault();
     void history.open();
@@ -3310,7 +3410,7 @@ function toggleMigrationsSection(open: boolean) {
  */
 function toggleSchema(open: boolean) {
   schemaOpen = open;
-  document.getElementById("app")!.classList.toggle("schema-closed", !open);
+  els.app.classList.toggle("schema-closed", !open);
   // Zero-width is not gone: a collapsed pane that still holds the filter box
   // and the tree would still take Tab, and Ctrl+P would focus something
   // nobody can see.

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, editorText, installBackend, relaunch, schemaBackend, sendOnChannel, settingsSection, visit } from "./harness";
+import { calls, connect, editorText, installBackend, openDatabase, relaunch, rowsResult, schemaBackend, sendOnChannel, settingsSection, visit } from "./harness";
 
 /**
  * The assistant chat.
@@ -58,7 +58,7 @@ async function openChat(page: Page, extra: Record<string, unknown> = {}) {
     ...extra,
   });
   await page.click("#btn-assistant");
-  await expect(page.locator("#assistant-dialog")).toBeVisible();
+  await expect(page.locator("#chat-pane")).toBeVisible();
 }
 
 async function ask(page: Page, question: string) {
@@ -363,4 +363,162 @@ test("Gemini is reached through the OpenAI-compatible path", async ({ page }) =>
       baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
       model: "gemini-2.5-pro",
     });
+});
+
+// ------------------------------------------------- a dock, not a modal
+
+/**
+ * **The point of the change.** It was a `showModal()` dialog, so while the
+ * assistant was open the tree, the editor and the grid were all inert — and a
+ * proposed query is exactly when you want to look at the schema it came from.
+ *
+ * `inert` is not something to assert directly; what matters is that clicking
+ * through still *does* something. So this drives the app with the panel open.
+ */
+test("the app stays usable while the assistant is open", async ({ page }) => {
+  await openChat(page, { use_database: () => null });
+
+  // The schema still answers a click: expanding a database is two round trips
+  // and a repaint, none of which a modal would have allowed.
+  await openDatabase(page);
+  await expect(page.locator('.node.group:has-text("Tables")')).toBeVisible();
+
+  // The editor still takes typing.
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("SELECT 1");
+  expect(await editorText(page)).toContain("SELECT 1");
+
+  // And the global shortcuts still work, which they did not while a modal
+  // owned the keyboard.
+  const before = await page.locator("#script-tabs .stab").count();
+  await page.keyboard.press("Control+t");
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(before + 1);
+
+  // Through all of which the panel stayed open.
+  await expect(page.locator("#chat-pane")).toBeVisible();
+});
+
+/** The rail button and Ctrl+K are the same toggle, and closed means gone. */
+test("the assistant toggles, and gives its width back", async ({ page }) => {
+  await openChat(page);
+  const width = async () =>
+    (await page.locator("#chat-pane").boundingBox())?.width ?? 0;
+  expect(await width()).toBeGreaterThan(200);
+
+  // The rail button says which way it is, the way the schema button does.
+  await expect(page.locator("#btn-assistant")).toHaveAttribute("aria-pressed", "true");
+
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-pane")).toBeHidden();
+  await expect(page.locator("#btn-assistant")).toHaveAttribute("aria-pressed", "false");
+  // Not merely zero-width: a collapsed pane holding a textarea would still
+  // take Tab.
+  await expect(page.locator("#msplit")).toBeHidden();
+
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#chat-pane")).toBeVisible();
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#chat-pane")).toBeHidden();
+});
+
+/** Inserting used to shut the panel. A dock is not in the way, and closing it
+ *  after one insert throws away the conversation that produced the statement. */
+test("using a suggestion leaves the conversation on screen", async ({ page }) => {
+  await openChat(page);
+  await ask(page, "give me a query");
+  await reply(page, "```sql\nSELECT 42;\n```");
+
+  await page.locator('.chat-sql-actions button:has-text("Insert at cursor")').click();
+  await expect(page.locator("#chat-pane")).toBeVisible();
+  await expect(page.locator(".chat-sql")).toBeVisible();
+});
+
+// --------------------------------------------------------------- one-click Run
+
+/**
+ * **Run is one click standing for two, and still a click.** The model executes
+ * nothing: this is the person pressing a button, and the statement goes into a
+ * buffer on the way so the editor shows what ran and undo puts it back.
+ *
+ * The active tab is used when it is spare — nothing typed, no file behind it.
+ */
+test("Run puts the statement in the spare active tab and runs it", async ({ page }) => {
+  await openChat(page, { run_script: () => rowsResult([{ name: "n" }], [[42]]) });
+  const before = await page.locator("#script-tabs .stab").count();
+  await ask(page, "give me a query");
+  await reply(page, "```sql\nSELECT 42;\n```");
+  await assertNothingRan(page);
+
+  await page.locator('.chat-sql-actions button:has-text("Run")').click();
+
+  // Ran, in the tab that was already there.
+  await expect
+    .poll(async () => (await calls(page)).find((c) => c.cmd === "run_script")?.args.sql)
+    .toContain("SELECT 42;");
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(before);
+  // The buffer shows what ran, and the rows are on screen.
+  expect(await editorText(page)).toContain("SELECT 42;");
+  await expect(page.locator(".grid-host")).toContainText("42");
+  // And history knows where it came from.
+  await expect
+    .poll(async () => (await calls(page)).map((c) => c.cmd))
+    .toContain("remember_proposal");
+});
+
+/** Work in progress is never overwritten — that tab is not spare. */
+test("Run opens a new tab rather than overwriting what you were writing", async ({ page }) => {
+  await openChat(page, { run_script: () => rowsResult([{ name: "n" }], [[7]]) });
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("-- mine, do not touch");
+  const before = await page.locator("#script-tabs .stab").count();
+
+  await ask(page, "give me a query");
+  await reply(page, "```sql\nSELECT 7;\n```");
+  await page.locator('.chat-sql-actions button:has-text("Run")').click();
+
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(before + 1);
+  expect(await editorText(page)).toContain("SELECT 7;");
+  expect(await editorText(page)).not.toContain("do not touch");
+
+  // The typing is still there, in the tab it was typed in.
+  await page.locator("#script-tabs .stab").first().click();
+  expect(await editorText(page)).toContain("-- mine, do not touch");
+});
+
+/** One undo, not one per character: the replacement is a single history step. */
+test("undo puts back what Run replaced", async ({ page }) => {
+  await openChat(page, { run_script: () => rowsResult([{ name: "n" }], [[1]]) });
+  const starter = await editorText(page);
+  await ask(page, "q");
+  await reply(page, "```sql\nSELECT 1;\n```");
+
+  await page.locator('.chat-sql-actions button:has-text("Run")').click();
+  expect(await editorText(page)).toContain("SELECT 1;");
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Control+z");
+  expect(await editorText(page)).toBe(starter);
+});
+
+/**
+ * With no connection there is nothing to run against, so the button says so
+ * rather than disappearing: a disabled control with a reason is how somebody
+ * finds out what the thing they wanted needs.
+ */
+test("Run is offered but disabled with no connection, and explains why", async ({ page }) => {
+  stream = gate();
+  await installBackend(page, {
+    ...schemaBackend,
+    assistant_status: () => READY,
+    assistant_send: () => stream.promise,
+  });
+  await visit(page);
+  await page.click("#btn-assistant");
+  await ask(page, "q");
+  await reply(page, "```sql\nSELECT 1;\n```");
+
+  const run = page.locator('.chat-sql-actions button:has-text("Run")');
+  await expect(run).toBeDisabled();
+  await expect(run).toHaveAttribute("title", /Open a connection first/);
+  await assertNothingRan(page);
 });

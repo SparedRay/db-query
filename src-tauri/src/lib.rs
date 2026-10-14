@@ -28,6 +28,7 @@ pub mod split;
 pub mod sqlfmt;
 pub mod sqlgen;
 pub mod update;
+pub mod windowstate;
 pub mod workspace;
 
 use tauri::State;
@@ -2089,6 +2090,23 @@ pub fn run() {
             log_notes,
             diagnostics,
         ])
+        // Where the window was last time.
+        //
+        // `Moved` and `Resized` only note it in memory; the file is written
+        // when the window is asked to close. See `windowstate` for why that
+        // trade is the right way round, and why this is fifty lines rather
+        // than a plugin.
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                windowstate::remember(window);
+            }
+            tauri::WindowEvent::CloseRequested { .. } => {
+                if let Ok(dir) = config_dir(&window.app_handle().clone()) {
+                    windowstate::persist(window, &dir);
+                }
+            }
+            _ => {}
+        })
         .setup(|app| {
             // The first thing the app does, so a failure in anything after it
             // has a line above it saying what version failed where.
@@ -2104,6 +2122,18 @@ pub fn run() {
                     std::env::consts::ARCH
                 ),
             );
+            // Before the window is shown, so it does not visibly jump from
+            // the configured default to where it was left.
+            // `get_webview_window` rather than `get_window`: the latter is
+            // behind tauri's `unstable` feature, and a window position is not
+            // a reason to turn that on. `Webview::window()` hands back the
+            // same `Window` the event handler above is given.
+            if let (Ok(dir), Some(view)) = (
+                config_dir(&app.handle().clone()),
+                app.get_webview_window("main"),
+            ) {
+                windowstate::restore(&view.as_ref().window(), &dir);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
