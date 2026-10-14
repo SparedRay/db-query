@@ -353,3 +353,74 @@ test("an engine that can stream is still offered it", async ({ page }) => {
   await expect(all).toHaveJSProperty("disabled", false);
   await expect(page.locator("#export-scope")).toHaveValue("all");
 });
+
+// ------------------------------------------------- the batch-size default
+
+/**
+ * **The default is a measured number, and it is a setting.**
+ *
+ * Batching barely changes how fast an export runs — the fetch dominates. What
+ * it decides is how long the script takes to *load*: on 100,000 rows, 274s at
+ * one row per statement against 1.3s at a thousand. The old hard-coded 100 was
+ * 3.6× slower to load than it needed to be, for nothing. See
+ * `docs/stage-22-schema-export.md` §9.5.
+ */
+test("the export dialog opens on the batch size from Settings", async ({ page }) => {
+  await withRows(page, TWO_ROWS);
+
+  await page.click("#btn-export");
+  await expect(page.locator("#sql-batch")).toHaveValue("1000");
+  await page.click("#export-cancel");
+
+  await page.click("#btn-settings");
+  await page.click("#set-tab-export");
+  await page.fill("#set-insert-batch", "2500");
+  await page.locator("#set-insert-batch").blur();
+  await page.click("#set-close");
+
+  // Seeded every time it opens, not only on the first: changing the default
+  // and then exporting has to use the new number.
+  await page.click("#btn-export");
+  await expect(page.locator("#sql-batch")).toHaveValue("2500");
+  await page.selectOption("#export-format", "inserts");
+  await page.fill("#sql-table", "t");
+  await page.click("#export-ok");
+
+  const call = (await calls(page)).find((c) => c.cmd === "export_inserts");
+  expect(call?.args.options).toMatchObject({ batchSize: 2500 });
+});
+
+/** And it outlives the window, like every other preference. */
+test("the batch size is remembered", async ({ page }) => {
+  await withRows(page, TWO_ROWS);
+  await page.click("#btn-settings");
+  await page.click("#set-tab-export");
+  await page.fill("#set-insert-batch", "4000");
+  await page.locator("#set-insert-batch").blur();
+
+  await expect
+    .poll(async () =>
+      (await calls(page))
+        .filter((c) => c.cmd === "prefs_save")
+        .map((c) => (c.args as { settings: { insertBatch?: number } }).settings.insertBatch)
+        .pop(),
+    )
+    .toBe(4000);
+});
+
+/**
+ * A statement no server will accept is a failure days later, in another
+ * program, far from the field that caused it — so the number is clamped where
+ * it is typed rather than where it is used.
+ */
+test("a batch size beyond what a server will take is clamped", async ({ page }) => {
+  await withRows(page, TWO_ROWS);
+  await page.click("#btn-settings");
+  await page.click("#set-tab-export");
+  await page.fill("#set-insert-batch", "999999");
+  await page.locator("#set-insert-batch").blur();
+  await page.click("#set-close");
+
+  await page.click("#btn-export");
+  await expect(page.locator("#sql-batch")).toHaveValue("10000");
+});

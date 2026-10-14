@@ -129,6 +129,7 @@ const els = {
   aiHttpFields: $<HTMLElement>("ai-http-fields"),
   setIntegrations: $<HTMLElement>("set-integrations"),
   setFlywayRow: $<HTMLElement>("set-flyway-row"),
+  setInsertBatch: $<HTMLInputElement>("set-insert-batch"),
   migProgress: $<HTMLElement>("mig-progress"),
   flywayPane: $<HTMLElement>("flyway-pane"),
   flywayBody: $<HTMLElement>("flyway-body"),
@@ -1387,6 +1388,11 @@ function openExportDialog() {
     ? "Uses the server's own CREATE TABLE for this table, so it is exact."
     : "These rows are not from a single table, so the schema is derived from the result columns: types are widened, and there are no keys or defaults.";
 
+  // Seeded from the setting every time, not only once: changing the default
+  // in Settings and then exporting must use the new number, and the field is
+  // still free to be overridden for this one export.
+  els.sqlBatch.value = String(settings.insertBatch);
+
   syncExportFormat();
   els.exportDialog.showModal();
 }
@@ -1415,7 +1421,7 @@ function insertOptionsFromForm(): InsertOptions {
     table: els.sqlTable.value.trim() || "exported_rows",
     db: exportSourceOf()?.db ?? null,
     createTable: els.sqlCreate.checked,
-    batchSize: Math.max(1, Number(els.sqlBatch.value) || 100),
+    batchSize: Math.max(1, Number(els.sqlBatch.value) || settings.insertBatch),
   };
 }
 
@@ -2475,6 +2481,7 @@ function openSettings() {
   els.setLint.checked = settings.lint;
   els.setTimeout.value = String(settings.timeoutSecs);
   els.setBrowse.value = String(settings.browseLimit);
+  els.setInsertBatch.value = String(settings.insertBatch);
   els.setMcpPort.value = String(mcpPort());
   els.setFlywayPath.value = settings.flywayPath;
   els.setUpdateNote.hidden = true;
@@ -2498,6 +2505,13 @@ function commit() {
   settings.lint = els.setLint.checked;
   settings.timeoutSecs = Math.max(0, Number(els.setTimeout.value) || 0);
   settings.browseLimit = Math.max(1, Number(els.setBrowse.value) || 1);
+  // Clamped to the control's own range rather than merely floored: a batch of
+  // a million is a statement no server will accept, and the number is used by
+  // the export days later, where the mistake is a failure far from its cause.
+  settings.insertBatch = Math.min(
+    10_000,
+    Math.max(1, Number(els.setInsertBatch.value) || settings.insertBatch),
+  );
   settings.theme = els.setTheme.value as ThemePref;
   saveSettings(settings);
   applySettings();
@@ -2506,7 +2520,7 @@ function commit() {
 for (const el of [
   els.setFont, els.setFontSize, els.setEditorColours,
   els.setAutoLimit, els.setLint, els.setTimeout, els.setBrowse,
-  els.setFlywayPath,
+  els.setFlywayPath, els.setInsertBatch,
 ]) {
   el.onchange = commit;
 }
