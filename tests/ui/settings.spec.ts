@@ -321,7 +321,12 @@ test("Settings has no section named after our own categories", async ({ page }) 
   expect(tabs).toEqual([
     "Appearance",
     "Editor",
+    // The four feature sections, alphabetical, between the app-wide pair above
+    // and the two that are about the app itself below. "Export" joined on the
+    // same rule as the rest: it is a thing people set out to do, and its
+    // default did not belong under "Defaults for new sessions".
     "Assistant",
+    "Export",
     "Migrations",
     "MCP server",
     "Updates",

@@ -330,10 +330,20 @@ is 64 MB here but belongs to the *target* server, which the dump cannot see;
 1 MB is `mysqldump`'s own `--net-buffer-length` default, and it makes wide rows
 safe without a setting.
 
-> **Found on the way past:** the result-set export dialog (Stage 3) defaults to
-> **100** rows per `INSERT`. On this measurement that is 3.6× slower to load
-> than it needs to be, for no benefit. Not changed here — a different
-> feature's default, and its own one-line change.
+**The number is now a setting**, in a new **Export** section of Settings —
+alongside Assistant, Migrations and MCP server, which are the other sections
+named after something a person sets out to do rather than after a category of
+ours. It is where this stage's remaining defaults will land.
+
+It was hard-coded at **100** in the Stage 3 result-set export dialog, which on
+these numbers is 3.6× slower to load than it needs to be for no benefit. That
+dialog now opens on the setting — re-read every time it opens, so changing the
+default and exporting uses the new number — and the field is still free to be
+overridden for one export.
+
+Clamped to 10,000 where it is typed rather than where it is used: a statement
+no server will accept is a failure days later, in another program, a long way
+from the field that caused it.
 
 ### 9.6 `TABLE_ROWS` — about 1% low, good enough ✅
 

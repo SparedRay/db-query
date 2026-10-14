@@ -39,6 +39,22 @@ export interface Settings {
   /** Rows for the generated "SELECT ... LIMIT n" browse query. */
   browseLimit: number;
 
+  // --- export.
+  /**
+   * Rows per `INSERT` in an exported SQL script.
+   *
+   * **1,000 because it was measured, not because it looked reasonable.**
+   * Batching barely changes how fast an export *runs* — the fetch dominates at
+   * ~317k rows/s whatever the batch — but it decides how long the script takes
+   * to **load**, which is the wait that belongs to whoever restores it. On
+   * 100,000 rows: 274s at 1, 4.7s at 100, 1.3s at 1,000, 1.1s at 10,000.
+   *
+   * Capped at 10,000: past a thousand the gain is about 1% and each statement
+   * grows tenfold, which is how a script meets the target server's
+   * `max_allowed_packet`. See `docs/stage-22-schema-export.md` §9.5.
+   */
+  insertBatch: number;
+
   // --- assistant. Where questions go; the key lives in the keychain.
   aiProvider: AiProvider;
   /** Base URL, so any OpenAI-compatible server — including a local one — works. */
@@ -98,6 +114,7 @@ export const DEFAULTS: Settings = {
   lint: true,
   timeoutSecs: 0,
   browseLimit: 1000,
+  insertBatch: 1000,
   aiProvider: "anthropic",
   aiBaseUrl: "https://api.anthropic.com",
   aiModel: "claude-opus-5",
@@ -276,6 +293,7 @@ export function load(): Settings {
     lint: typeof o.lint === "boolean" ? o.lint : DEFAULTS.lint,
     timeoutSecs: bounded(Number(o.timeoutSecs), 0, 3600, DEFAULTS.timeoutSecs),
     browseLimit: bounded(Number(o.browseLimit), 1, 1_000_000, DEFAULTS.browseLimit),
+    insertBatch: bounded(Number(o.insertBatch), 1, 10_000, DEFAULTS.insertBatch),
     aiProvider: provider(o.aiProvider),
     aiBaseUrl: text(o.aiBaseUrl, DEFAULTS.aiBaseUrl),
     aiModel: text(o.aiModel, DEFAULTS.aiModel),
