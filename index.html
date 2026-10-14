@@ -19,6 +19,11 @@
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
         <button id="btn-schema" class="rail-cog" type="button"
                 title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
+        <!-- Stage 23. `Ctrl+Shift+B` rather than `Ctrl+B`: that one has
+             toggled the schema since Stage 12, so this takes the modifier
+             instead of the letter. -->
+        <button id="btn-sqlfiles" class="rail-cog" type="button"
+                title="Run SQL files from a folder (Ctrl+Shift+B)"></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
       </div>
 
@@ -117,6 +122,14 @@
                knows its real progress, so this says counts rather than only
                elapsed time. -->
           <div id="job-strip" class="mig-progress" hidden></div>
+          <!-- A finished job's report (Stage 23). In the strip's slot, because
+               a run ends by turning one into the other — but a *band* rather
+               than a replacement for the grid: `#flyway-pane` replaces it
+               because a migrations tab has no result set, and this is not that
+               case. Outside the tab system, so switching tabs and running
+               queries leave it alone, which is the whole point: today's export
+               report goes into `#grid` and `onActivate` repaints that. -->
+          <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
           <div id="tabs" class="tabs"></div>
           <div id="grid" class="grid-host" tabindex="0"></div>
           <!-- L3. A migrations tab has no result set — its answers are
@@ -598,6 +611,69 @@
       <menu>
         <button type="button" id="exp-cancel">Cancel</button>
         <button type="button" id="exp-ok" class="primary">Export&hellip;</button>
+      </menu>
+    </dialog>
+
+    <!-- Running a folder of SQL files (Stage 23).
+
+         Four things in order, each describing what the one before it produced:
+         the folder, what was found in it, where the CSVs go, and how they are
+         written. The preview is the feature — "execute every script in this
+         folder" on a folder somebody else assembled is a loaded gun, so the
+         writes are counted and named before Run. -->
+    <dialog id="sqlfiles-dialog">
+      <h2>Run SQL files</h2>
+
+      <div class="sf-where">
+        <label class="narrow">Connection
+          <select id="sf-connection"></select>
+        </label>
+        <label class="narrow">Database
+          <select id="sf-database"></select>
+        </label>
+        <p class="hint">A script of unqualified names means a different thing in
+          two schemas, so the one it runs in is stated rather than inherited. A
+          <code>USE</code> inside a script changes it from there on, and the
+          report says where each file ended up.</p>
+      </div>
+
+      <div class="sf-folder">
+        <div class="sf-row">
+          <button type="button" id="sf-pick-source" class="mini">Choose folder&hellip;</button>
+          <span id="sf-source" class="sf-path">No folder chosen.</span>
+        </div>
+        <label class="toggle"><input type="checkbox" id="sf-recursive" /> Include subfolders</label>
+      </div>
+
+      <div id="sf-preview" class="sf-preview" aria-live="polite"></div>
+      <p id="sf-summary" class="hint"></p>
+
+      <div class="sf-folder">
+        <div class="sf-row">
+          <button type="button" id="sf-pick-dest" class="mini">Choose destination&hellip;</button>
+          <span id="sf-dest" class="sf-path">No destination chosen.</span>
+        </div>
+        <p class="hint">A separate folder, so the scripts can live somewhere
+          shared or read-only and the CSVs never mix with them.</p>
+      </div>
+
+      <details class="sf-csv">
+        <summary>CSV options</summary>
+        <div class="sf-csv-body">
+          <label class="narrow">Delimiter <input id="sf-delim" value="," maxlength="3" /></label>
+          <label class="toggle"><input type="checkbox" id="sf-headers" checked /> Header row</label>
+          <label class="narrow">Write NULL as <input id="sf-null" placeholder="(empty)" /></label>
+          <label class="toggle"><input type="checkbox" id="sf-crlf" checked /> CRLF line endings (Excel)</label>
+          <label class="toggle"><input type="checkbox" id="sf-bom" checked /> UTF-8 BOM (Excel reads accents correctly)</label>
+          <label class="toggle"><input type="checkbox" id="sf-guard" /> Defuse spreadsheet formulas</label>
+        </div>
+      </details>
+
+      <p id="sf-error" class="error" hidden></p>
+
+      <menu>
+        <button type="button" id="sf-cancel">Cancel</button>
+        <button type="button" id="sf-ok" class="primary">Run</button>
       </menu>
     </dialog>
 

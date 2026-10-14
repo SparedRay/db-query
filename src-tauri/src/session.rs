@@ -440,6 +440,9 @@ pub struct AppState {
     /// dump runs for minutes and Stop has to reach it while it is inside a
     /// table rather than between two.
     pub exports: Mutex<HashMap<String, Arc<CliCancel>>>,
+    /// Stage 23's batch runs, by the id the caller made up. Separate from
+    /// `exports` so "a job is already running" can name *which* (§3.2).
+    pub script_runs: Mutex<HashMap<String, Arc<CliCancel>>>,
 }
 
 /// A request for a CLI reply to stop.

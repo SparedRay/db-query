@@ -6,6 +6,12 @@
 //! names are the nine that run (Stage 23 §4.1), and the way to guarantee that
 //! is to compute them once.
 //!
+//! The plan makes a **round trip**: the dialog is shown a [`Scan`] and hands
+//! the same one back to be run, which is why these types deserialize too. The
+//! confirmation and the run are then literally the same plan rather than two
+//! derivations of it that could drift. A file edited in between is caught by
+//! the runner, which re-reads it and finds the offsets no longer fit.
+//!
 //! Everything below [`scan`] is **pure** — file contents in, a plan out — so
 //! every claim the preview makes is a unit test. The directory walk and the
 //! reading are [`collect`] and the caller's, and they are deliberately the
@@ -36,7 +42,7 @@ pub struct ScanInput {
 }
 
 /// What one statement is, for both the preview and the run.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanStatement {
     /// Byte offsets into the file's text, exactly as `split` gave them — so
@@ -66,7 +72,7 @@ pub struct ScanStatement {
 }
 
 /// Why a file will or will not be run.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum Verdict {
     /// It has statements, and they are in `ScanFile::statements`.
@@ -83,7 +89,7 @@ pub enum Verdict {
     CannotRead { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanFile {
     /// Relative to the source folder, always with `/` separators so a report
@@ -94,7 +100,7 @@ pub struct ScanFile {
 }
 
 /// The whole plan, and the four numbers the preview leads with.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scan {
     pub files: Vec<ScanFile>,

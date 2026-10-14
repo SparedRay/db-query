@@ -36,7 +36,11 @@ fn raw(sql: String) -> sqlx::RawSql {
     sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// `Deserialize` as well as `Serialize` because Stage 23's plan makes a round
+/// trip: the dialog is shown a `Scan`, and hands the same one back to be run
+/// (§4.1). The confirmation and the run are then literally the same plan rather
+/// than two derivations of it that could differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StatementKind {
     /// Eligible for auto-LIMIT.

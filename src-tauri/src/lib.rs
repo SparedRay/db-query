@@ -880,6 +880,80 @@ async fn sqlfiles_scan(
     .map_err(|e| format!("The folder scan did not finish: {e}"))?
 }
 
+/// Run the plan the dialog showed.
+///
+/// **The plan is passed back in**, not recomputed: §4.1's confirmation named
+/// statements out of a `Scan`, and the run uses that same one, so there is no
+/// way for the two to describe different work. A file edited between the scan
+/// and the run is caught by the runner, which re-reads it and finds the offsets
+/// no longer fit.
+#[tauri::command]
+async fn sqlfiles_run(
+    state: State<'_, AppState>,
+    connection_id: String,
+    request_id: String,
+    scan: sqlfiles::Scan,
+    source: String,
+    dest: String,
+    database: Option<String>,
+    csv: export::CsvOptions,
+    on_progress: tauri::ipc::Channel<sqlfilesrun::Progress>,
+) -> Result<sqlfilesrun::RunOutcome, String> {
+    let server = session::server(&state, &connection_id).await?;
+    if !server.capabilities.script_files {
+        return Err(format!(
+            "{} cannot run a folder of SQL scripts.",
+            server.capabilities.engine
+        ));
+    }
+    if scan.runnable_files == 0 {
+        return Err("Nothing in that folder can be run.".into());
+    }
+
+    let cancel = std::sync::Arc::new(session::CliCancel::default());
+    state
+        .script_runs
+        .lock()
+        .await
+        .insert(request_id.clone(), cancel.clone());
+
+    // Its own connection for the whole run — the reason "the app stays usable"
+    // is a guarantee rather than a hope (§3.2), and the same argument
+    // `dumprun` makes.
+    let mut conn = server.open_private().await?;
+    let job = sqlfilesrun::Job {
+        scan: &scan,
+        source: std::path::PathBuf::from(source),
+        dest: std::path::PathBuf::from(dest),
+        database,
+        csv,
+        caps: &server.capabilities,
+    };
+    let watching = cancel.clone();
+    let outcome = sqlfilesrun::run(
+        &mut conn,
+        &job,
+        |p| {
+            // A closed channel means the window went away mid-run, which is
+            // not a reason to fail the CSVs already on disk.
+            let _ = on_progress.send(p);
+        },
+        || watching.was_asked(),
+    )
+    .await;
+
+    state.script_runs.lock().await.remove(&request_id);
+    outcome
+}
+
+#[tauri::command]
+async fn sqlfiles_run_cancel(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
+    if let Some(cancel) = state.script_runs.lock().await.get(&request_id) {
+        cancel.ask();
+    }
+    Ok(())
+}
+
 /// Pick the folder of scripts, or the folder the CSVs go in.
 ///
 /// Two separate picks by §3.2's decision: the scripts may live somewhere
@@ -2321,6 +2395,8 @@ pub fn run() {
             export_destination,
             sqlfiles_scan,
             sqlfiles_pick_folder,
+            sqlfiles_run,
+            sqlfiles_run_cancel,
             export_schema,
             export_schema_cancel,
             app_defaults,

@@ -72,9 +72,11 @@ a connection you happen to be pointing at:
 └──┴──────────────┴──────────────────────┘
 ```
 
-**`Ctrl+B`** opens it, for batch. Not `Ctrl+Shift+R`, the obvious mnemonic:
-WebKitGTK claims it as reload, and a shortcut that reloads the app under
-`mise run dev` and works when packaged is the worst kind of difference.
+**`Ctrl+Shift+B`** opens it. *Corrected while building:* this section said
+`Ctrl+B`, which has toggled the schema pane since Stage 12 — so it takes the
+modifier rather than the letter. Not `Ctrl+Shift+R`, the other obvious
+mnemonic: WebKitGTK claims it as reload, and a shortcut that reloads the app
+under `mise run dev` and works when packaged is the worst kind of difference.
 
 **The button is never disabled, however bad the news.** Stage 20 §11.1 settled
 that for the assistant: opening the panel is how you read *why* it is not
@@ -220,7 +222,7 @@ Stage 22 instead of designing them.
 3. **A failure stops the run.** Nothing after it is attempted. See §4.3.
 4. **One CSV per result set** — `name.csv`, `name-2.csv`, `name-3.csv`. See
    §4.4.
-5. **A rail button and `Ctrl+B`**, not only a context menu. See §3.1.
+5. **A rail button and `Ctrl+Shift+B`**, not only a context menu. See §3.1.
 6. **A report pane in the results band**, not text in the grid, because the
    report is what you ran the job for. See §3.3.
 7. **In-app only** — no OS notification, and no new plugin for it. See §3.3.
@@ -787,6 +789,62 @@ spreadsheet and believes; and a read-only connection's refusal names the
 connection rather than claiming MySQL cannot write.
 
 **503 Rust unit tests, 9 scan, 9 measurement, 5 live runner.**
+
+### 9b.4 The UI: a rail button, a preview, a strip and a band — 2026-10-14
+
+**The shortcut in §3.1 was wrong.** `Ctrl+B` has toggled the schema pane since
+Stage 12, which the plan said was free. It is `Ctrl+Shift+B` instead — the
+modifier rather than the letter — and the branch that handles it has to read
+`shiftKey`, because it matches both cases of "b" and would otherwise answer
+both shortcuts. A test holds `Ctrl+B` to the schema pane so this cannot drift
+back.
+
+The rail button is the fifth, with a new `run-files` icon: a page with a play
+mark, not a bare play triangle, which would read as "run the editor's query"
+when the button is about *files*.
+
+**The preview lists every file, including the ones that will not run** — four
+shapes, from the scan's verdicts — and marks the ones that write. The summary
+ends on the number that matters and only when there is one: "0 write" reads as
+reassurance nobody asked for.
+
+**The write confirmation names statements**, `01-setup.sql:2  DROP TABLE …`, up
+to a dozen. It is built from the same `Scan` that is handed back to the runner,
+so a test asserts the sent plan equals the shown plan **object for object** —
+the confirmation cannot have named statements from a different plan.
+
+**The report is a band outside the tab system**, and a test switches tabs *and
+runs a query* to prove it survives both. That is the claim §3.3 exists for: the
+schema export's report goes through `results.setMessage` into `#grid`, and
+`onActivate` repaints the grid per tab, so switching tabs destroys it. Breaking
+this one back to `results.setMessage` fails six tests.
+
+**One job at a time, and Run says which.** `jobRunning` holds a *name* rather
+than a boolean, so a second attempt reads "A schema export is already running"
+rather than "a job is". The schema export takes the same lock, so the two
+cannot contend for the one strip.
+
+**Quitting mid-job now asks** (§6.6), after the unsaved-work question rather
+than before — losing edits is the worse of the two and should be read first.
+
+#### Three things the tests caught
+
+* **"Run 1 statement that write?"** The count agreed and the verb did not. Its
+  own test found it, and the title is now written out per branch rather than
+  pluralised by suffix.
+* **Both folder pickers returning one path.** A fixture problem that exposed a
+  real gap: nothing said anything when the destination *was* the source, which
+  silently undoes §3.2's reason for having two. It is allowed — it is their
+  folder — and now noted: *"The CSVs will be written among the scripts."*
+* **`sqlfiles_run_cancel` unstubbed**, which is the harness's job and is now
+  stubbed centrally so no later spec has to think about it.
+
+Three falsifications: the report in the grid (6 tests fail), ignoring the write
+confirmation's answer, and letting `Ctrl+Shift+B` fall through to the schema
+toggle.
+
+**18 UI tests for this feature; 501 on Chromium, 500 + 1 engine-skip on
+WebKit, 499 Rust unit.**
 
 ## 10. Engines
 

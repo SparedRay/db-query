@@ -95,6 +95,7 @@ export const baseBackend: Backend = {
     outputs: 0,
     writes: 0,
   }),
+  sqlfiles_run_cancel: () => null,
   export_schema: () => null,
   export_schema_cancel: () => null,
   // And the preferences file, before anything else — `src/boot.ts`. "Nothing

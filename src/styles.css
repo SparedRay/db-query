@@ -1556,6 +1556,78 @@ button .spinner {
 .mig-progress-what { color: var(--fg-dim); font-family: var(--mono); font-size: 11px; }
 .mig-progress-note { color: var(--fg-dimmer, var(--fg-dim)); opacity: .85; }
 
+/* --- Stage 23: a folder of SQL files ------------------------------------ */
+
+/* The dialog is a column rather than the export's two panes: this is a
+   sequence — folder, what is in it, where it goes — and a sequence read across
+   two columns is one somebody can start in the middle of. */
+#sqlfiles-dialog { max-width: 640px; }
+#sqlfiles-dialog .sf-where { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+#sqlfiles-dialog .sf-where .hint { flex-basis: 100%; margin: 0; }
+.sf-folder { margin-top: 12px; }
+.sf-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Ellipsised from the *left*: the end of a path is the part that identifies
+   it, and a truncated `/home/someone/very/long/...` tells you nothing. */
+.sf-path {
+  flex-grow: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+  direction: rtl; text-align: left; text-overflow: ellipsis;
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+}
+.sf-preview {
+  margin-top: 12px; max-height: 220px; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-sunken, var(--bg));
+}
+.sf-preview:empty { display: none; }
+.sf-file {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px;
+  align-items: baseline; padding: 4px 10px; font-size: 12px;
+}
+.sf-file + .sf-file { border-top: 1px solid var(--border); }
+.sf-mark { color: var(--fg-dim); text-align: center; }
+.sf-name { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-note { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+/* A file that will write is marked, because it is the one thing in this list
+   worth noticing before pressing Run. */
+.sf-file.writes .sf-mark { color: var(--danger, #e5534b); }
+.sf-file.skipped .sf-name, .sf-file.skipped .sf-note { opacity: .7; }
+.sf-csv { margin-top: 12px; }
+.sf-csv summary { cursor: pointer; font-size: 12px; color: var(--fg-dim); }
+.sf-csv-body { display: flex; flex-wrap: wrap; gap: 10px 16px; padding: 10px 2px 0; }
+
+/* The report band: in the strip's slot, pushing the grid down rather than
+   replacing it — a report must not hide the query somebody ran next. Capped
+   and scrolling, so forty files do not eat the pane. */
+.job-report {
+  display: flex; flex-direction: column; min-height: 0; max-height: 40%;
+  background: var(--bg-raised); border-bottom: 1px solid var(--border);
+}
+.job-report-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px 0; font-size: 12px;
+}
+.job-report-stop { color: var(--danger, #e5534b); font-size: 11px; }
+.job-report-where {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; min-width: 0;
+}
+.job-report-path {
+  flex-grow: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+  direction: rtl; text-align: left; text-overflow: ellipsis;
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+}
+.job-report-list { overflow: auto; border-top: 1px solid var(--border); }
+.job-report-file {
+  display: grid; grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr); gap: 8px;
+  align-items: baseline; padding: 4px 12px; font-size: 12px;
+}
+.job-report-file + .job-report-file { border-top: 1px solid var(--border); }
+.job-report-mark { text-align: center; color: var(--fg-dim); }
+.job-report-name { font-family: var(--mono); white-space: nowrap; }
+.job-report-note {
+  color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis;
+}
+.job-report-file.failed .job-report-mark { color: var(--danger, #e5534b); }
+.job-report-file.not-run { opacity: .65; }
+
 /* --- L3: Flyway's output, where the grid would be ----------------------- */
 .flyway-pane { display: flex; flex-direction: column; min-height: 0; flex-grow: 1; }
 .flyway-head {
