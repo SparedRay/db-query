@@ -62,6 +62,8 @@ export interface ScriptTab {
   encoding: string;
   /** "lf" | "crlf" — what to write back. */
   lineEnding: string;
+  /** The file began with a UTF-8 BOM, so a Save puts one back. */
+  bom: boolean;
   /** Modification time when opened or last saved; seeds the conflict check. */
   mtimeMs: number | null;
 
@@ -166,6 +168,7 @@ export interface RestoredTab {
   dialect: string;
   encoding: string;
   lineEnding: string;
+  bom?: boolean;
   mtimeMs: number | null;
   /** The buffer. */
   contents: string;
@@ -431,6 +434,7 @@ export class TabManager {
       dialect: "mysql",
       encoding: "utf-8",
       lineEnding: "lf",
+      bom: false,
       mtimeMs: null,
       baseline: state.doc,
       state,
@@ -468,6 +472,7 @@ export class TabManager {
     dialect?: string;
     encoding?: string;
     lineEnding?: string;
+    bom?: boolean;
     mtimeMs?: number | null;
     /** Opened by something other than the person at the keyboard. */
     origin?: TabOrigin;
@@ -498,6 +503,7 @@ export class TabManager {
       dialect: opts?.dialect ?? this.hooks.dialectForActiveConnection?.() ?? "mysql",
       encoding: opts?.encoding ?? "utf-8",
       lineEnding: opts?.lineEnding ?? "lf",
+      bom: opts?.bom ?? false,
       mtimeMs: opts?.mtimeMs ?? null,
       baseline: state.doc,
       state,
@@ -641,6 +647,7 @@ export class TabManager {
         dialect: spec.dialect,
         encoding: spec.encoding,
         lineEnding: spec.lineEnding,
+        bom: spec.bom ?? false,
         mtimeMs: spec.mtimeMs,
         // The whole point of restoring a dirty tab: the baseline is what was on
         // disk, so `isDirty` still answers the question it always answered.

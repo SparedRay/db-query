@@ -52,6 +52,14 @@ pub struct OpenedFile {
     pub encoding: String,
     /// `"lf"` | `"crlf"` — preserved on save.
     pub line_ending: String,
+    /// The file began with a UTF-8 BOM, which `contents` has had removed.
+    ///
+    /// **Stripped because MySQL refuses it** — a statement beginning with
+    /// U+FEFF is error 1064, pointing at a character nobody can see (Stage 23
+    /// §9.7). It is *recorded* rather than quietly dropped so a Save writes the
+    /// file back the way its owner had it; editing bytes nobody asked us to
+    /// edit is how a diff grows a line that is not a change.
+    pub bom: bool,
     pub mtime_ms: u64,
     /// Over `WARN_OPEN_BYTES`; the UI should warn and ease off linting.
     pub large: bool,
@@ -145,6 +153,17 @@ fn normalise_newlines(text: &str) -> (String, &'static str) {
     (text.replace("\r\n", "\n"), ending)
 }
 
+/// Remove a leading UTF-8 BOM, reporting whether there was one.
+///
+/// Only the first one: a second U+FEFF is a zero-width no-break space in the
+/// middle of a file, which is content, not an encoding marker.
+fn strip_bom(text: &str) -> (&str, bool) {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    }
+}
+
 fn restore_newlines(text: &str, line_ending: &str) -> String {
     if line_ending.eq_ignore_ascii_case("crlf") {
         // Normalise first so we never emit `\r\r\n` if the buffer already has one.
@@ -179,7 +198,11 @@ pub fn read_file(path: &Path) -> Result<OpenedFile, String> {
             "utf-8-lossy",
         ),
     };
-    let (contents, line_ending) = normalise_newlines(&raw);
+    // Before the newline pass, so a BOM cannot be mistaken for content by
+    // anything downstream — the splitter included, which would otherwise hand
+    // the first statement to MySQL with the BOM inside it.
+    let (raw, bom) = strip_bom(&raw);
+    let (contents, line_ending) = normalise_newlines(raw);
 
     Ok(OpenedFile {
         path: path.to_string_lossy().into_owned(),
@@ -189,6 +212,7 @@ pub fn read_file(path: &Path) -> Result<OpenedFile, String> {
         dialect: dialect_for_path(path),
         encoding: encoding.to_string(),
         line_ending: line_ending.to_string(),
+        bom,
         mtime_ms: mtime_ms(path)?,
         large: size > WARN_OPEN_BYTES,
     })
@@ -203,6 +227,7 @@ pub fn save_file(
     contents: &str,
     expect_mtime: Option<u64>,
     line_ending: &str,
+    bom: bool,
 ) -> Result<SaveOutcome, String> {
     if let Some(expected) = expect_mtime {
         if path.exists() {
@@ -215,7 +240,10 @@ pub fn save_file(
         }
     }
 
-    let body = restore_newlines(contents, line_ending);
+    let mut body = restore_newlines(contents, line_ending);
+    if bom {
+        body.insert(0, '\u{feff}');
+    }
     write_atomic(path, body.as_bytes())?;
     Ok(SaveOutcome::Saved {
         mtime_ms: mtime_ms(path)?,
@@ -319,7 +347,7 @@ mod tests {
         // The editor sees LF, so byte offsets stay in step with CodeMirror.
         assert_eq!(f.contents, "SELECT 1;\nSELECT 2;\n");
 
-        save_file(&p, &f.contents, Some(f.mtime_ms), &f.line_ending).unwrap();
+        save_file(&p, &f.contents, Some(f.mtime_ms), &f.line_ending, f.bom).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), original);
     }
 
@@ -329,8 +357,79 @@ mod tests {
         let p = d.join("unix.sql");
         fs::write(&p, "SELECT 1;\n").unwrap();
         let f = read_file(&p).unwrap();
-        save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), &f.line_ending).unwrap();
+        save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), &f.line_ending, f.bom).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "SELECT 2;\n");
+    }
+
+    /// **The BOM comes off the text and stays on the file.**
+    ///
+    /// MySQL refuses a statement that begins with U+FEFF — error 1064, pointing
+    /// at a character nobody can see (Stage 23 §9.7) — so the editor and the
+    /// batch runner must never be handed one. Writing the file back without it
+    /// would be a different wrong: changing bytes nobody asked us to change.
+    #[test]
+    fn a_bom_is_taken_off_the_text_and_put_back_on_the_file() {
+        let d = tmpdir();
+        let p = d.join("notepad.sql");
+        let original = "\u{feff}SELECT 1;\n";
+        fs::write(&p, original).unwrap();
+
+        let f = read_file(&p).unwrap();
+        assert!(f.bom, "the BOM was not noticed");
+        assert_eq!(
+            f.contents, "SELECT 1;\n",
+            "the BOM reached the text, where it becomes a syntax error"
+        );
+        assert!(
+            !f.contents.starts_with('\u{feff}'),
+            "stated twice on purpose: this is the byte that breaks the server"
+        );
+
+        save_file(&p, &f.contents, Some(f.mtime_ms), &f.line_ending, f.bom).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), original);
+    }
+
+    /// And the common case is untouched: a file with no BOM does not grow one.
+    #[test]
+    fn a_file_without_a_bom_never_gains_one() {
+        let d = tmpdir();
+        let p = d.join("plain.sql");
+        fs::write(&p, "SELECT 1;\n").unwrap();
+        let f = read_file(&p).unwrap();
+        assert!(!f.bom);
+        save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), &f.line_ending, f.bom).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "SELECT 2;\n");
+        assert_eq!(fs::read(&p).unwrap()[0], b'S');
+    }
+
+    /// **A BOM is a prefix, not a character we delete wherever we find it.**
+    /// U+FEFF in the middle of a file is a zero-width no-break space — content,
+    /// however unwelcome — and a reader that strips every one of them is
+    /// corrupting data to tidy an encoding marker.
+    #[test]
+    fn only_the_leading_bom_is_a_bom() {
+        assert_eq!(strip_bom("\u{feff}a"), ("a", true));
+        assert_eq!(strip_bom("a\u{feff}b"), ("a\u{feff}b", false));
+        assert_eq!(strip_bom("\u{feff}\u{feff}a"), ("\u{feff}a", true));
+        assert_eq!(strip_bom("a"), ("a", false));
+        assert_eq!(strip_bom(""), ("", false));
+    }
+
+    /// Both markers at once, which is exactly what a Windows editor produces.
+    #[test]
+    fn a_bom_and_crlf_both_survive_a_round_trip() {
+        let d = tmpdir();
+        let p = d.join("both.sql");
+        let original = "\u{feff}SELECT 1;\r\nSELECT 2;\r\n";
+        fs::write(&p, original).unwrap();
+
+        let f = read_file(&p).unwrap();
+        assert!(f.bom);
+        assert_eq!(f.line_ending, "crlf");
+        assert_eq!(f.contents, "SELECT 1;\nSELECT 2;\n");
+
+        save_file(&p, &f.contents, Some(f.mtime_ms), &f.line_ending, f.bom).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), original);
     }
 
     #[test]
@@ -410,7 +509,7 @@ mod tests {
         let bumped = f.mtime_ms + 5_000;
         filetime_set(&p, bumped);
 
-        match save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), "lf").unwrap() {
+        match save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), "lf", false).unwrap() {
             SaveOutcome::Conflict { disk_mtime_ms } => assert_eq!(disk_mtime_ms, bumped),
             SaveOutcome::Saved { .. } => panic!("clobbered a file that changed on disk"),
         }
@@ -424,7 +523,7 @@ mod tests {
         let p = d.join("mine.sql");
         fs::write(&p, "SELECT 1;\n").unwrap();
         let f = read_file(&p).unwrap();
-        match save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), "lf").unwrap() {
+        match save_file(&p, "SELECT 2;\n", Some(f.mtime_ms), "lf", false).unwrap() {
             SaveOutcome::Saved { .. } => {}
             SaveOutcome::Conflict { .. } => panic!("false conflict on an unchanged file"),
         }
@@ -435,7 +534,7 @@ mod tests {
     fn save_as_to_a_new_path_needs_no_mtime() {
         let d = tmpdir();
         let p = d.join("brand-new.sql");
-        save_file(&p, "SELECT 1;\n", None, "lf").unwrap();
+        save_file(&p, "SELECT 1;\n", None, "lf", false).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "SELECT 1;\n");
     }
 
@@ -443,7 +542,7 @@ mod tests {
     fn atomic_write_leaves_no_temp_file_behind() {
         let d = tmpdir();
         let p = d.join("clean.sql");
-        save_file(&p, "SELECT 1;\n", None, "lf").unwrap();
+        save_file(&p, "SELECT 1;\n", None, "lf", false).unwrap();
         let leftovers: Vec<_> = fs::read_dir(&d)
             .unwrap()
             .filter_map(|e| e.ok())

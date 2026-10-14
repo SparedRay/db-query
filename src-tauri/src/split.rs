@@ -275,6 +275,50 @@ pub fn split(sql: &str) -> SplitOutput {
     }
 }
 
+/// The 1-based line containing byte `offset`.
+///
+/// Counting newline **bytes** is the whole implementation and it is right for a
+/// reason worth stating: UTF-8 never encodes any character other than `\n` with
+/// the byte `0x0A`, so a comment full of accents, CJK or emoji above the
+/// statement cannot shift the count. Anything that divides or counts characters
+/// instead drifts — Stage 23 §9.6 measured it.
+///
+/// An `offset` past the end answers with the last line rather than panicking:
+/// a line number is for a person to read, and refusing to produce one is never
+/// the more useful failure.
+pub fn line_of(sql: &str, offset: usize) -> usize {
+    let upto = offset.min(sql.len());
+    sql.as_bytes()[..upto]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count()
+        + 1
+}
+
+/// The offset of the first byte of real code in `sql`, or `None` when there is
+/// none — the text is comments and whitespace.
+///
+/// **A statement span owns the comment above it.** `split` returns
+/// `-- header\nSELECT 1` as one statement starting at the dash, which is right
+/// for execution and wrong for everything a person reads: a confirmation built
+/// on `span.start` shows `-- header` where it means to show the `INSERT` it is
+/// asking permission for, and the line number names the comment's line
+/// (Stage 23 §9.1).
+///
+/// Built on [`mask_comments`], which already knows where comments are.
+/// Re-deriving "where do comments end" here would be a second opinion about
+/// MySQL's lexical structure, and the two would eventually disagree about
+/// something like `a--b`.
+///
+/// Deliberately **not** `mask_noncode`: that one blanks a string literal's
+/// quotes too, so `'hi'` would look like no code at all and a file would be
+/// reported as having nothing to run.
+pub fn first_code_byte(sql: &str) -> Option<usize> {
+    mask_comments(sql)
+        .bytes()
+        .position(|b| !b.is_ascii_whitespace())
+}
+
 /// Return a copy of `sql` with every non-code byte replaced by a space:
 /// string literals, quoted identifiers and comments are blanked out while
 /// byte offsets stay identical to the original.
@@ -307,7 +351,26 @@ pub fn mask_keep_idents_quoted(sql: &str, quote: char) -> String {
 }
 
 /// `keep` is the quote character whose *contents* survive, if any.
+/// Blank out **comments only**, keeping string literals and quoted
+/// identifiers exactly as they are.
+///
+/// The fourth question for this one scanner, and the one
+/// [`first_code_byte`] needs: `mask_noncode` blanks a literal's quotes along
+/// with its contents, so a statement that opens with one reads as having no
+/// code at all — and "no code" means "nothing to run", which would skip a file
+/// silently. That is the failure this project least wants to ship.
+pub fn mask_comments(sql: &str) -> String {
+    mask_impl_with(sql, None, true)
+}
+
 fn mask_impl(sql: &str, keep: Option<u8>) -> String {
+    mask_impl_with(sql, keep, false)
+}
+
+/// `keep_quoted` keeps every byte of a quoted run, delimiters included, which
+/// `keep` cannot express: it names one quote character and preserves only the
+/// *contents*.
+fn mask_impl_with(sql: &str, keep: Option<u8>, keep_quoted: bool) -> String {
     let b = sql.as_bytes();
     let mut out = vec![b' '; b.len()];
     let mut mode = Mode::Normal;
@@ -317,9 +380,16 @@ fn mask_impl(sql: &str, keep: Option<u8>) -> String {
         let c = b[i];
         match mode {
             Mode::Normal => match c {
-                b'\'' => mode = Mode::Single,
-                b'"' => mode = Mode::Double,
-                b'`' => mode = Mode::Backtick,
+                b'\'' | b'"' | b'`' => {
+                    mode = match c {
+                        b'\'' => Mode::Single,
+                        b'"' => Mode::Double,
+                        _ => Mode::Backtick,
+                    };
+                    if keep_quoted {
+                        out[i] = c;
+                    }
+                }
                 b'#' => mode = Mode::LineComment,
                 b'-' if is_dash_comment(b, i) => {
                     mode = Mode::LineComment;
@@ -337,10 +407,21 @@ fn mask_impl(sql: &str, keep: Option<u8>) -> String {
                     Mode::Double => b'"',
                     _ => b'`',
                 };
+                if keep_quoted {
+                    out[i] = c;
+                }
                 if c == b'\\' && mode != Mode::Backtick {
+                    if keep_quoted {
+                        if let Some(n) = b.get(i + 1) {
+                            out[i + 1] = *n;
+                        }
+                    }
                     i += 1;
                 } else if c == q {
                     if b.get(i + 1) == Some(&q) {
+                        if keep_quoted {
+                            out[i + 1] = q;
+                        }
                         i += 1;
                     } else {
                         mode = Mode::Normal;
@@ -364,8 +445,12 @@ fn mask_impl(sql: &str, keep: Option<u8>) -> String {
         }
         i += 1;
     }
-    // Every byte is ASCII space or an original ASCII byte; multi-byte UTF-8
-    // sequences only ever appear inside masked regions, so this is valid UTF-8.
+    // Valid UTF-8 either way, for two different reasons. Masked bytes become
+    // ASCII spaces; kept bytes are copied from the original verbatim, so a
+    // multi-byte sequence inside a kept region arrives whole. (Before
+    // `keep_quoted` existed, the reason was simply that multi-byte sequences
+    // only ever appeared inside masked regions.) The fallback is unreachable
+    // and cheap to keep.
     String::from_utf8(out).unwrap_or_else(|_| " ".repeat(sql.len()))
 }
 
@@ -846,5 +931,124 @@ mod tests {
         assert!(!m.contains('x'), "string literal leaked: {m:?}");
         // The strict mask must still blank it, or auto-LIMIT would misfire.
         assert!(!mask_noncode(sql).contains("my table"));
+    }
+
+    // ------------------------------------- lines, and where a statement starts
+
+    /// **Newline bytes, not characters.** An accented, CJK or emoji-laden
+    /// comment above a statement must not move its line number — UTF-8 encodes
+    /// nothing but `\n` as `0x0A`, so counting bytes is exactly right and
+    /// anything character-based drifts by the number of multi-byte characters
+    /// above it.
+    #[test]
+    fn a_line_number_counts_newline_bytes() {
+        let sql = "-- héllo ★ 表 🔐\nSELECT 1;\n-- ñ\nSELECT 2;\n";
+        assert_eq!(line_of(sql, 0), 1);
+        // The byte offset is far beyond the character offset here, which is the
+        // whole point.
+        let second = sql.find("SELECT 2").unwrap();
+        assert!(
+            second > sql[..second].chars().count(),
+            "no multi-byte text?"
+        );
+        assert_eq!(line_of(sql, second), 4);
+        assert_eq!(line_of(sql, sql.find("SELECT 1").unwrap()), 2);
+    }
+
+    /// Out of range answers rather than panics: a line number is for a person
+    /// to read, and refusing to give one is never the more useful failure.
+    #[test]
+    fn a_line_number_past_the_end_is_the_last_line() {
+        assert_eq!(line_of("a\nb", 999), 2);
+        assert_eq!(line_of("", 999), 1);
+    }
+
+    /// **The statement a confirmation shows starts at the SQL.** `split` hands
+    /// back the comment above it as part of the span, so this is what turns
+    /// `-- header\nINSERT …` into the `INSERT` somebody is being asked about.
+    #[test]
+    fn the_first_code_byte_skips_the_comment_a_span_owns() {
+        let sql = "-- rebuild the totals\nDELETE FROM totals";
+        let at = first_code_byte(sql).unwrap();
+        assert_eq!(&sql[at..], "DELETE FROM totals");
+        assert_eq!(line_of(sql, at), 2);
+
+        // Block comments, and a mix, on one line and across several.
+        assert_eq!(first_code_byte("/* why */ SELECT 1").map(|i| i), Some(10));
+        let multi = "/* a\n   b */\n\n  SELECT 1";
+        assert_eq!(&multi[first_code_byte(multi).unwrap()..], "SELECT 1");
+    }
+
+    /// No code is a real answer, and the one the preview needs for a file of
+    /// only comments (Stage 23 §9.2).
+    #[test]
+    fn a_span_with_no_code_says_so() {
+        assert_eq!(first_code_byte("-- all comment\n"), None);
+        assert_eq!(first_code_byte("/* and this */\n  \n"), None);
+        assert_eq!(first_code_byte("   \n\t\n"), None);
+        assert_eq!(first_code_byte(""), None);
+    }
+
+    /// **It asks the masker, so it inherits the masker's judgement.** `a--b` is
+    /// arithmetic rather than a comment, and a hand-rolled "skip to the end of
+    /// the line after `--`" would get it wrong — which is the reason this is
+    /// built on `mask_noncode` rather than beside it.
+    #[test]
+    fn the_first_code_byte_agrees_with_the_masker_about_dashes() {
+        assert_eq!(first_code_byte("a--b"), Some(0));
+        // And a real comment, whose dash is followed by a space.
+        assert_eq!(first_code_byte("-- b\na"), Some(5));
+    }
+
+    /// A string literal is code, even though the mask blanks its contents — the
+    /// quote itself stays, so a statement that opens with one is not mistaken
+    /// for a comment.
+    #[test]
+    fn a_leading_string_literal_is_code() {
+        assert_eq!(first_code_byte("'hi'"), Some(0));
+        assert_eq!(first_code_byte("-- x\n'hi'"), Some(5));
+    }
+
+    /// **Comments out, everything else untouched** — the fourth question for
+    /// the one scanner, and the reason `first_code_byte` does not use
+    /// `mask_noncode`.
+    #[test]
+    fn mask_comments_keeps_literals_whole() {
+        // Stated as "the code, then blanks to the end", so the expectation
+        // cannot be mis-counted by hand — which is exactly what happened when
+        // it was written out as a literal.
+        let blanked_tail =
+            |sql: &str, code: &str| format!("{code}{}", " ".repeat(sql.len() - code.len()));
+        let sql = "SELECT 'hi' -- note";
+        assert_eq!(mask_comments(sql), blanked_tail(sql, "SELECT 'hi'"));
+        assert_eq!(mask_comments("/* x */SELECT 1"), "       SELECT 1");
+        // Quoted identifiers, and a doubled quote inside a literal.
+        assert_eq!(mask_comments("SELECT `a`, 'it''s'"), "SELECT `a`, 'it''s'");
+        // A backslash escape, which must not swallow the following byte.
+        assert_eq!(mask_comments(r"'a\'b' , 1"), r"'a\'b' , 1");
+        // Offsets are preserved, which everything built on a mask relies on.
+        for sql in ["SELECT 'hi' -- note", "/* x */SELECT 1", "a--b"] {
+            assert_eq!(mask_comments(sql).len(), sql.len(), "{sql:?}");
+        }
+    }
+
+    /// Multi-byte text inside a literal survives, which is what makes the
+    /// `from_utf8` at the end of the masker safe for this variant.
+    #[test]
+    fn mask_comments_survives_multibyte_literals() {
+        let sql = "SELECT 'héllo ★ 表 🔐' -- ñ";
+        let m = mask_comments(sql);
+        assert_eq!(m.len(), sql.len());
+        assert!(m.contains("'héllo ★ 表 🔐'"), "{m:?}");
+        assert!(!m.contains('ñ'), "the comment leaked: {m:?}");
+    }
+
+    /// And the behaviour of the other three masks is untouched: a literal's
+    /// contents still go, which is what keeps auto-LIMIT and the linter honest.
+    #[test]
+    fn the_strict_mask_still_blanks_literals() {
+        assert_eq!(mask_noncode("SELECT 'hi'"), "SELECT     ");
+        assert!(!mask_noncode("WHERE x = 'no limit'").contains("limit"));
+        assert!(mask_keep_idents("FROM `users`").contains("users"));
     }
 }

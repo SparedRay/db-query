@@ -1945,12 +1945,14 @@ fn save_file(
     contents: String,
     expect_mtime: Option<u64>,
     line_ending: String,
+    bom: bool,
 ) -> Result<SaveOutcome, String> {
     files::save_file(
         std::path::Path::new(&path),
         &contents,
         expect_mtime,
         &line_ending,
+        bom,
     )
 }
 
@@ -1962,6 +1964,7 @@ async fn save_file_dialog(
     suggested_name: String,
     contents: String,
     line_ending: String,
+    bom: bool,
 ) -> Result<Option<SavedFile>, String> {
     let mut builder = app.dialog().file().set_file_name(&suggested_name);
     for spec in files::supported_file_types() {
@@ -1986,7 +1989,7 @@ async fn save_file_dialog(
 
     // The native dialog already handled any overwrite confirmation, so there is
     // no mtime expectation to check here.
-    match files::save_file(&path, &contents, None, &line_ending)? {
+    match files::save_file(&path, &contents, None, &line_ending, bom)? {
         SaveOutcome::Saved { mtime_ms } => Ok(Some(SavedFile {
             path: path.to_string_lossy().into_owned(),
             name: path
