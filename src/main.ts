@@ -32,7 +32,7 @@ import {
   type CliStatus,
   type Provider,
 } from "./api";
-import { copyText } from "./clipboard";
+import { copyAndReport, copyText, wireCopyButton } from "./clipboard";
 import { choose, showValue } from "./dialog";
 import { renderMarkdown } from "./markdown";
 import { createTheme, type ThemePref } from "./theme";
@@ -139,6 +139,7 @@ const els = {
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
   histList: $<HTMLElement>("hist-list"),
+  histNote: $<HTMLElement>("hist-note"),
   histClear: $<HTMLButtonElement>("hist-clear"),
   histClose: $<HTMLButtonElement>("hist-close"),
   settingsDialog: $<HTMLDialogElement>("settings-dialog"),
@@ -2436,11 +2437,12 @@ els.setMcpReveal.onclick = () => {
   els.setMcpToken.type = hidden ? "text" : "password";
   els.setMcpReveal.textContent = hidden ? "Hide" : "Show";
 };
-els.setMcpCopy.onclick = () => {
-  if (mcpToken) void copyText(mcpToken);
-};
-els.setMcpCopyCli.onclick = () => void copyText(els.setMcpCli.textContent ?? "");
-els.setMcpCopyJson.onclick = () => void copyText(els.setMcpJson.textContent ?? "");
+// All three said nothing at all — success or failure. These are the buttons
+// where silence is worst: somebody pastes into a config file, gets an empty
+// string or yesterday's token, and the symptom appears in another program.
+wireCopyButton(els.setMcpCopy, () => mcpToken ?? "");
+wireCopyButton(els.setMcpCopyCli, () => els.setMcpCli.textContent ?? "");
+wireCopyButton(els.setMcpCopyJson, () => els.setMcpJson.textContent ?? "");
 
 els.setMcpRegen.onclick = async () => {
   const yes = await choose(
@@ -2577,9 +2579,26 @@ const history = createHistory({
     }
     tabs.create({ contents: sql });
   },
-  copy: (sql) => void copyText(sql),
+  copy: (sql) => sayCopied(sql),
   notify: (m) => results.setMessage(m),
 });
+
+/**
+ * Copy from the history list, and say so **inside the dialog**.
+ *
+ * Not through `notify`: that is `results.setMessage`, which paints behind a
+ * modal — the person would see nothing until they closed the dialog, and
+ * would then find their result set replaced by it. The standing note is the
+ * one surface they are already looking at, and `copyAndReport` puts it back.
+ */
+function sayCopied(sql: string) {
+  const standing = els.histNote.textContent ?? "";
+  copyAndReport(sql, (outcome) => {
+    els.histNote.textContent =
+      outcome === null ? standing : outcome.ok ? "Copied." : outcome.error;
+    els.histNote.classList.toggle("copy-failed", outcome?.ok === false);
+  });
+}
 
 els.btnHistory.onclick = () => void history.open();
 
@@ -2693,7 +2712,6 @@ const assistant = createAssistant({
     }
     void run(sql);
   },
-  copy: (sql) => copyText(sql),
   // Asked per block as it is drawn, so a statement proposed before you
   // connected is offered properly once you have.
   canRun: () => connected && tabs.activeConnection() !== null,

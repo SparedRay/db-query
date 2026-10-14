@@ -62,3 +62,66 @@ function execCommandCopy(text: string): boolean {
     ta.remove();
   }
 }
+
+/**
+ * Copy, say what happened, then get out of the way.
+ *
+ * `copyText` throws rather than returning false precisely so a caller cannot
+ * ignore a failure by accident — but four call sites did ignore it, by
+ * writing `void copyText(…)`. The outcome has to land *somewhere*, and where
+ * differs: a button can say it on itself, a context-menu item has no element
+ * left to say it on by the time the copy finishes. So this owns the part that
+ * is always the same — await, report, restore — and the caller owns the
+ * surface.
+ *
+ * `say(null)` is the restore, and it is called whatever happened. A Copy that
+ * is still saying "Copied" a minute later is a button that has stopped
+ * meaning anything.
+ */
+export type CopyOutcome = { ok: true } | { ok: false; error: string };
+
+export function copyAndReport(
+  text: string,
+  say: (outcome: CopyOutcome | null) => void,
+  ms = 2000,
+): void {
+  void copyText(text)
+    .then(() => say({ ok: true }))
+    .catch((err: unknown) => say({ ok: false, error: String(err) }))
+    .finally(() => {
+      window.setTimeout(() => say(null), ms);
+    });
+}
+
+/**
+ * The common case: a button that reports on itself.
+ *
+ * The label and tooltip it was built with are captured once and restored
+ * after, so the button goes back to being what it was. An empty string is not
+ * copied at all: there is nothing to put on the clipboard, and "Copied" would
+ * be a lie about it.
+ */
+export function wireCopyButton(button: HTMLButtonElement, text: () => string): void {
+  const label = button.textContent ?? "Copy";
+  const title = button.title;
+  // A second press takes the button over. Without this the first press's
+  // restore — already scheduled, and two seconds behind — would fire during
+  // the second one and put the label back while it was still saying
+  // something.
+  let generation = 0;
+  button.onclick = () => {
+    const payload = text();
+    if (!payload) return;
+    const mine = ++generation;
+    copyAndReport(payload, (outcome) => {
+      if (mine !== generation) return;
+      if (outcome === null) {
+        button.textContent = label;
+        button.title = title;
+        return;
+      }
+      button.textContent = outcome.ok ? "Copied" : "Copy failed";
+      button.title = outcome.ok ? title : outcome.error;
+    });
+  };
+}

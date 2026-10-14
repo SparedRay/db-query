@@ -145,9 +145,48 @@ Not through the result note, which belongs to a result set and would paint over
 rows somebody is reading, and not through the chat's note, which carries the
 statement about what is sent to the model.
 
-> **Known, not fixed:** the history dialog's Copy has the same silent-failure
-> shape (`copy: (sql) => void copyText(sql)` in `main.ts`). Out of this
-> change's scope; worth the same treatment.
+### 4.4 And everywhere else a Copy was silent
+
+Flagging the history dialog's Copy as having the same shape turned up the real
+number. `void copyText(…)` — the promise dropped, the throw swallowed —
+appeared at **four** call sites:
+
+| | reported before | reports now |
+|---|---|---|
+| history dialog, context menu | nothing | the dialog's standing note |
+| MCP · Copy token | nothing | the button |
+| MCP · Copy command | nothing | the button |
+| MCP · Copy config | nothing | the button |
+
+The grid's Copy and the value viewer's were already fine, which is what made
+the others easy to miss: the feature *looked* covered. The viewer moved onto
+the shared mechanism anyway — it reported, but it never took its message back
+down, so its note sat there saying "Copied." for as long as the dialog was
+open.
+
+Three of the four are the buttons where silence costs most. They are pasted
+into another program's configuration, so a failed copy surfaces as that
+program not connecting — a symptom arbitrarily far from its cause.
+
+So the reporting moved into `clipboard.ts`, which is the module that already
+owns "a copy must not fail quietly":
+
+* **`copyAndReport(text, say)`** — await, hand the outcome to `say`, then hand
+  it `null` so it can put things back. The *surface* is the caller's, because
+  it genuinely differs: a button can say it on itself, while a context-menu
+  item has no element left by the time the copy finishes.
+* **`wireCopyButton(button, text)`** — the common case, capturing the label and
+  tooltip it was built with so the button goes back to being what it was. A
+  generation counter, so a second press takes the button over rather than
+  having the first press's restore fire underneath it.
+
+The history dialog reports into its standing note rather than through
+`notify`. That is `results.setMessage`, which paints *behind* a modal: nothing
+would be visible until the dialog closed, and what it then showed would be the
+clipboard sentence sitting where somebody's result set used to be.
+
+Falsified twice, against both surfaces: swallow the rejection and the two
+"refuses" tests fail; drop the restore and the two "goes back" tests fail.
 
 ## 5. The window, remembered
 
@@ -225,4 +264,4 @@ The real work was the new claims, which are about what is *not* blocked:
 driving the tree, the editor and Ctrl+T with the panel open. That test fails if
 the old keyboard guard is put back, which is how it was falsified.
 
-Seven new UI tests, twelve new Rust tests. 455 UI tests on both engines.
+Twelve new UI tests, twelve new Rust tests. 460 UI tests on both engines.

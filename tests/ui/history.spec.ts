@@ -221,3 +221,56 @@ test("with no connection, history still opens and is not connection-scoped", asy
   await expect(page.locator("#hist-this-conn")).not.toBeChecked();
   await expect(page.locator("#hist-this-conn")).toBeDisabled();
 });
+
+// ------------------------------------------------------------------- copying
+
+/**
+ * **Copy says what happened.** It used to be `void copyText(sql)`: the promise
+ * was dropped, so a copy that failed looked exactly like one that worked —
+ * which is the bug class `clipboard.ts` was written to prevent, reintroduced
+ * at the call site.
+ *
+ * The outcome goes in the dialog's standing note, not through `notify`. That
+ * is `results.setMessage`, which paints *behind* a modal: the person would see
+ * nothing until they closed the dialog, and would then find their result set
+ * replaced by a sentence about the clipboard.
+ */
+test("copying from history says so, in the dialog", async ({ page }) => {
+  await openHistory(page, [hit({ sql: "SELECT 99" })]);
+  const note = page.locator("#hist-note");
+  const standing = await note.textContent();
+
+  await page.locator(".hist-row").first().click({ button: "right" });
+  await page.locator('.ctx-menu button:has-text("Copy")').click();
+
+  await expect(note).toHaveText("Copied.");
+  // And it gives the note back, rather than sitting there saying "Copied"
+  // long after it has stopped meaning anything.
+  await expect(note).toHaveText(standing ?? "", { timeout: 6000 });
+  await assertNothingRan(page);
+});
+
+/**
+ * The case that was invisible. `navigator.clipboard` needs a secure context
+ * and a gesture, and WebKitGTK is the weakest of the three platforms at it —
+ * so a refusal is a real outcome, not a hypothetical, and it has to show.
+ */
+test("a clipboard that refuses is reported, not swallowed", async ({ page }) => {
+  await openHistory(page, [hit({ sql: "SELECT 99" })]);
+  // Both paths: the modern API and the `execCommand` fallback under it.
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => Promise.reject(new Error("denied by the test")),
+      },
+    });
+    document.execCommand = () => false;
+  });
+
+  await page.locator(".hist-row").first().click({ button: "right" });
+  await page.locator('.ctx-menu button:has-text("Copy")').click();
+
+  await expect(page.locator("#hist-note")).toContainText("Could not copy to the clipboard");
+  await expect(page.locator("#hist-note")).toHaveClass(/copy-failed/);
+});

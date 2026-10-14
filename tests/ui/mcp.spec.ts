@@ -501,3 +501,63 @@ test("a fresh install starts nothing", async ({ page }) => {
     .toBe(true);
   expect(await commandNames(page)).not.toContain("mcp_start");
 });
+
+// --------------------------------------------------------------- the copies
+
+/**
+ * **The three buttons where silence is worst.**
+ *
+ * All three were `void copyText(…)`: the promise dropped, so nothing was said
+ * whether it worked or not. These are pasted into another program's config
+ * file, so a failed copy shows up as that program not connecting — a symptom
+ * arbitrarily far from the cause.
+ */
+test("each copy button says it copied, then goes back to being a button", async ({ page }) => {
+  await withServer(page);
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").check();
+  await expect(page.locator("#set-mcp-live")).toBeVisible();
+
+  for (const id of ["#set-mcp-copy", "#set-mcp-copy-cli", "#set-mcp-copy-json"]) {
+    const button = page.locator(id);
+    const label = await button.textContent();
+    await button.click();
+    await expect(button, `${id} should report the copy`).toHaveText("Copied");
+    await expect(button, `${id} should go back`).toHaveText(label ?? "", { timeout: 6000 });
+  }
+});
+
+/** The token is the one worth reading back: pasting the wrong bytes into a
+ *  client config is a failure somebody debugs in another program. */
+test("the token button copies the token itself", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "only Chromium grants clipboard-read");
+  await withServer(page);
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").check();
+  await expect(page.locator("#set-mcp-live")).toBeVisible();
+
+  await page.click("#set-mcp-copy");
+  await expect(page.locator("#set-mcp-copy")).toHaveText("Copied");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(TOKEN);
+});
+
+test("a clipboard that refuses leaves the button saying so", async ({ page }) => {
+  await withServer(page);
+  await openIntegrations(page);
+  await page.locator("#set-mcp-on").check();
+  await expect(page.locator("#set-mcp-live")).toBeVisible();
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error("denied by the test")) },
+    });
+    document.execCommand = () => false;
+  });
+
+  await page.click("#set-mcp-copy");
+  const button = page.locator("#set-mcp-copy");
+  await expect(button).toHaveText("Copy failed");
+  // The error itself is kept where it can be read, rather than thrown away.
+  await expect(button).toHaveAttribute("title", /Could not copy to the clipboard/);
+});

@@ -5,7 +5,7 @@
 // silently does nothing. Ours needs no permission, matches the rest of the UI,
 // and can offer more than two answers.
 
-import { copyText } from "./clipboard";
+import { copyAndReport } from "./clipboard";
 
 export interface Choice<T extends string> {
   value: T;
@@ -143,17 +143,17 @@ export function showValue(title: string, value: string | null) {
     const copy = document.createElement("button");
     copy.type = "button";
     copy.textContent = "Copy";
-    copy.onclick = () => {
-      // Copies what is on screen: formatting it and then copying something
-      // else would be a small lie the user cannot see.
-      void copyText(body.textContent ?? "")
-        .then(() => {
-          note.textContent = "Copied.";
-        })
-        .catch((err: unknown) => {
-          note.textContent = String(err);
-        });
-    };
+    // Copies what is on screen: formatting it and then copying something else
+    // would be a small lie the user cannot see. Hence `textContent` at press
+    // time rather than `value`, and hence not `wireCopyButton`'s default of
+    // reporting on the button — this viewer has a note beside the menu with
+    // room for the whole error.
+    copy.onclick = () =>
+      copyAndReport(body.textContent ?? "", (outcome) => {
+        note.textContent =
+          outcome === null ? "" : outcome.ok ? "Copied." : outcome.error;
+        note.classList.toggle("copy-failed", outcome?.ok === false);
+      });
     menu.append(copy);
     render();
   }
