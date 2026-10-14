@@ -62,6 +62,10 @@ export type IconName =
   | "settings"
   | "history"
   | "assistant"
+  // Stage 23's rail button: a document with a play mark on it. Not a bare play
+  // triangle, which would read as "run the editor's query" — the button is
+  // about *files*, and the page behind the mark is the part that says so.
+  | "run-files"
   | "close";
 
 /**
@@ -148,6 +152,14 @@ const PATHS: Record<IconName, string> = {
   inbound:
     '<path d="M3 9.9v2.3a1.3 1.3 0 0 0 1.3 1.3h7.4a1.3 1.3 0 0 0 1.3-1.3V9.9"/>' +
     '<path d="M8 2.4v6.8"/><path d="M5.3 6.6L8 9.3l2.7-2.7"/>',
+  "run-files":
+    // A page with a folded corner, and a filled play mark low-right so it
+    // reads at 16px — a stroked triangle that small closes into a blob.
+    '<path d="M3.2 2.4h5.2l3.4 3.4v3.1"/>' +
+    '<path d="M8.4 2.4v3.4h3.4"/>' +
+    '<path d="M3.2 2.4v8.8"/>' +
+    '<path d="M3.2 11.2h3.3"/>' +
+    '<path d="M8.6 10.1l3.9 2.2-3.9 2.2z" fill="currentColor"/>',
   close: '<path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/>',
 };
 

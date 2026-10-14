@@ -34,6 +34,7 @@ import {
 } from "./api";
 import { copyAndReport, copyText, wireCopyButton } from "./clipboard";
 import { choose, showValue } from "./dialog";
+import { createSqlFilesDialog, type SqlFilesPlan } from "./sqlfiles";
 import { renderMarkdown } from "./markdown";
 import { createTheme, type ThemePref } from "./theme";
 import {
@@ -77,6 +78,27 @@ const els = {
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
   btnSchema: $<HTMLButtonElement>("btn-schema"),
+  btnSqlfiles: $<HTMLButtonElement>("btn-sqlfiles"),
+  jobReport: $<HTMLElement>("job-report"),
+  sfDialog: $<HTMLDialogElement>("sqlfiles-dialog"),
+  sfConnection: $<HTMLSelectElement>("sf-connection"),
+  sfDatabase: $<HTMLSelectElement>("sf-database"),
+  sfPickSource: $<HTMLButtonElement>("sf-pick-source"),
+  sfSource: $<HTMLElement>("sf-source"),
+  sfRecursive: $<HTMLInputElement>("sf-recursive"),
+  sfPreview: $<HTMLElement>("sf-preview"),
+  sfSummary: $<HTMLElement>("sf-summary"),
+  sfPickDest: $<HTMLButtonElement>("sf-pick-dest"),
+  sfDest: $<HTMLElement>("sf-dest"),
+  sfError: $<HTMLElement>("sf-error"),
+  sfOk: $<HTMLButtonElement>("sf-ok"),
+  sfCancel: $<HTMLButtonElement>("sf-cancel"),
+  sfDelim: $<HTMLInputElement>("sf-delim"),
+  sfHeaders: $<HTMLInputElement>("sf-headers"),
+  sfNull: $<HTMLInputElement>("sf-null"),
+  sfCrlf: $<HTMLInputElement>("sf-crlf"),
+  sfBom: $<HTMLInputElement>("sf-bom"),
+  sfGuard: $<HTMLInputElement>("sf-guard"),
   migSide: $("mig-side"),
   migSideBody: $("mig-side-body"),
   migSideToggle: $<HTMLButtonElement>("mig-side-toggle"),
@@ -902,6 +924,7 @@ for (const [el, name] of [
   [els.btnAssistant, "assistant"],
   [els.btnHistory, "history"],
   [els.btnSchema, "sidebar"],
+  [els.btnSqlfiles, "run-files"],
   [els.btnSettings, "settings"],
 ] as const) {
   el.append(icon(name));
@@ -3290,6 +3313,14 @@ void getCurrentWindow().onCloseRequested(async (event) => {
     event.preventDefault();
     return;
   }
+  // **And quitting mid-job.** A schema export or a batch run holds its own
+  // connection and is writing files; quitting killed it silently until Stage
+  // 23 §6.6. Asked after the unsaved-work question rather than before, because
+  // losing edits is the worse of the two and should be the first thing read.
+  if (!(await confirmQuitWithJob())) {
+    event.preventDefault();
+    return;
+  }
   // Last chance: the debounce may still be holding the most recent keystrokes.
   await session.flush();
 });
@@ -3344,7 +3375,12 @@ window.addEventListener("keydown", (e) => {
     els.treeFilter.select();
   } else if (e.key === "b" || e.key === "B") {
     e.preventDefault();
-    toggleSchema(!schemaOpen);
+    // **Shift makes it the batch runner.** `Ctrl+B` has toggled the schema
+    // since Stage 12, so Stage 23 took the modifier rather than the letter —
+    // and this branch has to read `shiftKey`, because it matches both cases of
+    // the letter and would otherwise answer both shortcuts.
+    if (e.shiftKey) openSqlFiles();
+    else toggleSchema(!schemaOpen);
   } else if (e.key === "k" || e.key === "K") {
     e.preventDefault();
     // A toggle, like Ctrl+B. The panel takes width while it is open, so the
@@ -3771,6 +3807,16 @@ function migProgressShow(title: string, what: string) {
 
 let jobTimer: number | null = null;
 
+/**
+ * Which job is running, by a name a sentence can use — or `null`.
+ *
+ * **One job at a time, across kinds.** There is one strip, and two jobs
+ * reporting into it would make both illegible (§3.2). Naming it rather than
+ * holding a boolean is what lets Run say *which* thing is in the way instead
+ * of "a job is already running".
+ */
+let jobRunning: string | null = null;
+
 /** What a running job says about itself. */
 interface JobStrip {
   say(line: string, detail: string): void;
@@ -3889,6 +3935,10 @@ async function runExport(
     results.setMessage("An export is already running.");
     return;
   }
+  if (jobRunning !== null) {
+    results.setMessage(`${jobRunning} is already running.`);
+    return;
+  }
   const id = `exp-${Date.now().toString(36)}`;
   exportRequest = id;
 
@@ -3907,6 +3957,7 @@ async function runExport(
     if (!dest) return;
     if (dest.existing.length && !(await confirmOverwrite(dest))) return;
 
+    jobRunning = "A schema export";
     strip = jobShow("Exporting schema", () => void api.exportSchemaCancel(id));
     // `strip` is nullable so the `finally` can tell whether one went up at
     // all; the progress callback below needs the non-null one.
@@ -3950,6 +4001,7 @@ async function runExport(
     results.setMessage(String(err));
   } finally {
     exportRequest = null;
+    jobRunning = null;
     if (strip) jobHide();
   }
 }
@@ -4000,6 +4052,288 @@ function showExportReport(outcome: import("./api").DumpOutcome) {
     ...outcome.warnings,
   ];
   results.setMessage(lines.join("\n"));
+}
+
+// ------------------------------------------------- running a folder of scripts
+
+/**
+ * The dialog, the run, and the report.
+ *
+ * The dialog owns the choice; the run reports **outside** it, into the job
+ * strip and then the report band — so the app is usable while a folder of
+ * scripts takes minutes, which is the whole reason it is not a progress bar in
+ * a modal.
+ */
+const sqlFilesDialog = createSqlFilesDialog({
+  dialog: els.sfDialog,
+  connection: els.sfConnection,
+  database: els.sfDatabase,
+  pickSource: els.sfPickSource,
+  source: els.sfSource,
+  recursive: els.sfRecursive,
+  preview: els.sfPreview,
+  summary: els.sfSummary,
+  pickDest: els.sfPickDest,
+  dest: els.sfDest,
+  error: els.sfError,
+  ok: els.sfOk,
+  cancel: els.sfCancel,
+  csv: {
+    delimiter: els.sfDelim,
+    headers: els.sfHeaders,
+    nullAs: els.sfNull,
+    crlf: els.sfCrlf,
+    bom: els.sfBom,
+    guard: els.sfGuard,
+  },
+  context: () => ({
+    connections: conns.all().map((e) => ({
+      id: e.profile.id,
+      name: e.profile.name,
+      databases: e.databases ?? [],
+      canRun: e.capabilities?.scriptFiles ?? false,
+    })),
+    activeConnectionId: conns.active()?.profile.id ?? null,
+    currentDatabase: (id) => conns.get(id)?.currentDatabase ?? null,
+  }),
+  blockedBecause: () => (jobRunning === null ? null : `${jobRunning} is already running.`),
+  start: (plan) => void runSqlFiles(plan),
+});
+
+function openSqlFiles(preselect: { connectionId?: string | null; database?: string | null } = {}) {
+  sqlFilesDialog.open(preselect);
+}
+
+els.btnSqlfiles.onclick = () => openSqlFiles();
+
+async function runSqlFiles(plan: SqlFilesPlan) {
+  if (jobRunning !== null) {
+    results.setMessage(`${jobRunning} is already running.`);
+    return;
+  }
+  // **The confirmation is the last thing between the choice and the work**,
+  // and it names the statements rather than counting them — the same reason
+  // the Flyway confirmation names versions and Stage 22's names files. "9
+  // statements will write" in a folder of forty is not something anybody can
+  // check.
+  if (plan.scan.writes > 0 && !(await confirmWrites(plan))) return;
+
+  // Made up here and handed to both the run and its Stop, so the cancel
+  // reaches *this* run rather than whichever was last.
+  const id = `sfr-${Date.now().toString(36)}`;
+  jobRunning = "A SQL file run";
+  hideJobReport();
+  const strip = jobShow("Running SQL files", () => void api.sqlfilesRunCancel(id));
+
+  try {
+    const outcome = await api.sqlfilesRun(
+      plan.connectionId,
+      id,
+      plan.scan,
+      plan.source,
+      plan.dest,
+      plan.database,
+      plan.csv,
+      (p) => {
+        if (p.type === "planned") {
+          strip.say(
+            `Running ${p.files} file${p.files === 1 ? "" : "s"}`,
+            `${p.statements} statements · ${p.outputs} CSVs`,
+          );
+        } else if (p.type === "file") {
+          strip.say(`Running ${p.done} of ${p.total}`, p.path);
+        } else if (p.type === "statement") {
+          strip.say(`Running ${p.file}`, `statement ${p.index} of ${p.of} · ${p.preview}`);
+        } else if (p.type === "rows") {
+          strip.say(
+            `${p.rows.toLocaleString()} rows`,
+            `${(p.bytes / 1_048_576).toFixed(1)} MB written`,
+          );
+        }
+      },
+    );
+    showJobReport(outcome);
+  } catch (err) {
+    results.setMessage(String(err));
+  } finally {
+    jobRunning = null;
+    jobHide();
+  }
+}
+
+/**
+ * "These statements will write." Named, not counted.
+ *
+ * Built from the same `Scan` the run is given, so this cannot describe work
+ * other than what happens — which is the point of the plan making a round trip
+ * rather than being derived twice.
+ */
+async function confirmWrites(plan: SqlFilesPlan): Promise<boolean> {
+  const writing: string[] = [];
+  for (const f of plan.scan.files) {
+    for (const st of f.statements) {
+      if (st.writes) writing.push(`${f.path}:${st.line}  ${st.preview}`);
+    }
+  }
+  const shown = writing.slice(0, 12);
+  const rest = writing.length - shown.length;
+  const n = writing.length;
+  const answer = await choose(
+    // The **verb** agrees too. "1 statement that write?" was what the first
+    // draft said, and its test caught it.
+    n === 1 ? "Run 1 statement that writes?" : `Run ${n} statements that write?`,
+    [
+      `${plan.source} contains statements that change data or schema:`,
+      "",
+      ...shown,
+      ...(rest > 0 ? [`and ${rest} more`] : []),
+      "",
+      plan.database
+        ? `They will run against ${plan.database}.`
+        : "They will run against whatever database the connection is on.",
+    ].join("\n"),
+    [
+      { value: "cancel", label: "Cancel" },
+      { value: "run", label: "Run", primary: true, danger: true },
+    ],
+  );
+  return answer === "run";
+}
+
+/**
+ * The report, in a band that outlives the tab you were on.
+ *
+ * Not `results.setMessage`, which is how the schema export reports and which
+ * `onActivate` repaints per tab — switch tabs and it is gone. For a batch run
+ * the report *is* the deliverable, so it goes outside the tab system (§3.3).
+ */
+function showJobReport(outcome: import("./api").SqlRunOutcome) {
+  const el = els.jobReport;
+  el.replaceChildren();
+  el.hidden = false;
+
+  const head = elem("div", "job-report-head");
+  const mb = (outcome.bytes / 1_048_576).toFixed(1);
+  const title = elem(
+    "b",
+    "",
+    [
+      `SQL files · ${outcome.files.length} file${outcome.files.length === 1 ? "" : "s"}`,
+      `${outcome.csvs} CSV${outcome.csvs === 1 ? "" : "s"}`,
+      `${outcome.rows.toLocaleString()} row${outcome.rows === 1 ? "" : "s"}`,
+      `${mb} MB`,
+    ].join(" · "),
+  );
+  head.append(title);
+
+  // Why it ended early, if it did — said in the head rather than only buried
+  // in the list, because it is the first thing somebody needs.
+  if (outcome.stoppedAt) {
+    head.append(elem("span", "job-report-stop", `stopped at ${outcome.stoppedAt}`));
+  } else if (outcome.cancelled) {
+    head.append(elem("span", "job-report-stop", "stopped on request"));
+  }
+
+  const where = elem("div", "job-report-where");
+  const path = elem("span", "job-report-path", outcome.dest);
+  path.title = outcome.dest;
+  const copyPath = elem("button", "mini", "Copy path") as HTMLButtonElement;
+  // The folder is the real result and the app cannot open it — no opener
+  // plugin, declined on purpose rather than added for one button (§3.3).
+  wireCopyButton(copyPath, () => outcome.dest);
+  const copyReport = elem("button", "mini", "Copy report") as HTMLButtonElement;
+  wireCopyButton(copyReport, () => reportText(outcome));
+  const hide = elem("button", "mini", "Hide") as HTMLButtonElement;
+  hide.onclick = hideJobReport;
+  where.append(path, copyPath, copyReport, hide);
+
+  const list = elem("div", "job-report-list");
+  for (const f of outcome.files) {
+    const row = elem("div", "job-report-file");
+    row.dataset.path = f.path;
+    row.dataset.status = f.status.type;
+    const mark = elem("span", "job-report-mark");
+    const name = elem("span", "job-report-name", f.path);
+    const note = elem("span", "job-report-note");
+
+    if (f.status.type === "ran") {
+      mark.textContent = "✓";
+      const bits: string[] = [];
+      for (const c of f.csvs) {
+        bits.push(`${c.name} · ${c.rows.toLocaleString()} rows${c.partial ? " (partial)" : ""}`);
+      }
+      if (f.rowsAffected > 0) bits.push(`${f.rowsAffected.toLocaleString()} rows changed`);
+      if (bits.length === 0) {
+        bits.push(`${f.statementsRun} statement${f.statementsRun === 1 ? "" : "s"}`);
+      }
+      note.textContent = bits.join(" · ");
+    } else if (f.status.type === "skipped") {
+      mark.textContent = "⊘";
+      note.textContent = f.status.reason;
+    } else if (f.status.type === "failed") {
+      mark.textContent = "✗";
+      name.textContent = `${f.path}:${f.status.line}`;
+      note.textContent = f.status.message;
+      row.classList.add("failed");
+    } else {
+      // **The row a report by omission leaves out.** Five successes and one
+      // failure, silent about the two files never attempted, misleads.
+      mark.textContent = "–";
+      note.textContent = "not run (stopped)";
+      row.classList.add("not-run");
+    }
+    row.append(mark, name, note);
+    list.append(row);
+  }
+
+  el.append(head, where, list);
+}
+
+/**
+ * Ask before quitting out from under a running job.
+ *
+ * Named rather than counted, like every other confirmation here: "a job is
+ * running" leaves somebody guessing whether it is the thing they started a
+ * minute ago or the thing they forgot about.
+ */
+async function confirmQuitWithJob(): Promise<boolean> {
+  if (jobRunning === null) return true;
+  const pick = await choose(
+    "Still running",
+    `${jobRunning}. Quitting stops it, and whatever it has already written stays on disk.`,
+    [
+      { value: "stay", label: "Keep waiting", primary: true },
+      { value: "quit", label: "Quit anyway", danger: true },
+    ],
+  );
+  return pick === "quit";
+}
+
+function hideJobReport() {
+  els.jobReport.hidden = true;
+  els.jobReport.replaceChildren();
+}
+
+/** The report as text, for Copy. */
+function reportText(outcome: import("./api").SqlRunOutcome): string {
+  const lines = [
+    `${outcome.files.length} files · ${outcome.csvs} CSVs · ${outcome.rows} rows`,
+    outcome.dest,
+    "",
+  ];
+  for (const f of outcome.files) {
+    const what =
+      f.status.type === "ran"
+        ? f.csvs.map((c) => `${c.name} (${c.rows} rows${c.partial ? ", partial" : ""})`).join(", ") ||
+          `${f.statementsRun} statements, ${f.rowsAffected} rows changed`
+        : f.status.type === "skipped"
+          ? `skipped: ${f.status.reason}`
+          : f.status.type === "failed"
+            ? `failed at line ${f.status.line}: ${f.status.message}`
+            : "not run (stopped)";
+    lines.push(`${f.path}  ${what}`);
+  }
+  return lines.join("\n");
 }
 
 function migProgressHide() {

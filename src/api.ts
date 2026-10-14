@@ -881,6 +881,52 @@ export interface SqlFilesScan {
   writes: number;
 }
 
+/** One CSV that was written. */
+export interface CsvWritten {
+  /** Relative to the destination, `/`-separated. */
+  name: string;
+  rows: number;
+  bytes: number;
+  /** Stop was pressed mid-stream, so it holds the rows it had and not the
+   *  rest. Said out loud: a silently truncated CSV is one somebody opens in a
+   *  spreadsheet and believes. */
+  partial: boolean;
+}
+
+export type SqlFileStatus =
+  | { type: "ran" }
+  | { type: "skipped"; reason: string }
+  | { type: "failed"; statement: number; line: number; message: string }
+  /** The run had already stopped before this file was reached. */
+  | { type: "notRun" };
+
+export interface SqlFileReport {
+  path: string;
+  /** Where it actually ran — a `USE` in an earlier file can have moved it. */
+  database: string | null;
+  status: SqlFileStatus;
+  csvs: CsvWritten[];
+  statementsRun: number;
+  rowsAffected: number;
+}
+
+export interface SqlRunOutcome {
+  files: SqlFileReport[];
+  dest: string;
+  csvs: number;
+  rows: number;
+  bytes: number;
+  cancelled: boolean;
+  /** `05-bad.sql:12`, when a statement failed. */
+  stoppedAt: string | null;
+}
+
+export type SqlRunProgress =
+  | { type: "planned"; files: number; statements: number; outputs: number }
+  | { type: "file"; path: string; done: number; total: number }
+  | { type: "statement"; file: string; index: number; of: number; preview: string }
+  | { type: "rows"; rows: number; bytes: number };
+
 /** Where an export will go, and what it would land on top of. */
 export interface ExportDestination {
   /** Carried straight back to `exportSchema`. We never build one. */
@@ -1249,6 +1295,39 @@ export const api = {
    */
   sqlfilesScan: (connectionId: string, dir: string, recursive: boolean) =>
     invoke<SqlFilesScan>("sqlfiles_scan", { connectionId, dir, recursive }),
+
+  /**
+   * Run the plan the dialog showed.
+   *
+   * `scan` goes back exactly as it came: the confirmation named statements out
+   * of it, so the run must be that same plan rather than a second derivation.
+   */
+  sqlfilesRun: (
+    connectionId: string,
+    requestId: string,
+    scan: SqlFilesScan,
+    source: string,
+    dest: string,
+    database: string | null,
+    csv: CsvOptions,
+    onProgress: (p: SqlRunProgress) => void,
+  ) => {
+    const channel = new Channel<SqlRunProgress>();
+    channel.onmessage = onProgress;
+    return invoke<SqlRunOutcome>("sqlfiles_run", {
+      connectionId,
+      requestId,
+      scan,
+      source,
+      dest,
+      database,
+      csv,
+      onProgress: channel,
+    });
+  },
+
+  sqlfilesRunCancel: (requestId: string) =>
+    invoke<void>("sqlfiles_run_cancel", { requestId }),
 
   /** Delimited text for the clipboard. The frontend owns the clipboard call. */
   clipboardText: (result: ResultSet, options: CsvOptions) =>
