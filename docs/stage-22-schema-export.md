@@ -572,6 +572,58 @@ the server's log — `disconnect` itself notes that the `Arc` drop closes the
 sockets either way, and the OS closes them at exit regardless. A hang on quit
 is a much worse bug than a log line.
 
+### 9b.7 The first hands-on run, and what it found — 2026-10-14
+
+Two things, in the first minute. Both are the same shape: a path no automated
+test reached.
+
+**The export dialog showed no tables, in any schema**, with
+
+> error occurred while decoding column "n": mismatched types; Rust type `u64`
+> (as SQL type `BIGINT UNSIGNED`) is not compatible with SQL type `DECIMAL`
+
+`export_tables` selected `COALESCE(TABLE_ROWS, 0) AS n`. **`COALESCE` over a
+`BIGINT UNSIGNED` column yields a `DECIMAL` expression**, so the `u64` decode
+failed on every row of every database. The comment above it said "TABLE_ROWS is
+BIGINT UNSIGNED", which was true of the column and false of the thing being
+decoded — the wrapper changed the type and the comment went on describing what
+was wrapped.
+
+Fixed by selecting the column bare and handling the NULL in Rust, where a NULL
+costs one `unwrap_or(0)` and cannot change anybody's type.
+
+**Why nothing caught it.** The UI suite stubs `invoke`, so the catalogue it
+draws is one the test wrote. The live suite drives `dumprun`, which resolves
+its own names inside the snapshot through a different query — so
+`schema::export_tables`, whose only caller is the dialog, had never once been
+run against MySQL. §9b.5 said the recipe was "the join between two things
+neither of which covers the whole feature"; this was the gap in the middle, and
+it is now closed by a live test of the catalogue itself. It fails with the
+user's exact error when the `COALESCE` goes back.
+
+**`mise run db-up` failed on a fresh container.** Not this stage's code, but it
+is what the hands-on run needs to exist. On first boot the official MySQL image
+runs initialisation against a *temporary* server started `--skip-networking` on
+the unix socket, and the task's readiness check was a socket `mysqladmin ping`
+— which that server answers. Measured on 2026-10-14:
+
+```
+48.2s  temporary server ready   port: 0      <- the socket ping answers here
+49.3s  stopping temporary server
+51.3s  temporary server stopped
+52.1s  real server ready        port: 3306
+```
+
+A 2-second poll landing in that window seeds into a server that shuts down
+mid-script. It worked every time *after* the first, because an initialised
+container has no temporary server — which is exactly why it reached a user
+rather than us.
+
+The check now pings over **TCP**, which the temporary server refuses by
+construction, and it lives in one `db-wait` task rather than pasted into three.
+It also distinguishes "not there" from "not ready yet": waiting 180s for a
+container nobody started is the slowest possible way to say `mise run db-up`.
+
 ## 10. Engines
 
 Gated by a new `Capabilities::schema_export`, not by the engine's name — the

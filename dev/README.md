@@ -13,6 +13,14 @@ app depends on at runtime. No sudo after the one-time `apt install podman`.
 Each `*-up` task starts the container, waits for it to answer, and seeds it, so
 running one twice is harmless.
 
+**`db-wait` is why they wait over TCP.** On a container's *first* boot the
+official MySQL image runs initialisation against a temporary server started
+`--skip-networking` on the unix socket, so a socket ping answers about four
+seconds before the real server exists — and whatever runs next is talking to a
+server that is about to be shut down. That is a failure you only ever see on a
+fresh container, which is the worst kind. Every task that needs MySQL depends
+on `db-wait`; none of them has its own copy of the check.
+
 ## MySQL
 
 Connect from the app with host `127.0.0.1`, port `3306`, user `root`,

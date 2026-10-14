@@ -790,3 +790,50 @@ async fn one_file_per_database_is_written_and_then_found() {
 
     println!("per-database scripts in {}", dir.display());
 }
+
+/// **The dialog's catalogue, against a real server.**
+///
+/// This is the hole the first hands-on run fell into. Everything else here
+/// drives `dumprun`, which resolves its own names inside the snapshot, so
+/// `schema::export_tables` — the query the *dialog* uses, and the only caller
+/// of it — had never once been run against MySQL. It was written as
+/// `COALESCE(TABLE_ROWS, 0)`, which promotes a `BIGINT UNSIGNED` column to a
+/// `DECIMAL` expression, so decoding it as `u64` failed and every database in
+/// the tree came up empty with a type error underneath it.
+///
+/// The UI suite could not have caught it: it stubs `invoke`, so the catalogue
+/// it draws is one the test wrote. Nothing short of a live call proves this.
+#[tokio::test]
+#[ignore = "needs the live fixture"]
+async fn the_catalogue_the_dialog_draws_comes_back_from_a_real_server() {
+    let state = connected().await;
+
+    let tables = db_query_lib::schema::export_tables(&state, C, "export_probe")
+        .await
+        .expect("export_tables must decode what information_schema actually returns");
+    let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"wide"), "{names:?}");
+    assert!(names.contains(&"t"), "{names:?}");
+
+    // The estimate is the point of the second column — it is what the dialog
+    // shows beside each table — so a row count that came back zero for the
+    // million-row table would be a silent lie rather than an error.
+    let wide = tables.iter().find(|(n, _)| n == "wide").unwrap().1;
+    assert!(
+        wide > 500_000,
+        "`wide` holds 1,000,000 rows and the estimate said {wide}"
+    );
+    // And `t` is empty, which must come back as a number rather than a NULL
+    // that panics on the way out.
+    assert_eq!(tables.iter().find(|(n, _)| n == "t").unwrap().1, 0);
+
+    let views = db_query_lib::schema::export_views(&state, C, "export_probe")
+        .await
+        .unwrap();
+    assert_eq!(views, ["v1", "v2", "v3"]);
+    // Views are not tables. The two queries differ by one `TABLE_TYPE`, which
+    // is exactly the kind of thing that is right in one of them only.
+    for v in &views {
+        assert!(!names.contains(&v.as_str()), "{v} came back as a table too");
+    }
+}

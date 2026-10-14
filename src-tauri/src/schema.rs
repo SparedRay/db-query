@@ -1159,8 +1159,21 @@ pub async fn export_tables(
 ) -> Result<Vec<(String, i64)>, String> {
     let server = server(state, connection_id).await?;
     let mut meta = server.mysql_meta().await?;
+    // **`TABLE_ROWS` is selected bare, and the NULL is handled here.**
+    //
+    // It was `COALESCE(TABLE_ROWS, 0)`, which looks harmless and is not:
+    // wrapping a `BIGINT UNSIGNED` in `COALESCE` makes the *expression*
+    // `DECIMAL`, so decoding it as `u64` fails outright — "Rust type `u64` (as
+    // SQL type `BIGINT UNSIGNED`) is not compatible with SQL type `DECIMAL`",
+    // which took out the whole export dialog on the first real run. The
+    // column's own type is the one to decode; a NULL is cheaper to express in
+    // Rust than a type change is to notice in SQL.
+    //
+    // NULL is a real answer here, not a missing one: `TABLE_ROWS` is an
+    // estimate the engine may not have, so it is shown as 0 rather than
+    // guessed at.
     let rows = sqlx::query(
-        "SELECT TABLE_NAME, COALESCE(TABLE_ROWS, 0) AS n FROM information_schema.TABLES \
+        "SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
     )
     .bind(db)
@@ -1171,9 +1184,11 @@ pub async fn export_tables(
         .map(|r| {
             Ok((
                 r.try_get("TABLE_NAME").map_err(|e| friendly(&e))?,
-                // TABLE_ROWS is BIGINT UNSIGNED; i64 is plenty for a count and
-                // is what the frontend can hold without losing precision.
-                r.try_get::<u64, _>("n").map_err(|e| friendly(&e))? as i64,
+                // i64 is plenty for a count and is what the frontend can hold
+                // without losing precision.
+                r.try_get::<Option<u64>, _>("TABLE_ROWS")
+                    .map_err(|e| friendly(&e))?
+                    .unwrap_or(0) as i64,
             ))
         })
         .collect()
