@@ -1038,3 +1038,10 @@ label with nothing after it.
 changed behaviours were falsified before being believed: the headings, the
 button's presence, its emphasis, the two dialogs, the environment shortcut and
 the folder line each failed when the code behind them was reverted.
+
+## 17. Confirmed in use — 2026-10-14
+
+List, read, apply and repair have been used in earnest since, and work. The
+F-checklist's hands-on pass was asking for exactly this and is answered by it;
+Stage 17 §F says the same for the project-level commands, and drops the second
+live suite that was carried as an open item there.

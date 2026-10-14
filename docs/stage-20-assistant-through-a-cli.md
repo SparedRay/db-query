@@ -507,6 +507,10 @@ first token at 3.8s, so it covers 1.4s that would otherwise be an empty bubble.
 - [ ] A long-lived process per chat (§9.3) — now known to be possible for both,
       since Copilot's ACP mode is real and answers a handshake
 
+*All three answered since, and the list is left as it was written: Integrations
+and the five states in §11, the fake CLI retired as the wrong idea in §11.2,
+the kept session in §13.*
+
 ## 11. Phase 1, the UI — built 2026-10-01
 
 Settings → Assistant → **Integrations**: one row per CLI, off by default, each
@@ -557,6 +561,8 @@ not the provider list, because the list was only redrawn on the disable path.
 ### 11.4 Left for Phase 3
 
 - [ ] A long-lived process per chat (§9.3), now known to be possible for both
+
+*Measured in §12 and built in §13.*
 
 ## 12. Phase 3 measured first — 2026-10-01
 
