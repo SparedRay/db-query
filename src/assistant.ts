@@ -14,6 +14,7 @@
 // *around* the SQL — which is usually the part that explains a join — instead of
 // throwing it away to get at a structured field.
 
+import { wireCopyButton } from "./clipboard";
 import {
   api,
   type AssistantConfig,
@@ -64,16 +65,6 @@ export interface AssistantDeps {
    * history like anything typed by hand. `main.ts` owns which tab that is.
    */
   run: (sql: string) => void;
-  /**
-   * Put it on the clipboard, for somewhere that is not this app.
-   *
-   * Returns a promise so the **outcome** can be shown. `clipboard.ts` exists
-   * because a Copy that quietly does nothing is this project's worst-ever bug
-   * class — `navigator.clipboard` needs a secure context and a gesture, and
-   * WebKitGTK is the weakest of the three platforms at it. So this rejects,
-   * and the button says so.
-   */
-  copy: (sql: string) => Promise<unknown>;
   /** Whether a statement could be run at all: no connection, no Run. */
   canRun: () => boolean;
   /** Remember that the assistant proposed this, so history can say so. */
@@ -292,43 +283,21 @@ export function createAssistant(deps: AssistantDeps) {
   }
 
   /**
-   * Copy, and say what happened — on the button, which is the one place that
-   * cannot be mistaken for something else.
+   * Copy, reporting on the button itself — the one surface here that cannot
+   * be mistaken for something else. Not the result note, which belongs to a
+   * result set and would paint over rows somebody is reading, and not the
+   * chat's own note, which carries the statement about what is sent.
    *
-   * Not reported through the result note like the grid's Copy: that note
-   * belongs to a result set, and overwriting it from the chat would throw away
-   * the rows somebody is reading. Not reported through the chat's own note
-   * either, which carries the statement about what is sent to the model.
-   *
-   * No `remember`: nothing has been proposed *to this app*, so recording it in
-   * history would be a record of an intention rather than of a statement.
+   * No `remember`: nothing has been proposed *to this app*, so recording it
+   * in history would be a record of an intention rather than of a statement.
+   * Hence not built with `action`.
    */
   function copyButton(sql: string): HTMLButtonElement {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "mini";
     b.textContent = "Copy";
-    let revert: number | null = null;
-    b.onclick = () => {
-      if (revert !== null) window.clearTimeout(revert);
-      void deps
-        .copy(sql)
-        .then(() => {
-          b.textContent = "Copied";
-          b.title = "";
-        })
-        .catch((err: unknown) => {
-          b.textContent = "Copy failed";
-          // The whole reason `copyText` throws rather than returning false.
-          b.title = String(err);
-        })
-        .finally(() => {
-          revert = window.setTimeout(() => {
-            b.textContent = "Copy";
-            revert = null;
-          }, 2000);
-        });
-    };
+    wireCopyButton(b, () => sql);
     return b;
   }
 
