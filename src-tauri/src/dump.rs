@@ -244,17 +244,34 @@ pub fn order_events(events: &[EventRef]) -> Vec<EventRef> {
 
 // ------------------------------------------------------------ the sections
 
-/// `USE` and, optionally, the `CREATE DATABASE` before it.
+/// The `CREATE DATABASE` and `USE` for one database — or neither.
+///
+/// **`USE` goes with `CREATE DATABASE`, not on its own.** A trigger body names
+/// its tables unqualified, so the session has to be *in* a database before one
+/// is created — but "a database" is not the same as "the one it came from".
+///
+/// A script that always said `USE \`export_probe\`` could only ever be loaded
+/// back into `export_probe`: restoring a copy under another name would
+/// silently write into the original, which is how a restore becomes an
+/// overwrite. Found by the round-trip test loading into an empty database and
+/// finding it still empty.
+///
+/// So the two travel together, which is also what `mysqldump` does: with
+/// `--databases` it writes both, and without it writes neither and the person
+/// loading picks the target with `mysql <db> < dump.sql`. The triggers are
+/// fine either way, because that choice *is* the current database.
 pub fn database_section(db: &str, create: bool) -> Result<String, String> {
     let quoted = crate::sqlgen::quote_ident(db)?;
     let mut out = format!("\n--\n-- Database: {db}\n--\n");
     if create {
         out.push_str(&format!("CREATE DATABASE IF NOT EXISTS {quoted};\n"));
+        out.push_str(&format!("USE {quoted};\n"));
+    } else {
+        out.push_str(
+            "-- No CREATE DATABASE or USE: this script loads into whichever database\n\
+             -- the client is already in, e.g. `mysql my_copy < this.sql`.\n",
+        );
     }
-    // Always, whether or not the database is created here. A trigger body
-    // names its tables unqualified, so the script has to be *in* the database
-    // before one is created — measured, §9.2.
-    out.push_str(&format!("USE {quoted};\n"));
     Ok(out)
 }
 
@@ -451,17 +468,41 @@ mod tests {
 
     // ----------------------------------------------------------- sections
 
-    /// `USE` is emitted whether or not the database is created, because a
-    /// trigger body names its tables unqualified — §9.2.
+    /// **`USE` travels with `CREATE DATABASE`, and without it there is
+    /// neither.** A script that always said `USE \`poc\`` could only be
+    /// loaded back into `poc`, so restoring a copy under another name would
+    /// write into the original instead — a restore that is an overwrite.
+    ///
+    /// The round-trip test found this by loading into an empty database and
+    /// finding it still empty.
     #[test]
-    fn the_database_section_always_switches_into_it() {
+    fn use_travels_with_create_database_so_a_copy_can_be_restored_elsewhere() {
         let with = database_section("poc", true).unwrap();
         assert!(with.contains("CREATE DATABASE IF NOT EXISTS `poc`;"));
         assert!(with.contains("USE `poc`;"));
 
         let without = database_section("poc", false).unwrap();
-        assert!(!without.contains("CREATE DATABASE"));
-        assert!(without.contains("USE `poc`;"), "{without}");
+        // Statements, not substrings: the explanatory comment in that branch
+        // says the words "CREATE DATABASE" itself, and a test that cannot tell
+        // a comment from a statement would have to be written around.
+        let statements: Vec<&str> = without
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect();
+        assert!(
+            !statements.iter().any(|l| l.contains("CREATE DATABASE")),
+            "{statements:?}"
+        );
+        assert!(
+            !statements.iter().any(|l| l.contains("USE ")),
+            "a portable script must not name the database it came from: {statements:?}"
+        );
+        // And it says what it expects instead, rather than leaving somebody to
+        // work out why nothing was created.
+        assert!(
+            without.contains("loads into whichever database"),
+            "{without}"
+        );
     }
 
     /// The name goes into the statement as an identifier, so it is quoted by

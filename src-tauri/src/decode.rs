@@ -350,6 +350,21 @@ fn raw_bytes(row: &MySqlRow, idx: usize) -> Option<Vec<u8>> {
     row.try_get_unchecked::<Vec<u8>, _>(idx).ok()
 }
 
+/// The bytes of a cell, for a caller that has to **write** the value rather
+/// than show it.
+///
+/// [`CellValue::Binary`] carries only a length, on purpose: it exists to be
+/// rendered in a grid, and holding every BLOB of a result set in memory to
+/// show "<binary, 12 bytes>" would be absurd. That makes it useless to an
+/// exporter, which needs the bytes themselves — so the schema export reads
+/// them straight off the row it is already holding.
+///
+/// `None` means the column could not be read as bytes at all, which is not the
+/// same as an empty value.
+pub fn cell_bytes(row: &MySqlRow, idx: usize) -> Option<Vec<u8>> {
+    raw_bytes(row, idx)
+}
+
 /// Are these bytes really text, or really binary?
 ///
 /// The type name cannot answer it. MySQL reports a string column with a

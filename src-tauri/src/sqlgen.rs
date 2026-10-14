@@ -86,6 +86,27 @@ pub fn routine_script(
 }
 
 #[cfg(test)]
+mod binary_literal_tests {
+    use super::binary_literal;
+
+    #[test]
+    fn bytes_become_hex_mysql_reads_back_as_the_same_bytes() {
+        assert_eq!(binary_literal(&[0x41, 0x42, 0x43]), "0x414243");
+        // The bytes that make a quoted string dangerous, and the high ones
+        // that a one-digit format would silently shorten.
+        assert_eq!(binary_literal(&[0x00, 0x27, 0x5C, 0x0A]), "0x00275C0A");
+        assert_eq!(binary_literal(&[0x0F, 0xF0, 0xFF]), "0x0FF0FF");
+    }
+
+    /// `0x` alone is a syntax error — the sort of thing that surfaces on the
+    /// one row in a million with an empty BLOB.
+    #[test]
+    fn empty_is_an_empty_string_not_an_empty_hex_literal() {
+        assert_eq!(binary_literal(&[]), "''");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -786,6 +807,28 @@ fn cell_text(v: &CellValue) -> String {
 // ------------------------------------------------------------- statements
 
 /// `SELECT * FROM `db`.`table` LIMIT n` — the double-click action.
+/// Bytes, as a literal MySQL will read back as the same bytes.
+///
+/// Hex rather than a quoted string, which is what `mysqldump --hex-blob` does
+/// and for the same reason: a quoted BLOB has to escape NUL, backslash and
+/// both quote characters, and any client or editor that touches the file in
+/// between can change what those mean. Hex has one meaning everywhere.
+///
+/// **Empty is `''`, not `0x`.** `0x` on its own is a syntax error, which is
+/// the sort of thing that only shows up on the one row in a million that has
+/// an empty BLOB in it.
+pub fn binary_literal(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "''".to_string();
+    }
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("0x");
+    for b in bytes {
+        out.push_str(&format!("{b:02X}"));
+    }
+    out
+}
+
 pub fn generate_select(db: &str, table: &str, limit: u32) -> Result<String, String> {
     if limit == 0 {
         return Err("A browse limit of 0 would return nothing.".into());

@@ -637,18 +637,25 @@ pub(crate) async fn mysql_table_ddl(
     db: &str,
     table: &str,
 ) -> Result<String, String> {
-    let qualified = crate::sqlgen::qualify(db, table)?;
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    table_ddl_on(&mut meta, db, table).await
+}
 
-    let row = {
-        let mut meta = server.mysql_meta().await?;
-        server.introspection_count.fetch_add(1, Ordering::SeqCst);
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SHOW CREATE TABLE {qualified}"
-        )))
-        .fetch_one(&mut *meta)
-        .await
-        .map_err(|e| friendly(&e))?
-    };
+/// The same, on whichever connection the caller holds — the export reads its
+/// DDL inside its own snapshot. See [`triggers_on`].
+pub(crate) async fn table_ddl_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+    table: &str,
+) -> Result<String, String> {
+    let qualified = crate::sqlgen::qualify(db, table)?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SHOW CREATE TABLE {qualified}"
+    )))
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| friendly(&e))?;
 
     // A view answers `SHOW CREATE TABLE` with a "Create View" column instead.
     let ddl: Option<String> = row
@@ -679,18 +686,25 @@ pub(crate) async fn mysql_routine_ddl(
     name: &str,
     kind: RoutineKind,
 ) -> Result<String, String> {
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    routine_ddl_on(&mut meta, db, name, kind).await
+}
+
+/// The same, on the caller's connection. See [`triggers_on`].
+pub(crate) async fn routine_ddl_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+    name: &str,
+    kind: RoutineKind,
+) -> Result<String, String> {
     let kw = kind.keyword();
     let qualified = crate::sqlgen::qualify(db, name)?;
     let sql = format!("SHOW CREATE {kw} {qualified}");
-
-    let row = {
-        let mut meta = server.mysql_meta().await?;
-        server.introspection_count.fetch_add(1, Ordering::SeqCst);
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_one(&mut *meta)
-            .await
-            .map_err(|e| friendly(&e))?
-    };
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| friendly(&e))?;
 
     // The body column is named after the routine kind: "Create Procedure" or
     // "Create Function".
@@ -760,13 +774,26 @@ pub(crate) async fn mysql_triggers(
 ) -> Result<Vec<TriggerRef>, String> {
     let mut meta = server.mysql_meta().await?;
     server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    triggers_on(&mut meta, db).await
+}
+
+/// The same query, against whichever connection the caller holds.
+///
+/// Split out because the export runs every one of these **inside its own
+/// transaction** on its own connection — asking the shared meta connection
+/// would read outside the snapshot, which is the one thing the snapshot is
+/// for.
+pub(crate) async fn triggers_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+) -> Result<Vec<TriggerRef>, String> {
     // Bound, not interpolated: this one takes a value rather than an
     // identifier, unlike the `SHOW CREATE …` family above.
     let rows = sqlx::query(
         "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION,                 ACTION_ORDER          FROM information_schema.TRIGGERS          WHERE TRIGGER_SCHEMA = ?          ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER",
     )
     .bind(db)
-    .fetch_all(&mut *meta)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|e| friendly(&e))?;
 
@@ -783,15 +810,61 @@ pub(crate) async fn mysql_triggers(
         .collect()
 }
 
+/// Routine **names and kinds** in a database, for the export.
+///
+/// Deliberately not [`mysql_list_routines`], which exists to describe routines
+/// for the tree: that one joins the parameter table so a generated `CALL` can
+/// name its arguments, and caches the result against the connection. The
+/// export wants neither — it needs enough to ask `SHOW CREATE`, and it must
+/// read inside its own snapshot rather than from a cache filled before it
+/// started. Two queries for two questions, not one query asked badly.
+pub(crate) async fn routine_names_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+) -> Result<Vec<RoutineRef>, String> {
+    let rows = sqlx::query(
+        "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES \
+         WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME",
+    )
+    .bind(db)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| friendly(&e))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let name: String = r.try_get("ROUTINE_NAME").map_err(|e| friendly(&e))?;
+        let kind: String = r.try_get("ROUTINE_TYPE").map_err(|e| friendly(&e))?;
+        // Anything that is neither is not something we can write a CREATE for,
+        // so it is left out rather than guessed at.
+        if let Some(kind) = RoutineKind::parse(&kind) {
+            out.push(RoutineRef {
+                name,
+                kind,
+                returns: None,
+                params: Vec::new(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Every event in a database.
 pub(crate) async fn mysql_events(server: &ServerConn, db: &str) -> Result<Vec<EventRef>, String> {
     let mut meta = server.mysql_meta().await?;
     server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    events_on(&mut meta, db).await
+}
+
+pub(crate) async fn events_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+) -> Result<Vec<EventRef>, String> {
     let rows = sqlx::query(
-        "SELECT EVENT_NAME FROM information_schema.EVENTS          WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME",
+        "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME",
     )
     .bind(db)
-    .fetch_all(&mut *meta)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|e| friendly(&e))?;
 
@@ -817,17 +890,23 @@ pub(crate) async fn mysql_object_ddl(
     name: &str,
     kind: ObjectDdl,
 ) -> Result<ObjectDefinition, String> {
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    object_ddl_on(&mut meta, db, name, kind).await
+}
+
+pub(crate) async fn object_ddl_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+    name: &str,
+    kind: ObjectDdl,
+) -> Result<ObjectDefinition, String> {
     let qualified = crate::sqlgen::qualify(db, name)?;
     let sql = format!("SHOW CREATE {} {qualified}", kind.keyword());
-
-    let row = {
-        let mut meta = server.mysql_meta().await?;
-        server.introspection_count.fetch_add(1, Ordering::SeqCst);
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_one(&mut *meta)
-            .await
-            .map_err(|e| friendly(&e))?
-    };
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| friendly(&e))?;
 
     let body: Option<String> = row.try_get(kind.column()).map_err(|e| friendly(&e))?;
     let body = body.filter(|b| !b.trim().is_empty()).ok_or_else(|| {
@@ -907,6 +986,13 @@ pub(crate) async fn mysql_view_dependencies(
 ) -> Result<Vec<(String, String)>, String> {
     let mut meta = server.mysql_meta().await?;
     server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    view_dependencies_on(&mut meta, db).await
+}
+
+pub(crate) async fn view_dependencies_on(
+    conn: &mut sqlx::MySqlConnection,
+    db: &str,
+) -> Result<Vec<(String, String)>, String> {
     let rows = sqlx::query(
         "SELECT u.VIEW_NAME AS viewer, u.TABLE_NAME AS viewed \
          FROM information_schema.VIEW_TABLE_USAGE u \
@@ -916,7 +1002,7 @@ pub(crate) async fn mysql_view_dependencies(
     )
     .bind(db)
     .bind(db)
-    .fetch_all(&mut *meta)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|e| friendly(&e))?;
 

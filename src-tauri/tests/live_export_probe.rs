@@ -425,3 +425,263 @@ async fn views_sort_into_an_order_that_can_be_created() {
         db_query_lib::dump::order_views(&["v3".into(), "v2".into(), "v1".into()], &edges).unwrap();
     assert_eq!(order, ["v1", "v2", "v3"]);
 }
+
+// ----------------------------------------------- the round trip, end to end
+
+/// Load a script into a database, through the client, and say what failed.
+fn load(script: &std::path::Path, into: &str) -> Result<(), String> {
+    let out = std::process::Command::new("podman")
+        .args([
+            "exec",
+            "-i",
+            "db-query-mysql",
+            "mysql",
+            "-uroot",
+            "-pdevpassword",
+            into,
+        ])
+        .stdin(std::fs::File::open(script).map_err(|e| e.to_string())?)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).to_string())
+}
+
+async fn scratch(name: &str) -> MySqlConnection {
+    let mut root = MySqlConnection::connect("mysql://root:devpassword@127.0.0.1:3306")
+        .await
+        .unwrap();
+    root.execute(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS `{name}`"
+    ))))
+    .await
+    .unwrap();
+    root.execute(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE `{name}`"
+    ))))
+    .await
+    .unwrap();
+    root
+}
+
+/// **The claim the whole feature serves: the script re-runs.**
+///
+/// Everything else here — the ordering, the header, the DEFINER stripping — is
+/// in service of this, and nothing short of loading the file proves it. So:
+/// dump `export_probe` into a file, load that file into an empty database, and
+/// compare what arrives against what was there.
+///
+/// Deliberately the probe database rather than `poc`: it is the one with a
+/// view on a view, two triggers whose order is recorded nowhere but
+/// `ACTION_ORDER`, and an event.
+#[tokio::test]
+#[ignore = "needs the live fixture; writes a file and loads it"]
+async fn a_dumped_schema_loads_into_an_empty_database() {
+    use db_query_lib::dump::{Contents, DumpOptions};
+    use db_query_lib::dumprun::{DbPick, Job, Layout};
+
+    const TARGET: &str = "export_roundtrip";
+    let mut root = scratch(TARGET).await;
+
+    let dir = std::env::temp_dir().join("db-query-roundtrip");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("probe.sql");
+
+    let mut conn = connect().await;
+    let picks = [DbPick {
+        db: "export_probe".into(),
+        // Everything, resolved as it runs — which is what ticking the
+        // database in the tree means.
+        tables: Some(vec!["t".into(), "audit".into()]),
+        views: None,
+        routines: None,
+        triggers: None,
+        events: None,
+    }];
+    let job = Job {
+        picks: &picks,
+        options: DumpOptions {
+            contents: Contents::SchemaAndData,
+            // The script names no database and is loaded into one chosen on
+            // the command line, which is also how somebody restores into a
+            // differently-named database.
+            create_database: false,
+            ..DumpOptions::default()
+        },
+        layout: Layout::SingleFile,
+        target: out.clone(),
+    };
+
+    let outcome = db_query_lib::dumprun::run(&mut conn, &job, |_| {}, || false)
+        .await
+        .expect("the dump should run");
+    println!(
+        "wrote {} bytes, {} tables, {} rows",
+        outcome.bytes_written, outcome.tables, outcome.rows
+    );
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    assert!(!outcome.cancelled);
+
+    // The part file is gone and the real one is there.
+    assert!(out.exists(), "the script was not renamed into place");
+    assert!(
+        !dir.join("probe.sql.part").exists(),
+        "a part file was left behind"
+    );
+
+    load(&out, TARGET).unwrap_or_else(|e| {
+        panic!(
+            "the script did not load:\n{e}\n--- script ---\n{}",
+            std::fs::read_to_string(&out).unwrap()
+        )
+    });
+
+    // --- and now: is what arrived the same thing?
+
+    let names = |rows: Vec<sqlx::mysql::MySqlRow>| -> Vec<String> {
+        rows.into_iter().map(|r| r.try_get(0).unwrap()).collect()
+    };
+
+    let tables = names(
+        sqlx::query(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+        )
+        .bind(TARGET)
+        .fetch_all(&mut root)
+        .await
+        .unwrap(),
+    );
+    assert_eq!(tables, ["audit", "t"]);
+
+    // **The view chain.** v2 reads v1 and v3 reads v2, so if they were written
+    // in the order the server lists them the load above would already have
+    // failed — this says they all arrived.
+    let views = names(
+        sqlx::query(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'VIEW' ORDER BY TABLE_NAME",
+        )
+        .bind(TARGET)
+        .fetch_all(&mut root)
+        .await
+        .unwrap(),
+    );
+    assert_eq!(views, ["v1", "v2", "v3"]);
+
+    // **The triggers, in the order only ACTION_ORDER records.**
+    let triggers: Vec<(String, u32)> = sqlx::query(
+        "SELECT TRIGGER_NAME, ACTION_ORDER FROM information_schema.TRIGGERS \
+         WHERE TRIGGER_SCHEMA = ? AND ACTION_TIMING = 'BEFORE' \
+         ORDER BY ACTION_ORDER",
+    )
+    .bind(TARGET)
+    .fetch_all(&mut root)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.try_get(0).unwrap(), r.try_get(1).unwrap()))
+    .collect();
+    assert_eq!(
+        triggers,
+        [
+            ("t_before_ins".to_string(), 1),
+            ("t_before_ins2".to_string(), 2)
+        ],
+        "the two BEFORE INSERT triggers came back in the wrong order"
+    );
+
+    let events = names(
+        sqlx::query("SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?")
+            .bind(TARGET)
+            .fetch_all(&mut root)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(events, ["e_daily"]);
+
+    // And the rows. `t` is empty in the fixture, so this is mostly about the
+    // data path running at all; `measure_insert_batch_sizes` covers volume.
+    let rows: i64 = count(&mut root, &format!("SELECT COUNT(*) FROM `{TARGET}`.t")).await;
+    let source_rows = count(&mut conn, "SELECT COUNT(*) FROM export_probe.t").await;
+    assert_eq!(rows, source_rows);
+}
+
+/// **Data, at a volume where the batching matters.**
+///
+/// A thousand rows is more than one batch at the default, so this also proves
+/// a statement is closed and a new one opened in the middle of a table.
+#[tokio::test]
+#[ignore = "needs the live fixture; writes a file and loads it"]
+async fn dumped_rows_arrive_in_the_same_number_and_shape() {
+    use db_query_lib::dump::DumpOptions;
+    use db_query_lib::dumprun::{DbPick, Job, Layout};
+
+    const TARGET: &str = "export_roundtrip_rows";
+    let mut root = scratch(TARGET).await;
+
+    // A slice of `wide`, which has a DECIMAL, a TEXT, a DATETIME and a binary
+    // column — the four that a careless literal gets wrong.
+    let mut conn = connect().await;
+    conn.execute("DROP TABLE IF EXISTS export_probe.slice")
+        .await
+        .unwrap();
+    conn.execute("CREATE TABLE export_probe.slice AS SELECT * FROM export_probe.wide LIMIT 2500")
+        .await
+        .unwrap();
+
+    let dir = std::env::temp_dir().join("db-query-roundtrip");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("rows.sql");
+
+    let picks = [DbPick {
+        db: "export_probe".into(),
+        tables: Some(vec!["slice".into()]),
+        views: Some(vec![]),
+        routines: Some(vec![]),
+        triggers: Some(vec![]),
+        events: Some(vec![]),
+    }];
+    let job = Job {
+        picks: &picks,
+        options: DumpOptions {
+            create_database: false,
+            ..DumpOptions::default()
+        },
+        layout: Layout::SingleFile,
+        target: out.clone(),
+    };
+
+    let outcome = db_query_lib::dumprun::run(&mut conn, &job, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!(outcome.rows, 2500);
+
+    load(&out, TARGET).unwrap_or_else(|e| panic!("did not load: {e}"));
+
+    assert_eq!(
+        count(&mut root, &format!("SELECT COUNT(*) FROM `{TARGET}`.slice")).await,
+        2500
+    );
+    // Not just the count: a checksum over every column, so a mangled DECIMAL
+    // or a dropped binary byte fails here rather than passing as "2500 rows".
+    let source: Vec<String> = sqlx::query("CHECKSUM TABLE export_probe.slice")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.try_get::<i64, _>(1).unwrap().to_string())
+        .collect();
+    let loaded: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CHECKSUM TABLE `{TARGET}`.slice"
+    )))
+    .fetch_all(&mut root)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| r.try_get::<i64, _>(1).unwrap().to_string())
+    .collect();
+    assert_eq!(source, loaded, "the rows are not byte-for-byte the same");
+}
