@@ -28,6 +28,7 @@ decisions that were corrected along the way.
 | 19 | [A result knows which statement made it](stage-19-result-sets.md) | ✅ **Built** — numbered result tabs; double-click selects the SQL that produced one |
 | 20 | [The assistant through a CLI](stage-20-assistant-through-a-cli.md) | ✅ **Built** — answers from a CLI the person is already signed into (Claude Code, Copilot CLI) instead of an API key; tools stripped, nothing executed; a kept ACP session |
 | 21 | [The assistant docked](stage-21-the-assistant-docked.md) | ✅ **Built** — the chat is a panel rather than a modal, so nothing behind it is inert; one-click Run into a buffer; the window reopens where it was left; every Copy says what happened |
+| 22 | [Export a schema](stage-22-schema-export.md) | 📋 **Planned** — a re-runnable script for selected databases, tables, views, routines, triggers and events, with or without data; one file or one per database; six facts to measure first |
 
 ## Rules
 
