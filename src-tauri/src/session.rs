@@ -314,6 +314,20 @@ impl ServerConn {
         self.checked(self.meta.as_ref()).await
     }
 
+    /// A connection of this server's own, outside the two shared ones.
+    ///
+    /// For work that must hold a connection for minutes: the schema export
+    /// opens one transaction and keeps it for the whole dump, so that a file
+    /// written over several minutes is one consistent picture rather than a
+    /// series of snapshots taken as other tabs commit (Stage 22 §4.5).
+    ///
+    /// It cannot be `meta`, which the schema tree shares and would be blocked
+    /// on, and it cannot be a tab's, which would freeze somebody's editor for
+    /// the length of the dump. The caller owns it and drops it when done.
+    pub async fn open_private(&self) -> Result<MySqlConnection, String> {
+        open(&self.profile, &self.password).await
+    }
+
     /// The connection `KILL` is issued on.
     ///
     /// Reconnecting is still correct when this one has died: `KILL` needs *a*

@@ -381,11 +381,61 @@ a real decode.
 That is the whole argument for the live half, and it earned its place on the
 first run.
 
-### 9b.2 Still to build
+### 9b.2 The runner, and what the round trip found — 2026-10-14
 
-The runner and its connection (§6.1), the appending writer (§6.2), the job
-strip (§6.3), the commands, and the dialog. Then the round-trip test in §8,
-which is the one that proves the claim the rest only serves.
+`dumprun.rs`: its own connection (`ServerConn::open_private`), the snapshot,
+the resolved plan, the sink, and batched streaming. Then §8's round-trip test
+— dump the probe database, load the file into an empty one, compare what
+arrives — which failed three times, each for a different real reason.
+
+**1. `USE` must travel with `CREATE DATABASE`, not be emitted always.**
+
+§4.1 said to emit `USE` unconditionally, because a trigger body names its
+tables unqualified. That is true and it is not the whole rule: a script that
+always says `USE \`export_probe\`` can only ever be loaded back into
+`export_probe`. The test loaded it into an empty database and found the
+database still empty — everything had gone home to the original. A restore
+that is silently an overwrite.
+
+The two now travel together, which is what `mysqldump` does: with
+`--databases` it writes both, without it writes neither and the person loading
+picks the target. Triggers are fine either way, because that choice *is* the
+current database.
+
+**2. Binary columns cannot go through `CellValue`.**
+
+`CellValue::Binary` carries a length and no bytes — it exists to be rendered
+in a grid, and holding every BLOB of a result set to show `<binary, 12 bytes>`
+would be absurd. So `sqlgen::literal` refuses one outright rather than write a
+placeholder into a script, which is **right**, and is why the result-set
+export cannot write binary at all.
+
+The dump has the row in hand, so it can do better and must: bytes read
+straight off the row and written as hex, which is `mysqldump --hex-blob` and
+for the same reason — a quoted BLOB has to escape NUL, backslash and both
+quotes, and anything that touches the file in between can change what those
+mean. Empty is `''`, because `0x` alone is a syntax error that would surface
+on the one row in a million with an empty BLOB.
+
+**3. A part file never outlives the export.** Every failure leaves through
+`?`, and there are a dozen of them. A tidy-up written at each is one that will
+be missed at the thirteenth, so it lives in `Drop`: the only way to keep the
+file is to have renamed it.
+
+The round trip compares with `CHECKSUM TABLE`, not a row count. Falsified by
+dropping the high nibble of every byte — same length, same count, loads
+without complaint, and the test fails.
+
+> **Found on the way past:** `export::insert_row` writes **one `INSERT` per
+> row**, deliberately — "batching needs rows held back, and the entire point
+> of this path is that nothing is held". On §9.5's numbers that is ~200×
+> slower to load. Holding a thousand rows is a few hundred kilobytes, not a
+> table, so the reasoning is too absolute. Not changed here; the export does
+> batch while streaming.
+
+### 9b.3 Still to build
+
+The job strip (§6.3), the Tauri commands, and the dialog.
 
 ## 10. Engines
 
