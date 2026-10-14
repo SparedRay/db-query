@@ -464,10 +464,59 @@ falsified:
   never touched vanish silently. That one took 30s to fail, which is what a
   silently-empty selection looks like.
 
-### 9b.4 Still to build
+### 9b.4 The overwrite confirmation, and the destination split — 2026-10-14
 
-The confirmation before overwriting files in the per-database layout (§5), and
-`dev/README.md`'s recipe for driving it by hand.
+§5 promised that existing files are counted and confirmed before anything is
+written. The save dialog does that itself for a single file; a folder picker
+cannot, because it does not know what we are about to put in the folder.
+
+The way to ask is **ours** — `choose()`, like every other question in the app —
+so the question had to reach the frontend, and the destination was being chosen
+inside `export_schema`. So it split: `export_destination` asks where, reports
+which of the files it would write are already there, and hands the path back;
+`export_schema` takes that path and writes.
+
+The split paid twice. The job strip used to go up *before* `export_schema`,
+which meant it sat over an unanswered file dialog saying "Exporting schema",
+with a **Stop** that stopped nothing. Now nothing claims to be happening until
+something is, and a UI test pins that by holding `export_destination` open and
+asserting the strip is down.
+
+**One definition of the file name.** `dumprun::file_for` is the only place that
+turns a database name into a path, and both `run` and `existing` go through it —
+because a confirmation that lists `a.sql` before a run that writes `A.sql` is
+worse than no confirmation at all. A database called `with space` becomes
+`with_space.sql`, and the falsification (having `existing` use the raw name) is
+exactly that mismatch.
+
+The confirmation **names** the files, up to twelve, rather than counting them —
+the same reason the Flyway one names versions. "3 files will be overwritten" in
+a folder of forty is not something anybody can check.
+
+Four more UI tests, two falsified: ignoring the answer and exporting anyway,
+and raising the strip before the destination is settled. Three `dumprun` unit
+tests, one falsified. And one live test — the per-database layout had none, so
+nothing had exercised the branch that opens a sink per database, nor `existing`
+against names a real filesystem produced.
+
+### 9b.5 Driving it by hand — 2026-10-14
+
+`dev/README.md` now has the recipe, which is the join between two things
+neither of which covers the whole feature: the Playwright tests stub `invoke`,
+so the dialog has never spoken to a real server, and `live_export_probe.rs`
+proves the script without the dialog.
+
+Its round-trip check was run on 2026-10-14 against a
+`mysqldump --databases export_probe` as a control — same five tables, same five
+checksums — and then against a script this exporter wrote, which loaded cleanly
+into a differently-named database with only its two header comments still
+mentioning `export_probe`.
+
+One trap found while verifying it, and recorded there: `grep` says **nothing**
+about mysqldump's output for this fixture, because mysqldump writes the blob
+bytes raw and grep goes quiet on a binary file rather than reporting zero
+matches. `-a` is needed. Our own scripts stay text — `sqlgen::binary_literal`
+writes hex.
 
 ## 10. Engines
 

@@ -225,7 +225,7 @@ pub async fn run(
         }
         let mut own = match job.layout {
             Layout::FilePerDatabase => {
-                let path = job.target.join(format!("{}.sql", safe_file_name(&plan.db)));
+                let path = file_for(&job.target, &plan.db);
                 let mut s = Sink::create(&path)?;
                 s.write(&dump::header(&plan.db))?;
                 Some(s)
@@ -315,6 +315,39 @@ impl Plan {
 fn one_line(plans: &[Plan]) -> String {
     let names: Vec<&str> = plans.iter().map(|p| p.db.as_str()).collect();
     names.join(", ")
+}
+
+/// Where one database's script goes under `dir`, in the per-database layout.
+///
+/// **The only definition of that name.** [`run`] writes through here and
+/// [`existing`] checks through here, because a confirmation that lists `a.sql`
+/// before a run that writes `A.sql` is worse than no confirmation at all.
+pub fn file_for(dir: &Path, db: &str) -> PathBuf {
+    dir.join(format!("{}.sql", safe_file_name(db)))
+}
+
+/// Which of the files this export would write are already there.
+///
+/// Only the per-database layout needs asking: the save dialog does its own
+/// overwrite confirmation for a single file, and a folder picker does not
+/// (§5). Names only — the caller shows them, and a full path per database
+/// would be the same directory repeated.
+///
+/// Unreadable directory, missing directory, a name that is really a
+/// directory: all of them answer "not an existing file we would clobber", and
+/// the write itself reports what it cannot do. This is a courtesy, not a
+/// gate.
+pub fn existing(dir: &Path, picks: &[DbPick]) -> Vec<String> {
+    picks
+        .iter()
+        .filter(|p| file_for(dir, &p.db).is_file())
+        .map(|p| {
+            file_for(dir, &p.db)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.db.clone())
+        })
+        .collect()
 }
 
 /// A database name as a file name, without inventing a path.
@@ -823,5 +856,66 @@ mod tests {
         let all = vec!["a".to_string()];
         let chosen = vec!["a".to_string(), "gone".to_string()];
         assert_eq!(keep(&all, &chosen), vec!["a".to_string()]);
+    }
+
+    fn tmp() -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("db-query-dump-{stamp}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn pick(db: &str) -> DbPick {
+        DbPick {
+            db: db.to_string(),
+            tables: None,
+            views: None,
+            routines: None,
+            triggers: None,
+            events: None,
+        }
+    }
+
+    /// **The confirmation and the write agree on the name**, which is the only
+    /// reason `file_for` exists: listing `a.sql` and then writing `A.sql`
+    /// would be worse than not asking.
+    #[test]
+    fn the_file_checked_is_the_file_written() {
+        let dir = tmp();
+        std::fs::write(file_for(&dir, "with space"), "-- old\n").unwrap();
+        assert_eq!(
+            existing(&dir, &[pick("with space")]),
+            vec!["with_space.sql"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only the ones that are there, in the order they were picked — and the
+    /// others stay unmentioned rather than being listed as safe.
+    #[test]
+    fn only_the_files_already_there_are_named() {
+        let dir = tmp();
+        std::fs::write(dir.join("poc.sql"), "-- old\n").unwrap();
+        std::fs::write(dir.join("stock.sql"), "-- old\n").unwrap();
+        let picks = [pick("warehouse"), pick("poc"), pick("stock")];
+        assert_eq!(existing(&dir, &picks), vec!["poc.sql", "stock.sql"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A courtesy, not a gate.** An empty folder, a folder that is not
+    /// there, a name taken by a directory: none of them is a file we would
+    /// clobber, and none of them is a question worth asking. The write reports
+    /// what it cannot do.
+    #[test]
+    fn nothing_to_overwrite_is_not_a_question() {
+        let dir = tmp();
+        assert!(existing(&dir, &[pick("poc")]).is_empty());
+        std::fs::create_dir(dir.join("poc.sql")).unwrap();
+        assert!(existing(&dir, &[pick("poc")]).is_empty());
+        assert!(existing(&dir.join("not-there"), &[pick("poc")]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

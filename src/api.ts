@@ -833,6 +833,15 @@ export type DumpProgress =
   | { type: "rows"; rows: number; bytes: number }
   | { type: "finished" };
 
+/** Where an export will go, and what it would land on top of. */
+export interface ExportDestination {
+  /** Carried straight back to `exportSchema`. We never build one. */
+  path: string;
+  /** File names that already exist there. Empty for a single file — the save
+   *  dialog asked. */
+  existing: string[];
+}
+
 export interface DumpOutcome {
   files: string[];
   bytesWritten: number;
@@ -1125,11 +1134,29 @@ export const api = {
     invoke<ExportCatalogue>("export_catalogue", { connectionId, db }),
 
   /**
-   * Write the selected schema out.
+   * Ask where the export should go. `null` means the dialog was dismissed.
    *
-   * Resolves to `null` when the file or folder dialog was dismissed, like
-   * every other export here. `requestId` is the handle Stop uses — a dump runs
-   * for minutes, so the cancel has to reach it while it is inside a table.
+   * Separate from `exportSchema` so the overwrite confirmation is ours and
+   * happens before any work starts — see `runExport`.
+   */
+  exportDestination: (
+    connectionId: string,
+    picks: DbPick[],
+    layout: DumpLayout,
+    suggestedName: string,
+  ) =>
+    invoke<ExportDestination | null>("export_destination", {
+      connectionId,
+      picks,
+      layout,
+      suggestedName,
+    }),
+
+  /**
+   * Write the selected schema out, to a `target` from `exportDestination`.
+   *
+   * `requestId` is the handle Stop uses — a dump runs for minutes, so the
+   * cancel has to reach it while it is inside a table.
    */
   exportSchema: (
     connectionId: string,
@@ -1137,18 +1164,18 @@ export const api = {
     picks: DbPick[],
     options: DumpOptions,
     layout: DumpLayout,
-    suggestedName: string,
+    target: string,
     onProgress: (p: DumpProgress) => void,
   ) => {
     const channel = new Channel<DumpProgress>();
     channel.onmessage = onProgress;
-    return invoke<DumpOutcome | null>("export_schema", {
+    return invoke<DumpOutcome>("export_schema", {
       connectionId,
       requestId,
       picks,
       options,
       layout,
-      suggestedName,
+      target,
       onProgress: channel,
     });
   },

@@ -151,6 +151,77 @@ output pane rendering a document Flyway actually produced.
 reads the Settings field instead, so the two can disagree deliberately — a
 system Flyway in the app, the pinned one under test.
 
+## Driving the schema export by hand
+
+The Playwright tests stub `invoke`, so nothing automated has ever had the
+dialog talk to a real server: the selection is proved against a stub, and the
+script is proved by `live_export_probe.rs` without the dialog. This recipe is
+the join between them.
+
+```bash
+mise run db-up
+mise run export-probe-up   # views on views, trigger order, 1,000,000 rows
+mise run dev
+```
+
+Connect as above, then **right-click a database → Export schema** (the rail's
+connection menu opens the same dialog with nothing preselected).
+
+What is worth doing once, because no test covers it:
+
+1. **`export_probe`, schema and data, one file.** 1M rows in `wide`, so the
+   strip has time to show real progress — objects done of total, then rows and
+   megabytes. Press **Stop** in the middle: the `.part` file must be gone
+   afterwards, and nothing wearing the real name.
+   ```bash
+   ls -l /tmp/*.sql /tmp/*.part 2>/dev/null
+   ```
+2. **Both databases, one file per database.** Then export again into the same
+   folder: this is the overwrite confirmation, and it should **name**
+   `export_probe.sql` and `poc.sql` rather than counting them.
+3. **Schema only, then data only**, into two files — the pair should load in
+   that order and produce what one combined file does.
+
+### The round trip, by hand
+
+The claim the whole stage rests on is that the script rebuilds the database.
+`live_export_probe.rs` checks this for `export_probe`; here it is for whatever
+you exported, against a scratch name:
+
+```bash
+F=/tmp/dumps/export_probe.sql               # whatever you saved
+M="podman exec -i db-query-mysql mysql -uroot -pdevpassword"
+
+# The script carries its own CREATE DATABASE + USE, so load it into an empty
+# server and it lands where it says. To load it somewhere *else*, strip both.
+sed -e '/^CREATE DATABASE/d' -e '/^USE /d' "$F" > /tmp/into-scratch.sql
+$M -e "DROP DATABASE IF EXISTS scratch; CREATE DATABASE scratch"
+$M scratch < /tmp/into-scratch.sql
+
+# Same tables, same row counts, same checksums.
+for db in export_probe scratch; do
+  $M -N -e "SELECT TABLE_NAME FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA='$db' AND TABLE_TYPE='BASE TABLE' ORDER BY 1" > /tmp/$db.tables
+  $M -N -e "$(sed "s/.*/CHECKSUM TABLE $db.&;/" /tmp/$db.tables)" | sed "s/^$db\./scratch./" > /tmp/$db.sums
+done
+diff /tmp/export_probe.tables /tmp/scratch.tables && echo "same tables"
+diff /tmp/export_probe.sums /tmp/scratch.sums && echo "same checksums"
+```
+
+**Checking that `USE` travels with `CREATE DATABASE` is the point of the
+`sed`.** An early build wrote `USE \`export_probe\`` unconditionally, so
+loading the script into an empty database left it empty and quietly overwrote
+the original instead — a restore that was really an overwrite. If you skip the
+`sed` and the script still touches `export_probe`, that bug is back. The only
+`export_probe` left in a stripped script should be in its two header comments;
+`grep -an export_probe` says.
+
+Run against a `mysqldump --databases export_probe` on 2026-10-14 as a control:
+same five tables, same five checksums. Note that `grep` without `-a` says
+*nothing* about that file — mysqldump writes the fixture's blob bytes raw, so
+it is "binary" and grep goes quiet rather than reporting zero matches. Our own
+scripts stay text, because `sqlgen::binary_literal` writes hex.
+
 ## Checking that preferences survive being run a different way
 
 `localStorage` belongs to the **webview's origin**, and this app has two of

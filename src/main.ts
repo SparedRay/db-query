@@ -3771,8 +3771,13 @@ function migProgressShow(title: string, what: string) {
 
 let jobTimer: number | null = null;
 
+/** What a running job says about itself. */
+interface JobStrip {
+  say(line: string, detail: string): void;
+}
+
 /** Raise the strip. Returns a handle for updating and taking it down. */
-function jobShow(title: string, onStop?: () => void) {
+function jobShow(title: string, onStop?: () => void): JobStrip {
   const started = Date.now();
   els.jobStrip.hidden = false;
   els.jobStrip.replaceChildren();
@@ -3889,10 +3894,23 @@ async function runExport(
 
   const name = conns.get(connectionId)?.profile.name ?? "export";
   const stamp = new Date().toISOString().slice(0, 10);
-  const strip = jobShow("Exporting schema", () => void api.exportSchemaCancel(id));
 
+  let strip: JobStrip | null = null;
   let objects = 0;
   try {
+    // **Destination first, confirmation second, strip third.** Nothing is read
+    // and nothing is written until this returns, so a strip raised any earlier
+    // would sit over a file dialog claiming to export, with a Stop that
+    // stopped nothing.
+    const dest = await api.exportDestination(connectionId, picks, layout, `${name}-${stamp}.sql`);
+    // Dismissed. Not an outcome to report.
+    if (!dest) return;
+    if (dest.existing.length && !(await confirmOverwrite(dest))) return;
+
+    strip = jobShow("Exporting schema", () => void api.exportSchemaCancel(id));
+    // `strip` is nullable so the `finally` can tell whether one went up at
+    // all; the progress callback below needs the non-null one.
+    const shown = strip;
     const outcome = await api.exportSchema(
       connectionId,
       id,
@@ -3909,32 +3927,64 @@ async function runExport(
         batchBytes: 1_046_528,
       },
       layout,
-      `${name}-${stamp}.sql`,
+      dest.path,
       (p) => {
         if (p.type === "planned") {
           objects = p.objects;
-          strip.say(`Exporting ${objects} object${objects === 1 ? "" : "s"}`, "");
+          shown.say(`Exporting ${objects} object${objects === 1 ? "" : "s"}`, "");
         } else if (p.type === "object") {
-          strip.say(
+          shown.say(
             `Exporting ${p.done} of ${p.total} · ${p.db}`,
             `${p.kind} ${p.name}`,
           );
         } else if (p.type === "rows") {
-          strip.say(
+          shown.say(
             `Exporting ${p.rows.toLocaleString()} rows`,
             `${(p.bytes / 1_048_576).toFixed(1)} MB written`,
           );
         }
       },
     );
-    // `null` is the file dialog dismissed, which is not an outcome to report.
-    if (outcome) showExportReport(outcome);
+    showExportReport(outcome);
   } catch (err) {
     results.setMessage(String(err));
   } finally {
     exportRequest = null;
-    jobHide();
+    if (strip) jobHide();
   }
+}
+
+/**
+ * "These files are already there." Ours, not the platform's.
+ *
+ * The save dialog asks this itself for a single file; a folder picker cannot,
+ * because it does not know what we are about to put in the folder (§5). So the
+ * per-database layout asks here — and it **names** the files rather than
+ * counting them, for the same reason the Flyway confirmation names versions:
+ * `3 files will be overwritten` in a folder of forty is not something anyone
+ * can check.
+ */
+async function confirmOverwrite(dest: import("./api").ExportDestination): Promise<boolean> {
+  const n = dest.existing.length;
+  // Long enough to be unreadable as a list, and the names stop being the point.
+  const shown = dest.existing.slice(0, 12);
+  const rest = n - shown.length;
+  const answer = await choose(
+    `Overwrite ${n} file${n === 1 ? "" : "s"}?`,
+    [
+      `${dest.path} already contains:`,
+      "",
+      ...shown,
+      ...(rest > 0 ? [`and ${rest} more`] : []),
+      "",
+      "Exporting replaces them.",
+    ].join("\n"),
+    [
+      { value: "cancel", label: "Cancel" },
+      { value: "overwrite", label: "Overwrite", primary: true, danger: true },
+    ],
+  );
+  return answer === "overwrite";
 }
 
 /** What was written, where. */

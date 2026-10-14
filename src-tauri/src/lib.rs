@@ -707,23 +707,39 @@ async fn export_catalogue(
     })
 }
 
-/// Write the selected schema out.
+/// Where an export would go, and what it would land on top of.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportDestination {
+    /// Handed straight back to `export_schema`. The webview never builds one
+    /// of these itself — it only carries this one between the two calls.
+    path: String,
+    /// File names in `path` this export would overwrite. Always empty for a
+    /// single file: the save dialog has already asked (§5).
+    existing: Vec<String>,
+}
+
+/// Ask where the export should go, **before** it runs.
 ///
-/// The destination is chosen **here**, after the options are known and before
-/// anything is read: a file for one script, a directory for one per database.
-/// Returns `None` when the dialog was dismissed, like every other export.
+/// Split from `export_schema` so the overwrite confirmation can be ours —
+/// `choose()`, like every other question in the app — rather than a native
+/// message box the UI tests cannot reach. The split pays twice: the job strip
+/// now goes up *after* a destination is settled, where it used to say
+/// "Exporting schema" over a file dialog nobody had answered yet, with a Stop
+/// that stopped nothing.
+///
+/// `None` means the dialog was dismissed.
 #[tauri::command]
-async fn export_schema(
+async fn export_destination(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     connection_id: String,
-    request_id: String,
     picks: Vec<dumprun::DbPick>,
-    options: dump::DumpOptions,
     layout: dumprun::Layout,
     suggested_name: String,
-    on_progress: tauri::ipc::Channel<dumprun::Progress>,
-) -> Result<Option<dumprun::DumpOutcome>, String> {
+) -> Result<Option<ExportDestination>, String> {
+    // Before the file dialog, not after it: being refused the feature having
+    // just named a file is a worse way to learn the engine cannot do it.
     let server = session::server(&state, &connection_id).await?;
     if !server.capabilities.schema_export {
         return Err(format!(
@@ -735,18 +751,52 @@ async fn export_schema(
         return Err("Nothing was selected.".into());
     }
 
-    let target = match layout {
+    let (path, existing) = match layout {
         dumprun::Layout::SingleFile => {
             match pick_export_path(&app, &suggested_name, "SQL script", &["sql"]).await? {
-                Some(p) => p,
+                Some(p) => (p, Vec::new()),
                 None => return Ok(None),
             }
         }
         dumprun::Layout::FilePerDatabase => match pick_folder(&app).await? {
-            Some(p) => p,
+            Some(p) => {
+                let existing = dumprun::existing(&p, &picks);
+                (p, existing)
+            }
             None => return Ok(None),
         },
     };
+
+    Ok(Some(ExportDestination {
+        path: path.to_string_lossy().into_owned(),
+        existing,
+    }))
+}
+
+/// Write the selected schema out, to a destination already chosen by
+/// `export_destination`.
+#[tauri::command]
+async fn export_schema(
+    state: State<'_, AppState>,
+    connection_id: String,
+    request_id: String,
+    picks: Vec<dumprun::DbPick>,
+    options: dump::DumpOptions,
+    layout: dumprun::Layout,
+    target: String,
+    on_progress: tauri::ipc::Channel<dumprun::Progress>,
+) -> Result<dumprun::DumpOutcome, String> {
+    let server = session::server(&state, &connection_id).await?;
+    if !server.capabilities.schema_export {
+        return Err(format!(
+            "{} has no schema to write out as a script.",
+            server.capabilities.engine
+        ));
+    }
+    if picks.is_empty() {
+        return Err("Nothing was selected.".into());
+    }
+    let target = std::path::PathBuf::from(target);
 
     let cancel = std::sync::Arc::new(session::CliCancel::default());
     state
@@ -779,7 +829,7 @@ async fn export_schema(
     .await;
 
     state.exports.lock().await.remove(&request_id);
-    outcome.map(Some)
+    outcome
 }
 
 #[tauri::command]
@@ -2217,6 +2267,7 @@ pub fn run() {
             prefs_load,
             prefs_save,
             export_catalogue,
+            export_destination,
             export_schema,
             export_schema_cancel,
             app_defaults,
