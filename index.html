@@ -109,6 +109,14 @@
         <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>
 
         <section id="results-pane">
+          <!-- A long job's progress, raised by whoever is running one. The
+               migrations view has had this since Stage 20 as `#mig-progress`;
+               it moved out here when the schema export needed the same thing,
+               because a dump is not a migration and the strip was never about
+               migrations. Unlike Flyway, a job that we are running ourselves
+               knows its real progress, so this says counts rather than only
+               elapsed time. -->
+          <div id="job-strip" class="mig-progress" hidden></div>
           <div id="tabs" class="tabs"></div>
           <div id="grid" class="grid-host" tabindex="0"></div>
           <!-- L3. A migrations tab has no result set — its answers are
@@ -529,6 +537,68 @@
           <button value="ok" id="conn-ok">Connect</button>
         </menu>
       </form>
+    </dialog>
+
+    <!-- The schema export (Stage 22).
+
+         Its own tree rather than checkboxes in the sidebar: that pane is the
+         app's main navigation and 260px wide, and this is a bounded task that
+         ends in a decision. The run itself reports outside the dialog, so the
+         app is not modal while it works. -->
+    <dialog id="export-schema-dialog">
+      <h2>Export schema</h2>
+
+      <div class="exp-body">
+        <div class="exp-pick">
+          <input type="search" id="exp-filter" placeholder="Filter&hellip;"
+                 autocomplete="off" spellcheck="false" />
+          <div id="exp-tree" class="exp-tree" role="tree" aria-label="What to export"></div>
+          <div class="exp-pick-actions">
+            <button type="button" id="exp-all" class="mini">All</button>
+            <button type="button" id="exp-none" class="mini">None</button>
+          </div>
+        </div>
+
+        <div class="exp-opts">
+          <fieldset>
+            <legend>Contents</legend>
+            <label class="toggle"><input type="radio" name="exp-contents" value="schemaOnly" /> Schema only</label>
+            <label class="toggle"><input type="radio" name="exp-contents" value="schemaAndData" checked /> Schema and data</label>
+            <label class="toggle"><input type="radio" name="exp-contents" value="dataOnly" /> Data only</label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Output</legend>
+            <label class="toggle"><input type="radio" name="exp-layout" value="singleFile" checked /> One file</label>
+            <label class="toggle"><input type="radio" name="exp-layout" value="filePerDatabase" /> One file per database</label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Script</legend>
+            <label class="toggle"><input type="checkbox" id="exp-drop" checked /> DROP each object first</label>
+            <p class="hint">Lets the script be run twice. Without it, loading
+              over an existing schema stops at the first object that is already
+              there.</p>
+            <label class="toggle"><input type="checkbox" id="exp-create-db" checked /> CREATE DATABASE and USE</label>
+            <p class="hint" id="exp-create-db-note"></p>
+            <label class="toggle"><input type="checkbox" id="exp-omit-definer" checked /> Omit DEFINER clauses</label>
+            <p class="hint">Views, routines, triggers and events are created by
+              an account that may not exist on the server you load into, where
+              the script would fail. Untick to keep the dump faithful.</p>
+            <label class="narrow">Rows per INSERT
+              <input type="number" id="exp-batch" min="1" max="10000" />
+            </label>
+          </fieldset>
+        </div>
+      </div>
+
+      <p id="exp-summary" class="hint"></p>
+      <p id="exp-error" class="error" hidden></p>
+
+      <menu>
+        <button type="button" id="exp-cancel">Cancel</button>
+        <button type="button" id="exp-ok" class="primary">Export&hellip;</button>
+      </menu>
     </dialog>
 
     <dialog id="history-dialog">

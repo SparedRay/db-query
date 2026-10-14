@@ -433,9 +433,41 @@ without complaint, and the test fails.
 > table, so the reasoning is too absolute. Not changed here; the export does
 > batch while streaming.
 
-### 9b.3 Still to build
+### 9b.3 The commands, the strip and the dialog — 2026-10-14
 
-The job strip (§6.3), the Tauri commands, and the dialog.
+`export_catalogue` answers a whole database in one round trip — five would
+show the groups filling in one after another. `export_schema` chooses the
+destination *after* the options are known, runs, and streams `Progress` over a
+channel; `export_schema_cancel` stops it by the id the caller made up, the
+same shape as the assistant's.
+
+The **job strip** moved out of the migrations view and above the results pane,
+because a dump is not a migration and that strip was never about migrations.
+It differs from Flyway's in one way that matters: Flyway reports only when it
+finishes, so its strip can say nothing but elapsed time, while a job we are
+running ourselves knows exactly where it is — objects done of objects total,
+rows, megabytes. It carries **Stop**.
+
+Entry points: the **database node's context menu**, which had none at all
+before — tables, columns and routines all did, so it was the one gap in a
+pattern — and the connection's menu in the rail. Both gated on
+`schemaExport`, so Elasticsearch shows the item disabled rather than behaving
+differently per row.
+
+The dialog owns the selection and nothing else. 14 UI tests, two of them
+falsified:
+
+* **sending names instead of `null`** for a whole database — the plausible
+  wrong answer, and it fails;
+* **forgetting the other kinds** when one table is unticked. Unticking a table
+  has to materialise every kind first, or the views and routines somebody
+  never touched vanish silently. That one took 30s to fail, which is what a
+  silently-empty selection looks like.
+
+### 9b.4 Still to build
+
+The confirmation before overwriting files in the per-database layout (§5), and
+`dev/README.md`'s recipe for driving it by hand.
 
 ## 10. Engines
 

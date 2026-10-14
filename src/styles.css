@@ -1337,6 +1337,50 @@ dialog.viewer .viewer-note.copy-failed { color: var(--danger-fg); }
    connection dialogs as a side effect, which is not this change's business. */
 #history-dialog menu button.danger { border-color: var(--danger); color: var(--danger-fg); }
 
+/* --- the schema export -----------------------------------------------------
+   Two columns: what to export on the left, how on the right. The tree is the
+   only part that scrolls, so the options and the summary stay put however
+   many tables a warehouse has. */
+#export-schema-dialog { width: min(860px, 94vw); }
+#export-schema-dialog h2 { margin: 0 0 10px; font-size: 14px; }
+.exp-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+.exp-pick { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
+#exp-filter {
+  padding: 5px 8px; background: var(--bg-input); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; font-size: 12px;
+}
+.exp-tree {
+  height: 320px; overflow: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-input); padding: 6px;
+  /* The gutter is reserved so the rows do not shift sideways the moment the
+     list grows past the box — the same fix the settings panes needed. */
+  scrollbar-gutter: stable;
+}
+.exp-pick-actions { display: flex; gap: 6px; }
+
+.exp-node {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px; border-radius: 4px; font-size: 12.5px; cursor: default;
+  white-space: nowrap;
+}
+.exp-node:hover { background: var(--btn-bg); }
+.exp-node .twisty { width: 14px; flex: 0 0 auto; color: var(--fg-dim); cursor: pointer; }
+.exp-node input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.exp-node .exp-name { overflow: hidden; text-overflow: ellipsis; }
+.exp-node .exp-count { margin-left: auto; padding-left: 10px; color: var(--fg-dim); font-size: 11px; }
+.exp-kids { margin-left: 16px; }
+/* A group heading reads as structure rather than as another object. */
+.exp-node.group .exp-name { color: var(--fg-dim); font-size: 11.5px; letter-spacing: .02em; }
+
+.exp-opts { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.exp-opts fieldset {
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px 4px; margin: 0;
+}
+.exp-opts legend { font-size: 11px; color: var(--fg-dim); padding: 0 4px; }
+.exp-opts .hint { margin: 2px 0 8px; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
+#exp-summary { margin: 10px 0 0; font-size: 12px; }
+
 /* --- assistant -------------------------------------------------------------
    A docked panel, laid out like the schema pane opposite it: a head that does
    not scroll, one scrolling middle, and a composer pinned to the bottom. The

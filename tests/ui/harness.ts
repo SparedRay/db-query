@@ -73,6 +73,17 @@ export const baseBackend: Backend = {
   // Every boot reads the session file. Stubbed as "nothing remembered" so no
   // other test has to think about it, and overridden by the ones that do.
   load_session: () => ({ session: { version: 1, connections: [] }, warning: null }),
+  // Stage 22. Stubbed empty so no other test has to think about it; the
+  // export specs override them.
+  export_catalogue: () => ({
+    tables: [],
+    views: [],
+    routines: [],
+    triggers: [],
+    events: [],
+  }),
+  export_schema: () => null,
+  export_schema_cancel: () => null,
   // And the preferences file, before anything else — `src/boot.ts`. "Nothing
   // stored" by default, which is what leaves `withSettings` in charge of the
   // localStorage cache for every test that does not care about the file.
@@ -372,6 +383,7 @@ export const MYSQL_CAPS = {
   cancellation: true,
   migrations: true,
   streamingExport: true,
+  schemaExport: true,
   rowCap: "clientLimit",
   namespaceLabel: "database",
 };
@@ -387,6 +399,9 @@ export const READ_ONLY_CAPS = {
   delimiterBlocks: false,
   routines: false,
   streamingExport: false,
+  // An index has a mapping, not a CREATE statement: there is no script that
+  // recreates it, so the export must not be offered.
+  schemaExport: false,
   rowCap: "serverPageSize",
   namespaceLabel: "catalog",
 };
