@@ -66,21 +66,75 @@ run = "node scripts/set-version.mjs"
 # localhost only — none of them is a service this project depends on.
 # ---------------------------------------------------------------------------
 
+# **Wait for the real server, not the one that is about to be shut down.**
+#
+# On a container's first boot the official entrypoint starts a *temporary*
+# server with `--skip-networking` on the unix socket to run initialisation
+# (`/usr/local/bin/docker-entrypoint.sh:124`, read from the image 2026-10-14).
+# A socket ping answers there — the log says `port: 0` — so a socket check
+# breaks early and whatever runs next is talking to a server that stops a
+# second later. Measured on a fresh container, 2026-10-14:
+#
+#     48.2s  temporary server ready   port: 0      <- a socket ping answers
+#     49.3s  stopping temporary server
+#     51.3s  temporary server stopped
+#     52.1s  real server ready        port: 3306
+#
+# `db-up` seeded into that ~3s window and died mid-script, which is why it
+# failed on a fresh container and worked on every run after. TCP is refused
+# until the real server is listening, so this cannot answer early.
+#
+# One definition, used by every task that needs the fixture — the same check
+# was pasted into three of them.
+[tasks.db-wait]
+description = "Wait until the MySQL fixture's real server answers, not the init one"
+run = """
+# "Not there" and "not ready yet" are different answers and get different
+# ones back. Waiting 180s for a container nobody started would be the slowest
+# possible way to say `mise run db-up`.
+if ! podman container exists db-query-mysql; then
+  echo "The MySQL fixture is not there. Run: mise run db-up" >&2
+  exit 1
+fi
+i=0
+while [ "$i" -lt 90 ]; do
+  if podman exec db-query-mysql mysqladmin ping -h 127.0.0.1 -P 3306 \
+       -uroot -pdevpassword --silent >/dev/null 2>&1; then
+    exit 0
+  fi
+  if [ "$i" = 2 ]; then echo "waiting for MySQL to finish starting…"; fi
+  i=$((i + 1))
+  sleep 2
+done
+echo "MySQL did not answer in 180s. Try: podman logs db-query-mysql" >&2
+exit 1
+"""
+
 [tasks.db-up]
 description = "Start the MySQL 8 fixture container and seed it"
 run = """
-podman run -d --name db-query-mysql -e MYSQL_ROOT_PASSWORD=devpassword -p 3306:3306 docker.io/library/mysql:8 || podman start db-query-mysql
-until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do sleep 2; done
+set -e
+# **Not `--replace`.** That would delete the container, and with it
+# `export_probe` and the `flyway_*` databases that other fixtures put there.
+# An existing fixture is started, not rebuilt. Asking first also keeps the
+# "name already in use" error off the screen on every run after the first,
+# which read as a failure when the task had in fact succeeded.
+if podman container exists db-query-mysql; then
+  podman start db-query-mysql >/dev/null
+else
+  podman run -d --name db-query-mysql -e MYSQL_ROOT_PASSWORD=devpassword \
+    -p 3306:3306 docker.io/library/mysql:8 >/dev/null
+fi
+mise run db-wait
 podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/seed.sql
 echo "fixture ready on 127.0.0.1:3306 (root / devpassword, database poc)"
 """
 
 [tasks.export-probe-up]
 description = "Build the export_probe database (Stage 22: views on views, trigger order, 1M rows)"
+depends = ["db-wait"]
 run = """
-until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do
-  echo "waiting for the MySQL fixture (mise run db-up)…"; sleep 2
-done
+set -e
 podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/export-probe.sql
 echo "export_probe ready (1,000,000 rows in wide)"
 """
@@ -141,6 +195,9 @@ run = "podman stop db-query-es && podman rm db-query-es"
 # first".
 [tasks.flyway-up]
 description = "Fetch the pinned Flyway CLI and prepare the migration fixture databases"
+# Before the 584MB download rather than after it: without a fixture this used
+# to spend the download and then wait forever for a server nobody had started.
+depends = ["db-wait"]
 run = """
 set -e
 VERSION=13.5.0
@@ -164,9 +221,6 @@ fi
 
 # The two databases the fixture's environments point at. `db-up` owns the
 # server; these are this fixture's own, so the two do not tread on each other.
-until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do
-  echo "waiting for the MySQL fixture (mise run db-up)…"; sleep 2
-done
 podman exec -i db-query-mysql mysql -uroot -pdevpassword -e \
   "DROP DATABASE IF EXISTS flyway_dev; DROP DATABASE IF EXISTS flyway_qa; \
    DROP DATABASE IF EXISTS flyway_probe; \
