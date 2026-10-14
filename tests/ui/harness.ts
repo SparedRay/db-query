@@ -85,6 +85,16 @@ export const baseBackend: Backend = {
   // "Dismissed", so a stray Export in an unrelated test writes nothing and
   // asks nothing. The export specs override it.
   export_destination: () => null,
+  // Stage 23. "Dismissed" and "an empty folder", so a stray click in an
+  // unrelated test runs nothing; the sqlfiles specs override them.
+  sqlfiles_pick_folder: () => null,
+  sqlfiles_scan: () => ({
+    files: [],
+    runnableFiles: 0,
+    statements: 0,
+    outputs: 0,
+    writes: 0,
+  }),
   export_schema: () => null,
   export_schema_cancel: () => null,
   // And the preferences file, before anything else — `src/boot.ts`. "Nothing
@@ -387,6 +397,7 @@ export const MYSQL_CAPS = {
   migrations: true,
   streamingExport: true,
   schemaExport: true,
+  scriptFiles: true,
   rowCap: "clientLimit",
   namespaceLabel: "database",
 };
@@ -405,6 +416,7 @@ export const READ_ONLY_CAPS = {
   // An index has a mapping, not a CREATE statement: there is no script that
   // recreates it, so the export must not be offered.
   schemaExport: false,
+  scriptFiles: false,
   rowCap: "serverPageSize",
   namespaceLabel: "catalog",
 };

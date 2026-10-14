@@ -672,6 +672,59 @@ Both falsified: not stripping the BOM fails two file tests, and putting
 
 **478 Rust unit tests, 483 UI on Chromium, 482 + 1 engine-skip on WebKit.**
 
+### 9b.2 The scan: one plan, used by the confirmation and the run — 2026-10-14
+
+`sqlfiles::scan` is pure — file contents in, a plan out — so every number the
+preview shows is a unit test. The impure part is `collect` (the directory walk)
+and `read_and_scan` (reading through `files::read_file`, which is what makes the
+BOM come off and the size limit apply).
+
+**The claim worth stating is that there is only one plan.** The preview, the
+write confirmation and the run all read the same `Scan`, so a confirmation
+cannot describe a run other than the one that happens. That is not a comment —
+the offsets in it are `split`'s own, and a test slices the real fixture files
+with them and gets the statements back.
+
+**A write is exactly what a read-only connection refuses**, asserted as a
+property over every `StatementKind` against `engine::refusal` rather than as a
+hand-counted number. If the two ever drift, one of two bad things has happened:
+the dialog promises a run that will be refused, or — far worse — it says nothing
+about a write it is about to perform. `Session` is deliberately not a write:
+`SET`, `USE` and `START TRANSACTION` change this connection and nothing in
+anybody's data, and listing them in a confirmation about writes would teach
+people to skim it.
+
+**Output names come from a set, not from a counter.** Mirroring subfolders makes
+a collision nearly impossible, and "nearly" there means silently overwriting
+somebody's results, so each name is claimed and the next free one taken.
+`report.sql` gives `report.csv`, `report-2.csv`, `report-3.csv` — no `-1` on the
+first, because a folder of one-`SELECT` files is the common case.
+
+Four falsifications, each failing exactly the test that claims it: counting
+`Session` as a write, using `span.start` for the line, putting `-1` on the first
+output, and flattening subfolders instead of mirroring.
+
+#### The fixture is a folder
+
+`dev/scripts` holds each case on purpose and its own README says which is which:
+a `DELIMITER` block, a file of only comments, a missing trailing semicolon, a
+real UTF-8 BOM, three result sets in one file, one file in a subfolder, and a
+`README.md` that is not SQL and so is not picked up. `01-setup.sql` creates the
+table and `99-teardown.sql` drops it, so the folder runs twice and leaves `poc`
+as it was found.
+
+`cargo test --test sqlfiles_scan` reads those files **from disk** and asserts
+what the preview will show. It needs no server, which is precisely why it exists
+now rather than later: Stage 22 §9b.7 shipped a dialog whose only backend call
+had never run against anything real, because the UI suite stubs `invoke` and the
+live suite went through another path. This is that gap, closed on purpose.
+
+It also pins the fixture against itself — the BOM test asserts the three bytes
+are really there, so a reformat cannot quietly remove the case it exists to
+prove.
+
+**514 Rust tests (496 unit, 9 scan, 9 measurement), check clean.**
+
 ## 10. Engines
 
 Gated by a capability, not an engine name — the rule `engine.rs` states for

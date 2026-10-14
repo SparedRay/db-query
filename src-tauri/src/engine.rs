@@ -74,6 +74,12 @@ pub struct Capabilities {
     /// statements to dump at all — an index with a mapping does not, and
     /// offering "export schema" there would promise a file that cannot exist.
     pub schema_export: bool,
+    /// A folder of `.sql` scripts can be run and its results written out.
+    ///
+    /// A real gate rather than a cosmetic one: `split` is a **MySQL**
+    /// statement splitter and `DELIMITER` is a MySQL *client* directive, so a
+    /// folder of scripts means nothing to an engine that has neither.
+    pub script_files: bool,
     pub row_cap: RowCap,
     /// What this engine calls the thing `USE` switches between. MySQL says
     /// "database", Elasticsearch says "catalog", Snowflake says "schema" —
@@ -98,6 +104,7 @@ impl Capabilities {
             migrations: true,
             streaming_export: true,
             schema_export: true,
+            script_files: true,
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
         }
@@ -402,6 +409,7 @@ mod tests {
             migrations: false,
             streaming_export: false,
             schema_export: false,
+            script_files: false,
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),
         }

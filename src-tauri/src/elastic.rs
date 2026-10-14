@@ -50,6 +50,10 @@ pub fn capabilities() -> Capabilities {
         // that recreates it in the sense this feature means, so the export is
         // not offered rather than offered and disappointing.
         schema_export: false,
+        // `split` is a MySQL statement splitter and `DELIMITER` is a MySQL
+        // client directive, so a folder of `.sql` scripts is not a thing this
+        // engine has. The menu item is disabled rather than present and wrong.
+        script_files: false,
         row_cap: RowCap::ServerPageSize,
         // Elasticsearch's own word, and the name of the request field.
         namespace_label: "catalog".into(),
