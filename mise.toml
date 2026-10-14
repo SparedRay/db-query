@@ -69,6 +69,10 @@ run = [
   # which can be read off the code. `--skip csv_throughput` leaves out the one
   # that streams a million rows three times.
   "cargo test --manifest-path src-tauri/Cargo.toml --test measure_sqlfiles -- --ignored --test-threads=1 --skip csv_throughput",
+  # Stage 23: the batch runner end to end against `dev/scripts` — stop on
+  # error, a USE that moves the next file, a read-only refusal, and Stop
+  # landing mid-result.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test live_sqlfiles -- --ignored --test-threads=1",
 ]
 
 [tasks.set-version]
