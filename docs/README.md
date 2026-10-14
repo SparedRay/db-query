@@ -26,7 +26,8 @@ decisions that were corrected along the way.
 | 17 | [Flyway projects stand on their own](stage-17-flyway-projects.md) | 🚧 **Built** — projects listed without a connection; each environment matched to the saved connection it is; hands-on pass outstanding |
 | 18 | [Migrations in the app's own flow](stage-18-migrations-in-the-flow.md) | ✅ **Built** — projects in the schema sidebar, the list as a tab, "Apply up to here"; the pane is deleted |
 | 19 | [A result knows which statement made it](stage-19-result-sets.md) | ✅ **Built** — numbered result tabs; double-click selects the SQL that produced one |
-| 20 | [The assistant through a CLI](stage-20-assistant-through-a-cli.md) | 📋 **Planned** — answer from a CLI the person is already signed into (Claude Code, Copilot CLI) instead of an API key; tools stripped, nothing executed; five facts to measure first |
+| 20 | [The assistant through a CLI](stage-20-assistant-through-a-cli.md) | ✅ **Built** — answers from a CLI the person is already signed into (Claude Code, Copilot CLI) instead of an API key; tools stripped, nothing executed; a kept ACP session |
+| 21 | [The assistant docked](stage-21-the-assistant-docked.md) | ✅ **Built** — the chat is a panel rather than a modal, so nothing behind it is inert; one-click Run into a buffer; the window reopens where it was left |
 
 ## Rules
 

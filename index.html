@@ -7,7 +7,10 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="app">
+    <!-- `chat-closed` from the first byte: the class is what zeroes the two
+         right-hand grid tracks, and adding it from script would paint one
+         frame with a 380px gap in it. -->
+    <div id="app" class="chat-closed">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
         <!-- Icons are injected from src/icons.ts, so the drawings live in one
@@ -142,9 +145,35 @@
         </section>
       </main>
 
-      <!-- The migrations pane. A pane rather than a section of the schema tree
-           so the database structure stays visible while a migration is being
-           read — which is the whole reason to look at both at once. -->
+      <!-- The assistant, docked rather than modal.
+           It was a `showModal()` dialog, which meant you could not click the
+           tree, the editor or the grid while it was open — so the one thing a
+           proposed query needs, a look at the schema and the rows it came
+           from, was the one thing the panel prevented. As a panel it is the
+           mirror image of the schema on the left: its own surface, its own
+           splitter, and nothing behind it is inert.
+
+           Closed by default and `hidden` as well as zero-width: a collapsed
+           pane that still holds a textarea would still take Tab. -->
+      <div id="msplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+
+      <section id="chat-pane" class="chat-pane" aria-label="Assistant" hidden>
+        <div class="pane-head">
+          <span class="chat-title">Assistant</span>
+          <button type="button" id="chat-clear" class="mini">Clear</button>
+          <button type="button" id="chat-close" class="mini"
+                  title="Close the assistant (Ctrl+K)" aria-label="Close the assistant">
+            &times;
+          </button>
+        </div>
+        <p class="hint" id="chat-note">Checking&hellip;</p>
+        <div id="chat-log" class="chat-log"></div>
+        <div class="chat-compose">
+          <textarea id="chat-input" rows="3"
+                    placeholder="Ask about your schema, or describe the query you want&hellip;"></textarea>
+          <button type="button" id="chat-send" class="primary">Send</button>
+        </div>
+      </section>
     </div>
 
     <!--
@@ -477,18 +506,6 @@
           <button value="ok" id="conn-ok">Connect</button>
         </menu>
       </form>
-    </dialog>
-
-    <dialog id="assistant-dialog">
-      <h2>Assistant</h2>
-      <p class="hint" id="chat-note">Checking…</p>
-      <div id="chat-log" class="chat-log"></div>
-      <textarea id="chat-input" rows="3" placeholder="Ask about your schema, or describe the query you want…"></textarea>
-      <menu>
-        <button type="button" id="chat-clear">Clear</button>
-        <button type="button" id="chat-send" class="primary">Send</button>
-        <button type="button" id="chat-close">Close</button>
-      </menu>
     </dialog>
 
     <dialog id="history-dialog">

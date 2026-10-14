@@ -142,7 +142,7 @@ test("the assistant button marks a CLI that is not ready, and still opens", asyn
   await expect(page.locator("#btn-assistant")).toBeEnabled();
 
   await page.click("#btn-assistant");
-  await expect(page.locator("#assistant-dialog")).toBeVisible();
+  await expect(page.locator("#chat-pane")).toBeVisible();
   await expect(page.locator("#chat-note")).toContainText("Authentication required");
   // And it will not let a question be sent into a CLI that cannot answer.
   await expect(page.locator("#chat-send")).toBeDisabled();
@@ -312,7 +312,7 @@ test("the panel opens before it knows whether the CLI is ready", async ({ page }
 
   await page.click("#btn-assistant");
   // Open, and saying so, while the probe is still out.
-  await expect(page.locator("#assistant-dialog")).toBeVisible();
+  await expect(page.locator("#chat-pane")).toBeVisible();
   await expect(page.locator("#chat-note .spinner")).toBeVisible();
   await expect(page.locator("#chat-note .chat-waiting")).toHaveAttribute(
     "aria-label",

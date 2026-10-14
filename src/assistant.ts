@@ -23,8 +23,23 @@ import {
   type Recipe,
 } from "./api";
 
+/**
+ * The panel the chat lives in.
+ *
+ * An interface rather than an `HTMLDialogElement`, because this module used to
+ * call `showModal()` and `close()` on one directly — which is how the choice
+ * of *being a modal* ended up baked into the chat's own logic. Opening and
+ * closing a docked pane is a grid-track change and a `hidden` flag, and the
+ * chat does not need to know which it is.
+ */
+export interface AssistantPanel {
+  isOpen(): boolean;
+  open(): void;
+  close(): void;
+}
+
 export interface AssistantDeps {
-  dialog: HTMLDialogElement;
+  panel: AssistantPanel;
   log: HTMLElement;
   input: HTMLTextAreaElement;
   send: HTMLButtonElement;
@@ -39,6 +54,28 @@ export interface AssistantDeps {
   insert: (sql: string) => void;
   /** Open it as a new tab instead. */
   openInTab: (sql: string) => void;
+  /**
+   * Run it.
+   *
+   * **The model still executes nothing** — see this file's header and
+   * `assistant.rs`. This is one click standing for the two it replaced
+   * (put it in a buffer, press Run), and the buffer is still where the
+   * statement lands first, so what ran is on screen, undoable, and in
+   * history like anything typed by hand. `main.ts` owns which tab that is.
+   */
+  run: (sql: string) => void;
+  /**
+   * Put it on the clipboard, for somewhere that is not this app.
+   *
+   * Returns a promise so the **outcome** can be shown. `clipboard.ts` exists
+   * because a Copy that quietly does nothing is this project's worst-ever bug
+   * class — `navigator.clipboard` needs a secure context and a gesture, and
+   * WebKitGTK is the weakest of the three platforms at it. So this rejects,
+   * and the button says so.
+   */
+  copy: (sql: string) => Promise<unknown>;
+  /** Whether a statement could be run at all: no connection, no Run. */
+  canRun: () => boolean;
   /** Remember that the assistant proposed this, so history can say so. */
   remember: (sql: string) => void;
 }
@@ -209,28 +246,90 @@ export function createAssistant(deps: AssistantDeps) {
       const actions = document.createElement("div");
       actions.className = "chat-sql-actions";
 
-      const insert = document.createElement("button");
-      insert.type = "button";
-      insert.className = "mini";
-      insert.textContent = "Insert at cursor";
-      insert.onclick = () => {
-        deps.remember(part.body);
-        deps.insert(part.body);
+      const sql = part.body;
+      /** One button. `remember` first, so history says where it came from
+       *  whichever of the four was pressed. */
+      const action = (
+        label: string,
+        cls: string,
+        run: () => void,
+        title?: string,
+      ): HTMLButtonElement => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = cls;
+        b.textContent = label;
+        if (title) b.title = title;
+        b.onclick = () => {
+          deps.remember(sql);
+          run();
+        };
+        return b;
       };
 
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.className = "mini";
-      tab.textContent = "New tab";
-      tab.onclick = () => {
-        deps.remember(part.body);
-        deps.openInTab(part.body);
-      };
+      const runBtn = action(
+        "Run",
+        "mini run",
+        () => deps.run(sql),
+        "Put it in a tab and run it. Nothing runs until you press this.",
+      );
+      // Not hidden: a disabled button with a reason is how somebody finds out
+      // that the thing they wanted needs a connection.
+      if (!deps.canRun()) {
+        runBtn.disabled = true;
+        runBtn.title = "Open a connection first — a statement runs against one.";
+      }
 
-      actions.append(insert, tab);
+      actions.append(
+        runBtn,
+        action("Insert at cursor", "mini", () => deps.insert(sql)),
+        action("New tab", "mini", () => deps.openInTab(sql)),
+        copyButton(sql),
+      );
       block.append(pre, actions);
       host.append(block);
     }
+  }
+
+  /**
+   * Copy, and say what happened — on the button, which is the one place that
+   * cannot be mistaken for something else.
+   *
+   * Not reported through the result note like the grid's Copy: that note
+   * belongs to a result set, and overwriting it from the chat would throw away
+   * the rows somebody is reading. Not reported through the chat's own note
+   * either, which carries the statement about what is sent to the model.
+   *
+   * No `remember`: nothing has been proposed *to this app*, so recording it in
+   * history would be a record of an intention rather than of a statement.
+   */
+  function copyButton(sql: string): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mini";
+    b.textContent = "Copy";
+    let revert: number | null = null;
+    b.onclick = () => {
+      if (revert !== null) window.clearTimeout(revert);
+      void deps
+        .copy(sql)
+        .then(() => {
+          b.textContent = "Copied";
+          b.title = "";
+        })
+        .catch((err: unknown) => {
+          b.textContent = "Copy failed";
+          // The whole reason `copyText` throws rather than returning false.
+          b.title = String(err);
+        })
+        .finally(() => {
+          revert = window.setTimeout(() => {
+            b.textContent = "Copy";
+            revert = null;
+          }, 2000);
+        });
+    };
+    return b;
   }
 
   /**
@@ -369,7 +468,7 @@ export function createAssistant(deps: AssistantDeps) {
     history = [];
     deps.log.replaceChildren();
   };
-  deps.close.addEventListener("click", () => deps.dialog.close());
+  deps.close.addEventListener("click", () => deps.panel.close());
 
   // Enter sends; Shift+Enter is a newline. A chat box that needs a mouse to
   // send is a chat box nobody uses twice.
@@ -382,7 +481,7 @@ export function createAssistant(deps: AssistantDeps) {
 
   return {
     async open() {
-      if (deps.dialog.open) {
+      if (deps.panel.isOpen()) {
         deps.input.focus();
         return;
       }
@@ -394,7 +493,7 @@ export function createAssistant(deps: AssistantDeps) {
       deps.note.replaceChildren(checking.el);
       deps.send.disabled = true;
       deps.input.disabled = true;
-      deps.dialog.showModal();
+      deps.panel.open();
 
       const config = deps.config();
       let ready: boolean;

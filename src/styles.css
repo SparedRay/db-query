@@ -212,7 +212,8 @@ body {
   padding: 7px;
   gap: 0;
   grid-template-columns:
-    48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr);
+    48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr)
+    var(--chat-gap, 7px) var(--chat-w, 380px);
   /* The row must be pinned, not implicit. An implicit row is `auto`, which
      sizes to its tallest child — so a schema with more tables than fit made the
      row taller than the window, pushed the results grid below the fold, and
@@ -237,7 +238,7 @@ body {
    a region of one flat screen — the same move the settings fieldsets make.
    `overflow: hidden` is what keeps a sticky table header or a long tree from
    painting over the rounded corner. */
-.railbar, #sidebar, #editor-pane, #results-pane {
+.railbar, #sidebar, #editor-pane, #results-pane, #chat-pane {
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
@@ -255,6 +256,12 @@ body {
    a zero-width track still holds a focusable tree. */
 #app.schema-closed { --tree-w: 0px; --tree-gap: 0px; }
 
+/* And the same trick on the other side. The width the splitter was dragged to
+   stays in `--chat-w-set`, so closing and reopening the assistant does not
+   reset it. */
+#app.chat-closed { --chat-w: 0px; --chat-gap: 0px; }
+#app:not(.chat-closed) { --chat-w: var(--chat-w-set, 380px); }
+
 /* Every panel is pinned to its own column.
    Auto-placement counts only the items that are *displayed*, so hiding the
    schema and its splitter slid `#main` two columns left — into the 0px track
@@ -265,6 +272,7 @@ body {
 #app > #vsplit { grid-column: 3; }
 #app > #main { grid-column: 4; }
 #app > #msplit { grid-column: 5; }
+#app > #chat-pane { grid-column: 6; }
 #mig-title {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1325,21 +1333,44 @@ dialog.viewer .viewer-note {
    connection dialogs as a side effect, which is not this change's business. */
 #history-dialog menu button.danger { border-color: var(--danger); color: var(--danger-fg); }
 
-/* --- assistant ------------------------------------------------------------
-   Sized like the history list: a conversation is scanned, not filled in. */
-#assistant-dialog[open] { width: min(760px, 94vw); }
-#assistant-dialog h2 { margin: 0 0 4px; font-size: 14px; }
-#assistant-dialog .hint { margin: 0 0 8px; font-size: 11.5px; color: var(--fg-dim); line-height: 1.5; }
+/* --- assistant -------------------------------------------------------------
+   A docked panel, laid out like the schema pane opposite it: a head that does
+   not scroll, one scrolling middle, and a composer pinned to the bottom. The
+   middle is the only part that grows, which is what keeps the textarea
+   reachable in a short window. */
+#chat-pane {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--bg-raised);
+}
+.chat-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; }
+#chat-pane .hint {
+  margin: 0; padding: 7px 10px;
+  font-size: 11.5px; color: var(--fg-dim); line-height: 1.5;
+  border-bottom: 1px solid var(--border);
+}
 
 .chat-log {
-  max-height: 52vh; min-height: 160px; overflow: auto;
-  border: 1px solid var(--border); border-radius: 6px;
+  flex: 1 1 auto; min-height: 0; overflow: auto;
   background: var(--bg-input); padding: 10px;
   display: flex; flex-direction: column; gap: 10px;
 }
+
+/* The composer. `flex: 0 0 auto` so a long conversation never pushes it off
+   the bottom, and the textarea resizes vertically only — horizontal resize in
+   a fixed-width dock would just overflow the panel. */
+.chat-compose {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.chat-compose button { align-self: flex-end; }
+#chat-pane .pane-head button.mini { flex: 0 0 auto; }
 .chat-msg { font-size: 12.5px; line-height: 1.55; }
 .chat-msg.from-user {
-  align-self: flex-end; max-width: 80%;
+  align-self: flex-end; max-width: 92%;
   background: var(--sel-cell-bg); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 9px; white-space: pre-wrap; word-break: break-word;
 }
@@ -1356,20 +1387,26 @@ dialog.viewer .viewer-note {
   margin: 0; padding: 8px 10px; overflow-x: auto;
   font: var(--code-size) / 1.5 var(--mono); background: var(--bg-raised);
 }
+/* Four one-click actions in a 380px column, so they wrap rather than
+   overflow — and Run is marked, because it is the one that touches the
+   database. */
 .chat-sql-actions {
-  display: flex; gap: 6px; padding: 6px 8px;
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px;
   border-top: 1px solid var(--border); background: var(--bg);
 }
+.chat-sql-actions button.run { border-color: var(--accent); color: var(--accent); }
+.chat-sql-actions button.run:disabled { border-color: var(--border); color: var(--fg-dim); }
 
 #chat-input {
-  display: block; width: 100%; margin-top: 8px; padding: 7px 9px; resize: vertical;
+  display: block; width: 100%; padding: 7px 9px; resize: vertical;
+  max-height: 40vh;
   background: var(--bg-input); color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px; font: 12.5px/1.5 var(--sans, inherit);
 }
-#assistant-dialog menu button.primary {
+#chat-pane button.primary {
   background: var(--accent); border-color: var(--accent); color: var(--on-accent);
 }
-#assistant-dialog menu button:disabled { opacity: .55; cursor: default; }
+#chat-pane button:disabled { opacity: .55; cursor: default; }
 
 .ai-key-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 
