@@ -1,6 +1,6 @@
 # Stage 22 — Export a schema, with or without its data
 
-**Status:** 📋 Planned — 2026-10-14. UI agreed; facts in §9 to be measured before building.
+**Status:** 🚧 In progress — 2026-10-14. UI agreed; the six facts in §9 are measured, and two of them changed the design.
 
 ---
 
@@ -53,7 +53,7 @@ schema sidebar (which would put a mode on the app's main navigation, in a
 │ │ ▸ ☐ warehouse    (31)  │   ☑ DROP IF EXISTS first │
 │ └────────────────────────┘   ☑ CREATE DATABASE      │
 │ All  None  Tables only       ☑ Disable FK checks    │
-│                              Rows per INSERT [100]  │
+│                              Rows per INSERT [1000] │
 │ 11 tables, 1 view · ~2.4M rows      [Cancel][Export]│
 └─────────────────────────────────────────────────────┘
 ```
@@ -131,10 +131,40 @@ foreign-key checks off is a trap for whatever runs next in it.
 A view that selects from another view must be created second. `SHOW CREATE
 VIEW` does not say what a view depends on.
 
-The plan is a topological sort over `information_schema.VIEW_TABLE_USAGE`
-(**to be verified — §9.1**). Where that view is unavailable, the fallback is
-to emit views in name order *and say so in the file*, because a wrong order
-that is announced is recoverable and one that is not is a mystery.
+A topological sort over `information_schema.VIEW_TABLE_USAGE`, which
+**§9.1 confirms reports view→view edges**, not merely view→table. Joining it
+back to `information_schema.TABLES` says which of the two a dependency is:
+
+```
+v1 → t   BASE TABLE
+v2 → v1  VIEW
+v3 → t   BASE TABLE
+v3 → v2  VIEW
+```
+
+That table arrived in MySQL 8.0.13. Below that version the fallback is to emit
+views in name order *and say so in the file*, because a wrong order that is
+announced is recoverable and one that is not is a mystery.
+
+### 4.3b Triggers carry an order that nothing in their text records
+
+`SHOW CREATE TRIGGER` emits no `FOLLOWS` or `PRECEDES` clause. Two triggers
+with the same timing and event on one table therefore have an order that
+exists **only in the order they were created** — and
+`information_schema.TRIGGERS.ACTION_ORDER` is the only place it is written
+down (measured: 1 and 2 for the probe's two `BEFORE INSERT` triggers).
+
+So triggers are emitted sorted by table, timing, event, then `ACTION_ORDER`.
+Get that wrong and the dump loads perfectly while computing different values.
+
+Two more things the measurement turned up:
+
+* a trigger body names other tables **unqualified** (`INSERT INTO audit …`),
+  so the script must `USE` the database before creating them — which §4.1
+  already does, now for a reason rather than for tidiness;
+* `SHOW CREATE TRIGGER` returns the `sql_mode` the trigger was created under,
+  and a trigger behaves differently under a different one. The script sets it
+  around each trigger and restores it, as `mysqldump` does.
 
 ### 4.4 DEFINER
 
@@ -158,6 +188,12 @@ START TRANSACTION WITH CONSISTENT SNAPSHOT;
 This is what `mysqldump --single-transaction` does, and without it a dump
 taken over several minutes — while the app's own tabs are running queries —
 can contain a child row whose parent it already passed.
+
+**§9.4 measured that it holds**, including across the things a dump does
+between tables: `SHOW CREATE TABLE`, `SHOW CREATE VIEW`, `SHOW TRIGGERS` and
+`USE` all leave the snapshot intact. `USE` was the one worth checking — an
+implicit commit there would have ended the snapshot silently, half way
+through.
 
 Two honest limits, to be written into the report rather than implied away:
 it is consistent only for transactional tables, and any DDL run during the
@@ -227,26 +263,88 @@ decision somebody should make deliberately, not get as a side effect.
   meaning "resolved later", the confirmation before overwriting files, Stop
   mid-run.
 
-## 9. Facts to measure before building
+## 9. The six facts, measured — 2026-10-14
 
-Written down first, in the style of Stage 20 §2, because each one changes the
-design and none is a safe guess.
+Written down before building, in the style of Stage 20 §2, because each one
+changes the design and none was a safe guess. Measured against MySQL 8.4.11 in
+the podman fixture, with `mise run export-probe-up` (`dev/export-probe.sql`)
+for the cases `seed.sql` does not carry. The sqlx halves are
+`src-tauri/tests/live_export_probe.rs`.
 
-1. **`information_schema.VIEW_TABLE_USAGE`** — present on the fixture's MySQL?
-   Does it give view→view edges, or only view→table? §4.3 depends on it.
-2. **Triggers** — is `SHOW TRIGGERS` enough to enumerate, and does
-   `SHOW CREATE TRIGGER` round-trip? Neither is in the tree today.
-3. **Events** — same question for `SHOW EVENTS` / `SHOW CREATE EVENT`, plus
-   whether the fixture even has the event scheduler on.
-4. **`START TRANSACTION WITH CONSISTENT SNAPSHOT`** through sqlx on a pooled
-   connection — does the snapshot actually hold across the whole dump, and
-   does the connection survive being held that long?
-5. **Throughput and batch size** — the fixture's `big` table, at 100 / 1,000 /
-   10,000 rows per `INSERT`, measured. The default should be a number that was
-   timed, not one that looked reasonable.
-6. **`TABLE_ROWS` accuracy** — how far off is the estimate on the fixture? It
-   is only a sentence in a dialog, but a sentence that is wrong by 10× is
-   worse than no sentence.
+**Two of the six changed the design.**
+
+### 9.1 `VIEW_TABLE_USAGE` — yes, and it gives view→view ✅
+
+Present on 8.4.11 and it reports `v2 → v1` and `v3 → v2`, not only edges to
+base tables; joining to `information_schema.TABLES` says which kind each
+dependency is. A topological sort is straightforward and needs no fallback
+above MySQL 8.0.13. §4.3 rewritten.
+
+### 9.2 Triggers — round-trip, **and carry a hidden ordering** ⚠️ design changed
+
+`SHOW TRIGGERS FROM db` enumerates; `SHOW CREATE TRIGGER` returns the whole
+`CREATE DEFINER=… TRIGGER …` text. But it emits **no `FOLLOWS`/`PRECEDES`**,
+so two triggers sharing a timing and event have an order recorded nowhere
+except `information_schema.TRIGGERS.ACTION_ORDER`. New §4.3b.
+
+### 9.3 Events — round-trip ✅
+
+`SHOW EVENTS FROM db` enumerates, `SHOW CREATE EVENT` gives the full text with
+`DEFINER` and an absolute `STARTS '2026-10-14 16:59:15'`. The scheduler is on
+in the fixture. Noted: a one-shot event whose `STARTS` is in the past, with
+`ON COMPLETION NOT PRESERVE`, can be dropped the moment it loads — which is
+the server behaving correctly on a stale dump, and belongs in the report
+rather than in a workaround.
+
+### 9.4 The consistent snapshot — holds ✅
+
+Another connection inserted five rows and committed; the dump connection saw
+its original count across several statements and 300 ms, then saw the new one
+after `COMMIT`. `SHOW CREATE TABLE`, `SHOW CREATE VIEW`, `SHOW TRIGGERS` and
+`USE` all left it intact — `USE` being the one that could plausibly have
+ended it with an implicit commit.
+
+### 9.5 Batch size — **the default is 1,000, not 100** ⚠️ design changed
+
+Reading is the same speed at every batch, ~317,000 rows/s, because the fetch
+dominates. That is not the number that matters. What a batch buys is how long
+the script takes to **load**, which is what somebody restoring a dump waits
+for:
+
+| rows per `INSERT` | file | longest statement | **load time** |
+|---|---|---|---|
+| 1 | 9.9 MB | — | **274 s** |
+| 100 | 4.4 MB | — | **4.7 s** |
+| 1,000 | 4.4 MB | 0.04 MB | **1.3 s** |
+| 10,000 | 4.3 MB | 0.44 MB | **1.1 s** |
+
+100,000 rows of `export_probe.wide`, loaded through the `mysql` client.
+
+One to a hundred is **59×**. A hundred to a thousand is another **3.6×**. A
+thousand to ten thousand is 1.17× and multiplies the longest statement by ten.
+
+So: **1,000 by default**, and — because the table above is four narrow columns
+and a real one has `TEXT` and `BLOB` — the writer caps a statement by **bytes
+as well as rows**, flushing at 1 MB, whichever comes first. `max_allowed_packet`
+is 64 MB here but belongs to the *target* server, which the dump cannot see;
+1 MB is `mysqldump`'s own `--net-buffer-length` default, and it makes wide rows
+safe without a setting.
+
+> **Found on the way past:** the result-set export dialog (Stage 3) defaults to
+> **100** rows per `INSERT`. On this measurement that is 3.6× slower to load
+> than it needs to be, for no benefit. Not changed here — a different
+> feature's default, and its own one-line change.
+
+### 9.6 `TABLE_ROWS` — about 1% low, good enough ✅
+
+On a million rows: estimate **990,296** against an actual **1,000,000**, and
+991,953 after `ANALYZE TABLE`. The fixture's own tables are too small to be
+sampled at all and report exactly.
+
+`COUNT(*)` on the same million rows took **0.2 s**, which is tempting — but it
+is a full index scan, so it is 0.2 s here and minutes on a hundred million.
+The dialog keeps the estimate, one query for a whole database, and labels it
+`~`.
 
 ## 10. Engines
 
