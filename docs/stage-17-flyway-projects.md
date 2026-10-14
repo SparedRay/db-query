@@ -208,7 +208,7 @@ Flyway support, this is where that will be declared.
 ### Phase 3 — Proof
 
 - [ ] Live Flyway suite through the new commands
-- [ ] Hands-on (F10)
+- [x] Hands-on (F10) — see §F below
 
 ## 7. Building it — 2026-09-18
 
@@ -343,3 +343,20 @@ Four UI tests measure geometry, not just whether the buttons exist. The reveal
 and the no-snap-back guard each fail their test when removed.
 
 **385 Rust unit tests, 77 live MySQL tests, 762 UI tests on both engines.**
+
+## F. Confirmed in use — 2026-10-14
+
+Flyway has been used in earnest since, across both these stages, and works.
+That is what F10 was for, and it is the better evidence: the checklist would
+have driven each path once, deliberately, while use drives the paths somebody
+actually needs and in the order they need them.
+
+**The live suite through the project-level commands is dropped, not deferred.**
+It would re-prove over a second route what `flywaycli`'s own live tests already
+prove over the first — the JVM start, the parse, the apply — and the part that
+differs is the project/environment matching, which is pure and already has unit
+tests. Carrying it as an open item was implying a gap that is not there.
+
+What is *not* covered by use, and stays open: nothing here. Stage 13's M7 —
+every suite on both platforms — is the remaining cross-cutting one, and it
+belongs to that tracker.

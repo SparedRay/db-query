@@ -1,6 +1,11 @@
 # Stage 22 — Export a schema, with or without its data
 
-**Status:** 🚧 In progress — 2026-10-14. UI agreed; the six facts in §9 are measured, and two of them changed the design.
+**Status:** ✅ Built — 2026-10-14. The six facts in §9 were measured first and
+two of them changed the design. All three legs of §8's proof are done: the
+assembler's unit tests, a live round trip that loads the script back into an
+empty database, and the dialog under UI tests. Outstanding: a hands-on pass
+through the real UI, which no automated test can stand in for because the
+Playwright suite stubs `invoke` — the recipe is in `dev/README.md`.
 
 ---
 
