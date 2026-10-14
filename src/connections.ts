@@ -53,6 +53,8 @@ export interface ConnectionHooks {
   canDrop?: (entry: ConnectionEntry) => Promise<boolean>;
   onDisconnected: (entry: ConnectionEntry) => void;
   onRemoved: (entry: ConnectionEntry) => void;
+  /** Offered only where the engine has a schema to write out. */
+  exportSchema?: (connectionId: string) => void;
   notify: (message: string) => void;
 }
 
@@ -366,6 +368,11 @@ export class ConnectionManager {
       entry.connected
         ? { label: "Disconnect", run: () => void this.disconnect(entry) }
         : { label: "Connect", run: () => void this.connect(entry) },
+      // Only where there is a schema to write out. A capability, not the
+      // engine's name — see `engine.rs`.
+      ...(entry.connected && entry.capabilities?.schemaExport
+        ? [{ label: "Export schema…", run: () => this.hooks.exportSchema?.(entry.profile.id) }]
+        : []),
       { label: "Edit…", run: () => this.openEditor(entry) },
       { label: "Duplicate", run: () => this.duplicate(entry) },
       // Disabled rather than absent at the ends: a menu whose items move around

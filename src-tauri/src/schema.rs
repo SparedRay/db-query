@@ -1145,6 +1145,60 @@ pub async fn view_dependencies(
     server.engine.view_dependencies(&server, db).await
 }
 
+/// Tables and their estimated row counts, for the export dialog's tree.
+///
+/// One query for the whole database rather than a `COUNT(*)` per table. A
+/// count is exact and is a full index scan: 0.2 s on a million rows and
+/// minutes on a hundred million, which is not a price a dialog can pay to
+/// draw a node. The estimate measured about 1% low (§9.6), and is shown with
+/// a `~`.
+pub async fn export_tables(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<(String, i64)>, String> {
+    let server = server(state, connection_id).await?;
+    let mut meta = server.mysql_meta().await?;
+    let rows = sqlx::query(
+        "SELECT TABLE_NAME, COALESCE(TABLE_ROWS, 0) AS n FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+    )
+    .bind(db)
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+    rows.into_iter()
+        .map(|r| {
+            Ok((
+                r.try_get("TABLE_NAME").map_err(|e| friendly(&e))?,
+                // TABLE_ROWS is BIGINT UNSIGNED; i64 is plenty for a count and
+                // is what the frontend can hold without losing precision.
+                r.try_get::<u64, _>("n").map_err(|e| friendly(&e))? as i64,
+            ))
+        })
+        .collect()
+}
+
+pub async fn export_views(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<String>, String> {
+    let server = server(state, connection_id).await?;
+    let mut meta = server.mysql_meta().await?;
+    let rows = sqlx::query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'VIEW' ORDER BY TABLE_NAME",
+    )
+    .bind(db)
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+    rows.into_iter()
+        .map(|r| r.try_get("TABLE_NAME").map_err(|e| friendly(&e)))
+        .collect()
+}
+
 pub async fn routine_ddl(
     state: &AppState,
     connection_id: &str,

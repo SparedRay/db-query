@@ -435,6 +435,11 @@ pub struct AppState {
     /// holds the conversation, so the schema travels once rather than with
     /// every question.
     pub cli_agents: Mutex<HashMap<crate::agentcli::Recipe, Arc<crate::acp::Agent>>>,
+    /// Schema exports that can be stopped, keyed by a request id the caller
+    /// makes up — the same shape as `cli_asks`, and for the same reason: a
+    /// dump runs for minutes and Stop has to reach it while it is inside a
+    /// table rather than between two.
+    pub exports: Mutex<HashMap<String, Arc<CliCancel>>>,
 }
 
 /// A request for a CLI reply to stop.

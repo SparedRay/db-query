@@ -54,6 +54,7 @@ import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
 import { createHistory } from "./history";
 import { cliLabel, createAssistant } from "./assistant";
+import { createExportDialog } from "./exportschema";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -131,6 +132,21 @@ const els = {
   setFlywayRow: $<HTMLElement>("set-flyway-row"),
   setInsertBatch: $<HTMLInputElement>("set-insert-batch"),
   migProgress: $<HTMLElement>("mig-progress"),
+  jobStrip: $<HTMLElement>("job-strip"),
+  expDialog: $<HTMLDialogElement>("export-schema-dialog"),
+  expTree: $<HTMLElement>("exp-tree"),
+  expFilter: $<HTMLInputElement>("exp-filter"),
+  expSummary: $<HTMLElement>("exp-summary"),
+  expError: $<HTMLElement>("exp-error"),
+  expAll: $<HTMLButtonElement>("exp-all"),
+  expNone: $<HTMLButtonElement>("exp-none"),
+  expOk: $<HTMLButtonElement>("exp-ok"),
+  expCancel: $<HTMLButtonElement>("exp-cancel"),
+  expBatch: $<HTMLInputElement>("exp-batch"),
+  expDrop: $<HTMLInputElement>("exp-drop"),
+  expCreateDb: $<HTMLInputElement>("exp-create-db"),
+  expCreateDbNote: $<HTMLElement>("exp-create-db-note"),
+  expOmitDefiner: $<HTMLInputElement>("exp-omit-definer"),
   flywayPane: $<HTMLElement>("flyway-pane"),
   flywayBody: $<HTMLElement>("flyway-body"),
   flywayWhen: $<HTMLElement>("flyway-when"),
@@ -934,6 +950,32 @@ function buildDbNode(connId: string, db: string): HTMLElement {
     if (!children.hidden) await loadDbChildren(connId, db, children, n);
   };
   n.append(refresh);
+
+  // Database nodes had no context menu at all — tables, columns and routines
+  // all do, so this was the one gap in a pattern rather than a new idea.
+  n.oncontextmenu = (e) => {
+    const caps = conns?.get(connId)?.capabilities;
+    contextMenu(e, [
+      { label: db, run: () => {}, heading: true },
+      {
+        label: "Export schema\u2026",
+        run: () => openSchemaExport(connId, db),
+        // Offered everywhere it exists, so that an engine without it is a
+        // missing item rather than a menu that behaves differently per row.
+        disabled: !caps?.schemaExport,
+      },
+      {
+        label: "Refresh",
+        run: () => {
+          void api.refreshSchema(connId, db).then(async () => {
+            children.replaceChildren();
+            children.dataset.loaded = "";
+            if (!children.hidden) await loadDbChildren(connId, db, children, n);
+          });
+        },
+      },
+    ]);
+  };
 
   n.onclick = async () => {
     // Clicking a database both expands it and makes it the active schema, so
@@ -2047,6 +2089,7 @@ conns = new ConnectionManager($("rail"), {
     session.forget(entry.profile.id);
     if (conns.active()?.profile.id === entry.profile.id) setMcpFocus(null);
   },
+  exportSchema: (connectionId) => openSchemaExport(connectionId, null),
   notify: (m) => results.setMessage(m),
 }, openConnectionEditor);
 
@@ -3716,6 +3759,197 @@ function migProgressShow(title: string, what: string) {
   tick();
   if (migProgressTimer !== null) window.clearInterval(migProgressTimer);
   migProgressTimer = window.setInterval(tick, 1000);
+}
+
+// ------------------------------------------------------------- a long job
+//
+// The migrations strip generalised out of the migrations view, because the
+// schema export needs the same thing and a dump is not a migration. It differs
+// in one way that matters: Flyway reports only when it finishes, so that strip
+// can say nothing but elapsed time, while a job we are running ourselves knows
+// exactly where it is.
+
+let jobTimer: number | null = null;
+
+/** Raise the strip. Returns a handle for updating and taking it down. */
+function jobShow(title: string, onStop?: () => void) {
+  const started = Date.now();
+  els.jobStrip.hidden = false;
+  els.jobStrip.replaceChildren();
+  els.jobStrip.setAttribute("role", "status");
+
+  const spinner = elem("span", "spinner");
+  spinner.setAttribute("aria-hidden", "true");
+  const text = elem("div", "mig-progress-text");
+  const head = elem("b", "", title);
+  const what = elem("div", "mig-progress-what", "");
+  const note = elem("div", "mig-progress-note", "");
+  text.append(head, what, note);
+  els.jobStrip.append(spinner, text);
+
+  if (onStop) {
+    const stop = elem("button", "mini", "Stop") as HTMLButtonElement;
+    stop.onclick = () => {
+      stop.disabled = true;
+      stop.textContent = "Stopping…";
+      onStop();
+    };
+    els.jobStrip.append(stop);
+  }
+
+  const tick = () => {
+    note.textContent = `Running for ${Math.round((Date.now() - started) / 1000)}s.`;
+  };
+  tick();
+  if (jobTimer !== null) window.clearInterval(jobTimer);
+  jobTimer = window.setInterval(tick, 1000);
+
+  return {
+    say(line: string, detail: string) {
+      head.textContent = line;
+      what.textContent = detail;
+    },
+  };
+}
+
+function jobHide() {
+  if (jobTimer !== null) window.clearInterval(jobTimer);
+  jobTimer = null;
+  els.jobStrip.hidden = true;
+  els.jobStrip.replaceChildren();
+}
+
+// ------------------------------------------------------------ schema export
+
+/**
+ * The export dialog, and what happens after it closes.
+ *
+ * The dialog chooses; the run reports **outside** it, into the job strip and
+ * the results surface — so the app is usable while a dump that takes minutes
+ * is running, which is the whole reason it is not a progress bar inside a
+ * modal.
+ */
+const exportDialog = createExportDialog({
+  dialog: els.expDialog,
+  tree: els.expTree,
+  filter: els.expFilter,
+  summary: els.expSummary,
+  error: els.expError,
+  all: els.expAll,
+  none: els.expNone,
+  ok: els.expOk,
+  cancel: els.expCancel,
+  batch: els.expBatch,
+  dropExisting: els.expDrop,
+  createDatabase: els.expCreateDb,
+  createDatabaseNote: els.expCreateDbNote,
+  omitDefiner: els.expOmitDefiner,
+  context: () => ({
+    connectionId: exportConnection,
+    databases: exportDatabases,
+    name: conns.get(exportConnection ?? "")?.profile.name ?? "export",
+  }),
+  defaultBatch: () => settings.insertBatch,
+  start: (picks, contents, layout, opts) => void runExport(picks, contents, layout, opts),
+});
+
+/** Which connection the open dialog belongs to, and what it can offer. */
+let exportConnection: string | null = null;
+let exportDatabases: string[] = [];
+
+function openSchemaExport(connectionId: string, preselect: string | null) {
+  const entry = conns.get(connectionId);
+  if (!entry?.capabilities?.schemaExport) {
+    results.setMessage("This connection's engine has no schema to write out as a script.");
+    return;
+  }
+  exportConnection = connectionId;
+  exportDatabases = entry.databases ?? [];
+  exportDialog.open(preselect);
+}
+
+/** The id this run is stopped by. One at a time is enough: a second dump of
+ *  the same server would only contend for the same disk. */
+let exportRequest: string | null = null;
+
+async function runExport(
+  picks: import("./api").DbPick[],
+  contents: import("./api").DumpContents,
+  layout: import("./api").DumpLayout,
+  opts: { dropExisting: boolean; createDatabase: boolean; omitDefiner: boolean; batchRows: number },
+) {
+  const connectionId = exportConnection;
+  if (!connectionId) return;
+  if (exportRequest) {
+    results.setMessage("An export is already running.");
+    return;
+  }
+  const id = `exp-${Date.now().toString(36)}`;
+  exportRequest = id;
+
+  const name = conns.get(connectionId)?.profile.name ?? "export";
+  const stamp = new Date().toISOString().slice(0, 10);
+  const strip = jobShow("Exporting schema", () => void api.exportSchemaCancel(id));
+
+  let objects = 0;
+  try {
+    const outcome = await api.exportSchema(
+      connectionId,
+      id,
+      picks,
+      {
+        contents,
+        dropExisting: opts.dropExisting,
+        createDatabase: opts.createDatabase,
+        omitDefiner: opts.omitDefiner,
+        batchRows: opts.batchRows,
+        // The byte ceiling is not a setting: it is about the server the script
+        // is loaded into, which nobody choosing it here can see. See
+        // `dump::DEFAULT_BATCH_BYTES`.
+        batchBytes: 1_046_528,
+      },
+      layout,
+      `${name}-${stamp}.sql`,
+      (p) => {
+        if (p.type === "planned") {
+          objects = p.objects;
+          strip.say(`Exporting ${objects} object${objects === 1 ? "" : "s"}`, "");
+        } else if (p.type === "object") {
+          strip.say(
+            `Exporting ${p.done} of ${p.total} · ${p.db}`,
+            `${p.kind} ${p.name}`,
+          );
+        } else if (p.type === "rows") {
+          strip.say(
+            `Exporting ${p.rows.toLocaleString()} rows`,
+            `${(p.bytes / 1_048_576).toFixed(1)} MB written`,
+          );
+        }
+      },
+    );
+    // `null` is the file dialog dismissed, which is not an outcome to report.
+    if (outcome) showExportReport(outcome);
+  } catch (err) {
+    results.setMessage(String(err));
+  } finally {
+    exportRequest = null;
+    jobHide();
+  }
+}
+
+/** What was written, where. */
+function showExportReport(outcome: import("./api").DumpOutcome) {
+  const mb = (outcome.bytesWritten / 1_048_576).toFixed(1);
+  const lines = [
+    outcome.cancelled
+      ? `Export stopped after ${outcome.rows.toLocaleString()} rows.`
+      : `Exported ${outcome.tables} table${outcome.tables === 1 ? "" : "s"}` +
+        ` and ${outcome.rows.toLocaleString()} row${outcome.rows === 1 ? "" : "s"}.`,
+    `${mb} MB in ${outcome.files.length} file${outcome.files.length === 1 ? "" : "s"}:`,
+    ...outcome.files,
+    ...outcome.warnings,
+  ];
+  results.setMessage(lines.join("\n"));
 }
 
 function migProgressHide() {

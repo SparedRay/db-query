@@ -658,6 +658,156 @@ async fn assistant_cli_cancel(
     Ok(())
 }
 
+// ------------------------------------------------------- the schema export
+
+/// Everything in a database that an export can select, for the dialog's tree.
+///
+/// One command rather than five, because the dialog opens a database and wants
+/// all of it at once — five round trips to draw one node would show the
+/// groups filling in one after another.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportCatalogue {
+    tables: Vec<ExportTable>,
+    views: Vec<String>,
+    routines: Vec<schema::RoutineRef>,
+    triggers: Vec<schema::TriggerRef>,
+    events: Vec<schema::EventRef>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportTable {
+    name: String,
+    /// `information_schema`'s estimate, which for InnoDB comes from sampling
+    /// index pages. Measured about 1% low on a million rows (§9.6) — good
+    /// enough for a sentence, and labelled `~` wherever it is shown.
+    estimated_rows: i64,
+}
+
+#[tauri::command]
+async fn export_catalogue(
+    state: State<'_, AppState>,
+    connection_id: String,
+    db: String,
+) -> Result<ExportCatalogue, String> {
+    let tables = schema::export_tables(&state, &connection_id, &db).await?;
+    Ok(ExportCatalogue {
+        tables: tables
+            .into_iter()
+            .map(|(name, estimated_rows)| ExportTable {
+                name,
+                estimated_rows,
+            })
+            .collect(),
+        views: schema::export_views(&state, &connection_id, &db).await?,
+        routines: schema::list_routines(&state, &connection_id, &db).await?,
+        triggers: schema::triggers(&state, &connection_id, &db).await?,
+        events: schema::events(&state, &connection_id, &db).await?,
+    })
+}
+
+/// Write the selected schema out.
+///
+/// The destination is chosen **here**, after the options are known and before
+/// anything is read: a file for one script, a directory for one per database.
+/// Returns `None` when the dialog was dismissed, like every other export.
+#[tauri::command]
+async fn export_schema(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    connection_id: String,
+    request_id: String,
+    picks: Vec<dumprun::DbPick>,
+    options: dump::DumpOptions,
+    layout: dumprun::Layout,
+    suggested_name: String,
+    on_progress: tauri::ipc::Channel<dumprun::Progress>,
+) -> Result<Option<dumprun::DumpOutcome>, String> {
+    let server = session::server(&state, &connection_id).await?;
+    if !server.capabilities.schema_export {
+        return Err(format!(
+            "{} has no schema to write out as a script.",
+            server.capabilities.engine
+        ));
+    }
+    if picks.is_empty() {
+        return Err("Nothing was selected.".into());
+    }
+
+    let target = match layout {
+        dumprun::Layout::SingleFile => {
+            match pick_export_path(&app, &suggested_name, "SQL script", &["sql"]).await? {
+                Some(p) => p,
+                None => return Ok(None),
+            }
+        }
+        dumprun::Layout::FilePerDatabase => match pick_folder(&app).await? {
+            Some(p) => p,
+            None => return Ok(None),
+        },
+    };
+
+    let cancel = std::sync::Arc::new(session::CliCancel::default());
+    state
+        .exports
+        .lock()
+        .await
+        .insert(request_id.clone(), cancel.clone());
+
+    // Its own connection, held for the whole run — the snapshot spans every
+    // table, and a tab's connection would freeze somebody's editor. See
+    // `dumprun`.
+    let mut conn = server.open_private().await?;
+    let job = dumprun::Job {
+        picks: &picks,
+        options,
+        layout,
+        target,
+    };
+    let watching = cancel.clone();
+    let outcome = dumprun::run(
+        &mut conn,
+        &job,
+        |p| {
+            // A closed channel means the window went away mid-export, which
+            // is not a reason to fail the write that is already on disk.
+            let _ = on_progress.send(p);
+        },
+        || watching.was_asked(),
+    )
+    .await;
+
+    state.exports.lock().await.remove(&request_id);
+    outcome.map(Some)
+}
+
+#[tauri::command]
+async fn export_schema_cancel(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Some(cancel) = state.exports.lock().await.get(&request_id) {
+        cancel.ask();
+    }
+    Ok(())
+}
+
+/// A directory, for the one-file-per-database layout.
+async fn pick_folder(app: &tauri::AppHandle) -> Result<Option<std::path::PathBuf>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx
+        .await
+        .map_err(|_| "The folder dialog closed unexpectedly.".to_string())?;
+    let Some(f) = picked else { return Ok(None) };
+    f.into_path()
+        .map(Some)
+        .map_err(|e| format!("Unsupported folder path: {e}"))
+}
+
 /// What Flyway printed on its last run, for the migrations tab's output pane.
 ///
 /// `None` before anything has run. Costs nothing — it is already in memory.
@@ -2066,6 +2216,9 @@ pub fn run() {
             save_session,
             prefs_load,
             prefs_save,
+            export_catalogue,
+            export_schema,
+            export_schema_cancel,
             app_defaults,
             generate_select,
             generate_drop,

@@ -332,6 +332,10 @@ export interface Capabilities {
    *  difference — everything else asks `writes`. */
   readOnly: boolean;
   streamingExport: boolean;
+  /** A whole schema can be written out as a script that recreates it.
+   *  Separate from `streamingExport`, which is about one result set: an index
+   *  with a mapping has no CREATE statement to dump at all. */
+  schemaExport: boolean;
   rowCap: "clientLimit" | "serverPageSize";
   /** What this engine calls the thing `USE` switches between. */
   namespaceLabel: string;
@@ -778,6 +782,66 @@ export interface PrefsLoad {
   warning: string | null;
 }
 
+// --- the schema export (Stage 22). Shapes mirrored from `dump.rs` and
+// `dumprun.rs`; see `docs/stage-22-schema-export.md`.
+
+export interface ExportCatalogue {
+  tables: Array<{ name: string; estimatedRows: number }>;
+  views: string[];
+  routines: RoutineRef[];
+  triggers: Array<{
+    name: string;
+    table: string;
+    timing: string;
+    event: string;
+    actionOrder: number;
+  }>;
+  events: Array<{ name: string }>;
+}
+
+/**
+ * What to export from one database.
+ *
+ * **`null` means "everything of that kind, resolved when the export runs".**
+ * That is what ticking a database has to mean: the tree lazy-loads, and
+ * recording a tick must not fetch every table in a warehouse.
+ */
+export interface DbPick {
+  db: string;
+  tables: string[] | null;
+  views: string[] | null;
+  routines: string[] | null;
+  triggers: string[] | null;
+  events: string[] | null;
+}
+
+export type DumpContents = "schemaOnly" | "schemaAndData" | "dataOnly";
+export type DumpLayout = "singleFile" | "filePerDatabase";
+
+export interface DumpOptions {
+  contents: DumpContents;
+  dropExisting: boolean;
+  createDatabase: boolean;
+  omitDefiner: boolean;
+  batchRows: number;
+  batchBytes: number;
+}
+
+export type DumpProgress =
+  | { type: "planned"; objects: number }
+  | { type: "object"; kind: string; db: string; name: string; done: number; total: number }
+  | { type: "rows"; rows: number; bytes: number }
+  | { type: "finished" };
+
+export interface DumpOutcome {
+  files: string[];
+  bytesWritten: number;
+  tables: number;
+  rows: number;
+  cancelled: boolean;
+  warnings: string[];
+}
+
 export interface OpenedFile {
   path: string;
   name: string;
@@ -1054,6 +1118,44 @@ export const api = {
     invoke<ExportOutcome | null>("export_rerun", {
       tabId, sql, format, options, suggestedName,
     }),
+  // --- the schema export (Stage 22).
+
+  /** Everything in one database that can be selected, in one round trip. */
+  exportCatalogue: (connectionId: string, db: string) =>
+    invoke<ExportCatalogue>("export_catalogue", { connectionId, db }),
+
+  /**
+   * Write the selected schema out.
+   *
+   * Resolves to `null` when the file or folder dialog was dismissed, like
+   * every other export here. `requestId` is the handle Stop uses — a dump runs
+   * for minutes, so the cancel has to reach it while it is inside a table.
+   */
+  exportSchema: (
+    connectionId: string,
+    requestId: string,
+    picks: DbPick[],
+    options: DumpOptions,
+    layout: DumpLayout,
+    suggestedName: string,
+    onProgress: (p: DumpProgress) => void,
+  ) => {
+    const channel = new Channel<DumpProgress>();
+    channel.onmessage = onProgress;
+    return invoke<DumpOutcome | null>("export_schema", {
+      connectionId,
+      requestId,
+      picks,
+      options,
+      layout,
+      suggestedName,
+      onProgress: channel,
+    });
+  },
+
+  exportSchemaCancel: (requestId: string) =>
+    invoke<void>("export_schema_cancel", { requestId }),
+
   /** Delimited text for the clipboard. The frontend owns the clipboard call. */
   clipboardText: (result: ResultSet, options: CsvOptions) =>
     invoke<string>("clipboard_text", { result, options }),
