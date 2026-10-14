@@ -653,15 +653,6 @@ pub async fn disconnect(state: &AppState, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Close every connection. Used on shutdown.
-pub async fn disconnect_all(state: &AppState) -> Result<(), String> {
-    let ids: Vec<ConnectionId> = state.connections.lock().await.keys().cloned().collect();
-    for id in ids {
-        disconnect(state, &id).await.ok();
-    }
-    Ok(())
-}
-
 pub async fn list_connections(state: &AppState) -> Vec<ConnectionStatus> {
     let servers: Vec<Arc<ServerConn>> = state.connections.lock().await.values().cloned().collect();
     let tabs: Vec<Arc<TabSession>> = state.tabs.lock().await.values().cloned().collect();

@@ -2748,3 +2748,87 @@ async fn the_connection_reports_itself_as_read_only() {
     session::disconnect(&state, "ro3").await.ok();
     session::disconnect(&state, "rw3").await.ok();
 }
+
+/// **The unbounded re-run writes binary, where the grid export cannot.**
+///
+/// Stage 6 recorded this as a disagreement to settle: the grid renders a
+/// binary-collation `VARCHAR` as text while `export.rs` refused it on the
+/// column's type. The refusal half was the honest one and stayed —
+/// `CellValue` carries only a length for binary, so a script built from the
+/// grid's rows would contain `<binary, 4 bytes>`.
+///
+/// The re-run path never had that excuse. It holds the `MySqlRow`, so the
+/// bytes are there, and Stage 22's schema export proved what to do with them.
+/// `export::row_literal` is now the one place that decides, used by both.
+///
+/// The fixture's three cases, in one row: a `VARBINARY`, a `BLOB`, and a
+/// `VARCHAR` with a binary collation whose bytes are perfectly legible text.
+/// All three go out as hex — hex is the only spelling whose meaning does not
+/// depend on the loading client's `character_set_client`, which for a column
+/// the user declared binary is the difference between the right bytes and the
+/// wrong ones.
+#[tokio::test]
+#[ignore]
+async fn a_rerun_insert_script_carries_binary_as_hex() {
+    use sqlx::Connection;
+
+    const COLS: &str = "id, v_binary_coll, vb_varbinary, bl_blob";
+    let opts = db_query_lib::export::InsertOptions {
+        table: "binary_rerun".into(),
+        db: None,
+        create_table: true,
+        batch_size: 1,
+    };
+
+    // A raw connection, because this is the streaming path: it renders from a
+    // row, not from a decoded result set.
+    let mut conn = sqlx::mysql::MySqlConnection::connect(&format!(
+        "mysql://root:{PASSWORD}@127.0.0.1:3306/poc"
+    ))
+    .await
+    .expect("connect failed — is the fixture up?");
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLS} FROM awkward_types WHERE id = 1"
+    )))
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+
+    let mut script = db_query_lib::export::insert_header(&rows[0], &opts).unwrap();
+    for row in &rows {
+        db_query_lib::export::insert_row(row, &opts, &mut script).unwrap();
+    }
+
+    assert!(script.contains("0x00FF10"), "the VARBINARY:\n{script}");
+    assert!(script.contains("0xDEADBEEF"), "the BLOB:\n{script}");
+    assert!(
+        !script.contains("<binary"),
+        "a placeholder reached the script:\n{script}"
+    );
+
+    // And it loads, and what arrives is byte-for-byte what was there. The
+    // assertion that matters: `script.contains("0x…")` only proves we wrote
+    // hex, not that the hex was right.
+    let state = connected().await;
+    exec::run_script(&state, T, "DROP TABLE IF EXISTS binary_rerun;", false, None)
+        .await
+        .unwrap();
+    exec::run_script(&state, T, &script, false, None)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("the re-run script did not load: {e}\n--- script ---\n{script}")
+        });
+
+    let hexes = "HEX(v_binary_coll), HEX(vb_varbinary), HEX(bl_blob)";
+    let (_, want) = fetch_all(
+        &state,
+        &format!("SELECT {hexes} FROM awkward_types WHERE id = 1;"),
+    )
+    .await;
+    let (_, got) = fetch_all(&state, &format!("SELECT {hexes} FROM binary_rerun;")).await;
+    assert_eq!(got, want, "the script did not reproduce the bytes");
+
+    exec::run_script(&state, T, "DROP TABLE binary_rerun;", false, None)
+        .await
+        .unwrap();
+}
