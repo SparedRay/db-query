@@ -716,6 +716,220 @@ pub(crate) async fn mysql_routine_ddl(
     crate::sqlgen::routine_script(db, name, kind, &crate::sqlfmt::tidy(&body))
 }
 
+// ------------------------------------------------- triggers, events, views
+//
+// New for Stage 22. None of the three was needed before: the tree shows
+// tables, views, columns and routines, and nothing else asked what a view
+// depends on.
+
+/// One trigger, as a dump needs to know it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerRef {
+    pub name: String,
+    /// The table it hangs off.
+    pub table: String,
+    /// "BEFORE" | "AFTER".
+    pub timing: String,
+    /// "INSERT" | "UPDATE" | "DELETE".
+    pub event: String,
+    /// **Its position among the triggers sharing this table, timing and
+    /// event**, and the only place that position is recorded.
+    ///
+    /// `SHOW CREATE TRIGGER` emits no `FOLLOWS` or `PRECEDES`, so the order
+    /// exists purely in the order they were created. Re-creating them in the
+    /// wrong one produces a schema that loads without complaint and computes
+    /// different values. Measured, 2026-10-14; see
+    /// `docs/stage-22-schema-export.md` §9.2.
+    /// `u32`, because the column is `INT UNSIGNED` — found by the live test
+    /// decoding it, not by reading the manual.
+    pub action_order: u32,
+}
+
+/// One scheduled event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRef {
+    pub name: String,
+}
+
+/// Every trigger in a database, **in the order they must be created**.
+pub(crate) async fn mysql_triggers(
+    server: &ServerConn,
+    db: &str,
+) -> Result<Vec<TriggerRef>, String> {
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    // Bound, not interpolated: this one takes a value rather than an
+    // identifier, unlike the `SHOW CREATE …` family above.
+    let rows = sqlx::query(
+        "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION,                 ACTION_ORDER          FROM information_schema.TRIGGERS          WHERE TRIGGER_SCHEMA = ?          ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER",
+    )
+    .bind(db)
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+
+    rows.into_iter()
+        .map(|r| {
+            Ok(TriggerRef {
+                name: r.try_get("TRIGGER_NAME").map_err(|e| friendly(&e))?,
+                table: r.try_get("EVENT_OBJECT_TABLE").map_err(|e| friendly(&e))?,
+                timing: r.try_get("ACTION_TIMING").map_err(|e| friendly(&e))?,
+                event: r.try_get("EVENT_MANIPULATION").map_err(|e| friendly(&e))?,
+                action_order: r.try_get("ACTION_ORDER").map_err(|e| friendly(&e))?,
+            })
+        })
+        .collect()
+}
+
+/// Every event in a database.
+pub(crate) async fn mysql_events(server: &ServerConn, db: &str) -> Result<Vec<EventRef>, String> {
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    let rows = sqlx::query(
+        "SELECT EVENT_NAME FROM information_schema.EVENTS          WHERE EVENT_SCHEMA = ? ORDER BY EVENT_NAME",
+    )
+    .bind(db)
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+
+    rows.into_iter()
+        .map(|r| {
+            Ok(EventRef {
+                name: r.try_get("EVENT_NAME").map_err(|e| friendly(&e))?,
+            })
+        })
+        .collect()
+}
+
+/// `SHOW CREATE TRIGGER` / `SHOW CREATE EVENT`, with the `sql_mode` the object
+/// was created under.
+///
+/// The mode is not decoration. A trigger written under one `sql_mode` can
+/// compute different values under another — `NO_ZERO_DATE` and
+/// `STRICT_TRANS_TABLES` both change what an assignment does — so the script
+/// sets it around each object, which is what `mysqldump` does.
+pub(crate) async fn mysql_object_ddl(
+    server: &ServerConn,
+    db: &str,
+    name: &str,
+    kind: ObjectDdl,
+) -> Result<ObjectDefinition, String> {
+    let qualified = crate::sqlgen::qualify(db, name)?;
+    let sql = format!("SHOW CREATE {} {qualified}", kind.keyword());
+
+    let row = {
+        let mut meta = server.mysql_meta().await?;
+        server.introspection_count.fetch_add(1, Ordering::SeqCst);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&mut *meta)
+            .await
+            .map_err(|e| friendly(&e))?
+    };
+
+    let body: Option<String> = row.try_get(kind.column()).map_err(|e| friendly(&e))?;
+    let body = body.filter(|b| !b.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "The server did not return a definition for {} {qualified}. This usually \
+             means the account lacks the privilege to see it.",
+            kind.keyword()
+        )
+    })?;
+    // Both absent on some versions, and neither worth failing an export over.
+    Ok(ObjectDefinition {
+        body,
+        sql_mode: row.try_get("sql_mode").unwrap_or_default(),
+        // Events only. An event's `STARTS` is an absolute timestamp read in
+        // the time zone it was created under, so restoring one without it
+        // moves the schedule by the offset between the two servers.
+        time_zone: row.try_get("time_zone").ok(),
+    })
+}
+
+/// One object's creation statement, with the session settings it has to be
+/// run under to mean the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectDefinition {
+    pub body: String,
+    pub sql_mode: String,
+    /// `Some` for events, `None` for triggers.
+    pub time_zone: Option<String>,
+}
+
+/// Which of the two `SHOW CREATE` forms above to ask for.
+///
+/// An enum for the same reason [`RoutineKind`] is one: the word goes straight
+/// into the statement, so only these two can reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectDdl {
+    Trigger,
+    Event,
+}
+
+impl ObjectDdl {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Trigger => "TRIGGER",
+            Self::Event => "EVENT",
+        }
+    }
+
+    /// The column `SHOW CREATE …` puts the body in, which is named after the
+    /// kind rather than being called anything consistent. Read off the server
+    /// on 2026-10-14 rather than remembered:
+    ///
+    /// ```text
+    /// SHOW CREATE TRIGGER → Trigger | sql_mode | SQL Original Statement | …
+    /// SHOW CREATE EVENT   → Event | sql_mode | time_zone | Create Event | …
+    /// ```
+    fn column(self) -> &'static str {
+        match self {
+            Self::Trigger => "SQL Original Statement",
+            Self::Event => "Create Event",
+        }
+    }
+}
+
+/// Which views read which objects, for the ordering in
+/// `docs/stage-22-schema-export.md` §4.3.
+///
+/// Only edges to **other views** are returned. A view's dependency on a base
+/// table decides nothing: tables are all written before any view.
+///
+/// `information_schema.VIEW_TABLE_USAGE` arrived in MySQL 8.0.13. An older
+/// server has no such table, and the error is handed back so the caller can
+/// fall back to name order and say so in the file rather than fail the export.
+pub(crate) async fn mysql_view_dependencies(
+    server: &ServerConn,
+    db: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut meta = server.mysql_meta().await?;
+    server.introspection_count.fetch_add(1, Ordering::SeqCst);
+    let rows = sqlx::query(
+        "SELECT u.VIEW_NAME AS viewer, u.TABLE_NAME AS viewed \
+         FROM information_schema.VIEW_TABLE_USAGE u \
+         JOIN information_schema.TABLES t \
+           ON t.TABLE_SCHEMA = u.TABLE_SCHEMA AND t.TABLE_NAME = u.TABLE_NAME \
+         WHERE u.VIEW_SCHEMA = ? AND u.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'VIEW'",
+    )
+    .bind(db)
+    .bind(db)
+    .fetch_all(&mut *meta)
+    .await
+    .map_err(|e| friendly(&e))?;
+
+    rows.into_iter()
+        .map(|r| {
+            Ok((
+                r.try_get("viewer").map_err(|e| friendly(&e))?,
+                r.try_get("viewed").map_err(|e| friendly(&e))?,
+            ))
+        })
+        .collect()
+}
+
 /// The lint schema for a tab's active database: lowercased table -> columns.
 /// Empty means "cache not warm yet", which suppresses all schema-aware lint
 /// checks rather than reporting every table as unknown.
@@ -803,6 +1017,46 @@ pub async fn table_ddl(
 ) -> Result<String, String> {
     let server = server(state, connection_id).await?;
     server.engine.table_ddl(&server, db, table).await
+}
+
+/// Stage 22's three, routed the same way: the connection decides which engine
+/// answers, so nothing above here knows there is more than one.
+pub async fn triggers(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<TriggerRef>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.triggers(&server, db).await
+}
+
+pub async fn events(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<EventRef>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.events(&server, db).await
+}
+
+pub async fn object_ddl(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+    name: &str,
+    kind: ObjectDdl,
+) -> Result<ObjectDefinition, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.object_ddl(&server, db, name, kind).await
+}
+
+pub async fn view_dependencies(
+    state: &AppState,
+    connection_id: &str,
+    db: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let server = server(state, connection_id).await?;
+    server.engine.view_dependencies(&server, db).await
 }
 
 pub async fn routine_ddl(

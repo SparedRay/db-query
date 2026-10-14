@@ -4,6 +4,7 @@ pub mod acp;
 pub mod agentcli;
 pub mod assistant;
 pub mod decode;
+pub mod dump;
 pub mod elastic;
 pub mod engine;
 pub mod exec;
