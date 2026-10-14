@@ -48,6 +48,9 @@ async function withExport(page: Page, extra: Record<string, unknown> = {}) {
   await connect(page, {
     connect: () => ({ ...CONN_INFO, databases: ["poc", "warehouse"] }),
     export_catalogue: () => CATALOGUE,
+    // A destination already chosen, with nothing in the way. The overwrite
+    // tests below override it.
+    export_destination: () => ({ path: "/tmp/dumps", existing: [] as string[] }),
     export_schema: () => OUTCOME,
     ...extra,
   });
@@ -62,7 +65,12 @@ async function openFromTree(page: Page) {
 
 const lastExport = async (page: Page) =>
   (await calls(page)).filter((c) => c.cmd === "export_schema").pop()?.args as
-    | { picks: Array<Record<string, unknown>>; options: Record<string, unknown>; layout: string }
+    | {
+        picks: Array<Record<string, unknown>>;
+        options: Record<string, unknown>;
+        layout: string;
+        target: string;
+      }
     | undefined;
 
 // ------------------------------------------------------------ getting there
@@ -292,10 +300,96 @@ test("the report says what was written and where", async ({ page }) => {
 
 /** Dismissing the file dialog is not an outcome to report. */
 test("cancelling the file dialog reports nothing", async ({ page }) => {
-  await withExport(page, { export_schema: () => null });
+  await withExport(page, { export_destination: () => null });
   await openFromTree(page);
   await page.click("#exp-ok");
 
   await expect(page.locator("#job-strip")).toBeHidden();
   await expect(page.locator("#grid")).not.toContainText("Exported");
+  // And nothing was read: the destination comes before any work.
+  expect((await calls(page)).some((c) => c.cmd === "export_schema")).toBe(false);
+});
+
+/**
+ * **Nothing claims to be happening until something is.**
+ *
+ * The destination used to be chosen inside `export_schema`, so the strip went
+ * up first and sat over an unanswered file dialog saying "Exporting schema",
+ * with a Stop that stopped nothing.
+ */
+test("the strip stays down while the destination is being chosen", async ({ page }) => {
+  let release!: (v: unknown) => void;
+  const held = new Promise((r) => {
+    release = r;
+  });
+  await withExport(page, { export_destination: () => held });
+  await openFromTree(page);
+  await page.click("#exp-ok");
+
+  // The dialog has closed, the picker is open, and the strip says nothing.
+  await expect(page.locator("#export-schema-dialog")).toBeHidden();
+  await expect(page.locator("#job-strip")).toBeHidden();
+
+  release({ path: "/tmp/dumps", existing: [] });
+  await expect(page.locator("#grid")).toContainText("Exported 2 tables");
+});
+
+// ------------------------------------------------- landing on existing files
+
+/**
+ * **The save dialog asks about one file; a folder picker cannot.**
+ *
+ * It does not know what we are about to put in the folder, so the
+ * per-database layout asks here instead (§5). The confirmation **names** the
+ * files rather than counting them, for the same reason the Flyway one names
+ * versions: "3 files will be overwritten" in a folder of forty is not
+ * something anybody can check.
+ */
+async function perDatabase(page: Page) {
+  await openFromTree(page);
+  await page.locator('#export-schema-dialog input[value="filePerDatabase"]').check();
+}
+
+test("files already in the folder are named, and Cancel writes nothing", async ({ page }) => {
+  await withExport(page, {
+    export_destination: () => ({ path: "/tmp/dumps", existing: ["poc.sql", "warehouse.sql"] }),
+  });
+  await perDatabase(page);
+  await page.click("#exp-ok");
+
+  const ask = page.locator("dialog.ask");
+  await expect(ask).toContainText("Overwrite 2 files?");
+  await expect(ask).toContainText("poc.sql");
+  await expect(ask).toContainText("warehouse.sql");
+  await expect(ask).toContainText("/tmp/dumps");
+
+  await ask.locator('button:has-text("Cancel")').click();
+  expect((await calls(page)).some((c) => c.cmd === "export_schema")).toBe(false);
+  // No strip either: the export never started.
+  await expect(page.locator("#job-strip")).toBeHidden();
+});
+
+test("Overwrite goes ahead with the destination already chosen", async ({ page }) => {
+  await withExport(page, {
+    export_destination: () => ({ path: "/tmp/dumps", existing: ["poc.sql"] }),
+  });
+  await perDatabase(page);
+  await page.click("#exp-ok");
+
+  await page.locator('dialog.ask button:has-text("Overwrite")').click();
+  const sent = await lastExport(page);
+  expect(sent?.target).toBe("/tmp/dumps");
+  expect(sent?.layout).toBe("filePerDatabase");
+  // Asked once. The second call would re-open the folder picker.
+  expect((await calls(page)).filter((c) => c.cmd === "export_destination")).toHaveLength(1);
+});
+
+/** An empty folder is not a question. */
+test("an empty folder asks nothing", async ({ page }) => {
+  await withExport(page);
+  await perDatabase(page);
+  await page.click("#exp-ok");
+
+  await expect(page.locator("dialog.ask")).toHaveCount(0);
+  await expect(page.locator("#grid")).toContainText("Exported 2 tables");
 });

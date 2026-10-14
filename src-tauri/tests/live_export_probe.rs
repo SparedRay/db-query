@@ -685,3 +685,108 @@ async fn dumped_rows_arrive_in_the_same_number_and_shape() {
     .collect();
     assert_eq!(source, loaded, "the rows are not byte-for-byte the same");
 }
+
+/// **The per-database layout, and the overwrite check that guards it.**
+///
+/// Everything above dumps one file, so nothing had exercised the branch that
+/// opens a sink per database — nor `existing`, whose whole job is to be right
+/// about names a real filesystem produced. Two databases into one folder, then
+/// the same export again: the second run must find exactly what the first
+/// wrote, and under the names `run` chose rather than the ones the identifiers
+/// suggest.
+///
+/// It also writes the script the recipe in `dev/README.md` is run against: one
+/// with its own `CREATE DATABASE` and `USE`, which the single-file tests
+/// deliberately do without.
+#[tokio::test]
+#[ignore = "needs the live fixture; writes files"]
+async fn one_file_per_database_is_written_and_then_found() {
+    use db_query_lib::dump::{Contents, DumpOptions};
+    use db_query_lib::dumprun::{self, DbPick, Job, Layout};
+
+    let dir = std::env::temp_dir().join("db-query-per-database");
+    // Not reused between runs: "already there" has to mean this run put it
+    // there, or the first assertion below passes for the wrong reason.
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let picks = [
+        DbPick {
+            db: "export_probe".into(),
+            tables: Some(vec!["t".into()]),
+            views: None,
+            routines: None,
+            triggers: None,
+            events: None,
+        },
+        DbPick {
+            db: "poc".into(),
+            tables: Some(vec!["users".into()]),
+            views: Some(vec![]),
+            routines: Some(vec![]),
+            triggers: Some(vec![]),
+            events: Some(vec![]),
+        },
+    ];
+    let options = DumpOptions {
+        contents: Contents::SchemaAndData,
+        // The layout exists so each file can be loaded on its own, which means
+        // each one has to say which database it is for.
+        create_database: true,
+        ..DumpOptions::default()
+    };
+
+    // An empty folder is not a question.
+    assert!(
+        dumprun::existing(&dir, &picks).is_empty(),
+        "a fresh directory reported files to overwrite"
+    );
+
+    let job = Job {
+        picks: &picks,
+        options: options.clone(),
+        layout: Layout::FilePerDatabase,
+        target: dir.clone(),
+    };
+    let outcome = db_query_lib::dumprun::run(&mut connect().await, &job, |_| {}, || false)
+        .await
+        .expect("the dump should run");
+
+    assert_eq!(outcome.files.len(), 2, "{:?}", outcome.files);
+    for f in &outcome.files {
+        let path = std::path::Path::new(f);
+        assert!(path.is_file(), "{f} was not renamed into place");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(
+            text.starts_with("-- "),
+            "{f} does not start with the header"
+        );
+        assert!(
+            text.contains("CREATE DATABASE IF NOT EXISTS"),
+            "{f} names no database, so it cannot be loaded on its own"
+        );
+    }
+    assert!(
+        !std::fs::read_to_string(&outcome.files[0])
+            .unwrap()
+            .contains("`poc`"),
+        "a per-database file carries another database's objects"
+    );
+
+    // **The second run finds the first one's files, by the names it wrote.**
+    assert_eq!(
+        dumprun::existing(&dir, &picks),
+        vec!["export_probe.sql", "poc.sql"],
+    );
+
+    // And the file it names is the file it would write over.
+    for (pick, name) in picks.iter().zip(["export_probe.sql", "poc.sql"]) {
+        assert_eq!(
+            dumprun::file_for(&dir, &pick.db),
+            dir.join(name),
+            "the confirmation and the write disagree"
+        );
+    }
+
+    println!("per-database scripts in {}", dir.display());
+}

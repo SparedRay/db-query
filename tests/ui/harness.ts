@@ -82,6 +82,9 @@ export const baseBackend: Backend = {
     triggers: [],
     events: [],
   }),
+  // "Dismissed", so a stray Export in an unrelated test writes nothing and
+  // asks nothing. The export specs override it.
+  export_destination: () => null,
   export_schema: () => null,
   export_schema_cancel: () => null,
   // And the preferences file, before anything else — `src/boot.ts`. "Nothing
