@@ -1,7 +1,9 @@
 # Stage 23 — Run a folder of SQL files, and keep every row
 
-**Status:** 🚧 In progress — 2026-10-14. UX settled with seven decisions
-(§3.5); eight facts measured (§9) and three of them changed the design.
+**Status:** ✅ Built — 2026-10-14. Seven UX decisions (§3.5), eight facts
+measured first (§9) with three of them changing the design, and a hands-on pass
+that found one bug (§9b.5). Proved by unit tests on the scan, five live tests
+on the runner against `dev/scripts`, and 20 UI tests on the dialog and report.
 
 The first draft of this plan described the architecture — a job, its own
 connection — and called that the UX. It was not: *how do you reach it, what
@@ -845,6 +847,44 @@ toggle.
 
 **18 UI tests for this feature; 501 on Chromium, 500 + 1 engine-skip on
 WebKit, 499 Rust unit.**
+
+### 9b.5 Found in use: a folder with no SQL in it did nothing, quietly — 2026-10-14
+
+> *"If i select a folder with no SQL it does not run. Does not show an error it
+> just does nothing when clicking on the button. Apart from that it worked
+> fine."*
+
+The hands-on pass found one bug, and its shape is the interesting part.
+
+`drawPreview` had five branches that each decided whether Run was possible, and
+each was separately responsible for saying so. The empty-folder branch
+**returned early**, set the grey hint line, and never reached the `say()` its
+sibling case used — so a folder of unrunnable scripts shouted into the red error
+line while an empty folder whispered in grey. Pressing a disabled button then
+did nothing, with nothing to read.
+
+Writing the test found a second half nobody had reported: **the disabled button
+had no `title` in any case**, so hovering it explained nothing either. Only the
+"another job is running" reason ever reached it.
+
+**The fix is one `blocker()`**, which returns the reason Run is unavailable and
+whether it is news or just the next step:
+
+* `error` — *we looked, and there is nothing here.* No `.sql` files, nothing
+  runnable, another job in the way, no connection, no connection that can.
+* `hint` — *this is the next step.* No folder yet, no destination yet. Not a
+  failure, so not red.
+
+Every branch now gets the error line **and** the button's title from the same
+answer, so a reason cannot be added that forgets to explain itself. The two
+connection-level messages moved in from `open()`, where they were said once and
+then painted over by the first redraw — a quieter instance of the same bug,
+found by moving the first one.
+
+Falsified both halves: the empty folder back to a hint fails one test, and
+dropping the button's title fails two.
+
+**503 UI tests on Chromium, 502 + 1 engine-skip on WebKit.**
 
 ## 10. Engines
 

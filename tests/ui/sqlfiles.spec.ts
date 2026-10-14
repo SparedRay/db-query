@@ -209,6 +209,51 @@ test("the preview lists every file, including the ones that will not run", async
   await expect(page.locator("#sf-summary")).toContainText("1 statement will write");
 });
 
+/**
+ * **Reported in use: "it just does nothing when clicking on the button."**
+ *
+ * A folder with no `.sql` files in it disabled Run and said so only in the grey
+ * hint line, because that branch returned early and never reached the `say()`
+ * its sibling case used — so a folder of unrunnable scripts shouted while an
+ * empty folder whispered. The press then did nothing, with nothing to read.
+ *
+ * Every reason Run is unavailable now comes from one place, and appears both in
+ * the error line and on the button, so a new reason cannot be added that
+ * forgets to explain itself.
+ */
+test("an empty folder says so, in the error line and on the button", async ({ page }) => {
+  await withFiles(page, {
+    sqlfiles_scan: () => ({ files: [], runnableFiles: 0, statements: 0, outputs: 0, writes: 0 }),
+  });
+  await page.click("#btn-sqlfiles");
+  await page.click("#sf-pick-source");
+
+  await expect(page.locator("#sf-error")).toBeVisible();
+  await expect(page.locator("#sf-error")).toContainText("No .sql files");
+  await expect(page.locator("#sf-ok")).toBeDisabled();
+  // Hovering a disabled button has to answer too.
+  await expect(page.locator("#sf-ok")).toHaveAttribute("title", /No \.sql files/);
+});
+
+/** And a folder whose files all turn out to be unrunnable reads the same way. */
+test("a folder of nothing-to-run says so too", async ({ page }) => {
+  await withFiles(page, {
+    sqlfiles_scan: () => ({
+      files: [{ path: "notes.sql", verdict: { type: "nothingToRun" }, statements: [] }],
+      runnableFiles: 0,
+      statements: 0,
+      outputs: 0,
+      writes: 0,
+    }),
+  });
+  await page.click("#btn-sqlfiles");
+  await page.click("#sf-pick-source");
+
+  await expect(page.locator("#sf-error")).toContainText("Nothing in that folder can be run");
+  await expect(page.locator("#sf-ok")).toBeDisabled();
+  await expect(page.locator("#sf-ok")).toHaveAttribute("title", /Nothing in that folder/);
+});
+
 test("Run waits for a destination", async ({ page }) => {
   await withFiles(page);
   await page.click("#btn-sqlfiles");
