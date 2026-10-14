@@ -1,7 +1,7 @@
 # Stage 23 — Run a folder of SQL files, and keep every row
 
-**Status:** 📋 Planned — 2026-10-14. UX settled with seven decisions (§3.5);
-six facts to measure before building (§9).
+**Status:** 🚧 In progress — 2026-10-14. UX settled with seven decisions
+(§3.5); eight facts measured (§9) and three of them changed the design.
 
 The first draft of this plan described the architecture — a job, its own
 connection — and called that the UX. It was not: *how do you reach it, what
@@ -268,6 +268,11 @@ This is why the scan happens **in Rust, at dialog time** (§6.2): the counts and
 the statement list come from the same `split` and `classify` the run will use,
 so the confirmation cannot describe a different plan from the one that executes.
 
+**And the statement it shows starts at the SQL, not at the comment above it.**
+§9.1 measured that a span owns its leading comment, so a confirmation built from
+`span.start` would list `-- rebuild the totals` where it means to list the
+`DELETE` underneath. §6.3.
+
 ### 4.2 Order, stated rather than assumed
 
 Files **alphabetically by path**, which is why people name them `01-setup.sql`,
@@ -310,7 +315,10 @@ rather than two that can disagree.
 ## 5. The run
 
 1. Its own connection — `ServerConn::open_private`, built in Stage 22.
-2. One `USE` for the database the dialog named (§3.1).
+2. One `USE` for the database the dialog named (§3.1). The job **tracks** which
+   database it is in rather than asking the server: §9.5 measured a cached
+   prepared `SELECT DATABASE()` replaying a stale answer with no error, which is
+   exactly how a report would confidently name the wrong database.
 3. Per file, in order: read through `files::read_file`, split, then per
    statement:
    * `engine::refusal` **first**, so a read-only connection refuses a write
@@ -319,7 +327,9 @@ rather than two that can disagree.
    * anything else → execute, and record the affected-row count for the report.
 4. `Progress` carries file *i* of *n*, statement *j* of *k*, and rows and bytes
    for the statement in flight — real progress, because we are the ones doing
-   it, exactly as Stage 22 §6.3 argued for the strip.
+   it, exactly as Stage 22 §6.3 argued for the strip. Reported **every 25,000
+   rows**, which §9.4 measured as about four a second, and the CSV is buffered
+   1,000 rows at a time because past that there is nothing left to win.
 5. Cancel is polled between statements and between rows, so Stop lands inside a
    big result rather than after it.
 6. Every CSV is written `.part` and renamed, under a `Drop` guard. A cancelled
@@ -354,15 +364,36 @@ Pure matters: every claim in §4.1 is then a unit test, and the one thing that
 cannot be tested that way (does the folder enumeration see what is actually on
 disk) is small enough to see.
 
-### 6.3 Byte offsets are not line numbers
+### 6.3 A span starts at the comment, so three things need the first code byte
 
-`split::StatementSpan` carries byte offsets. The confirmation wants
-`report.sql:42` and so does every error message. A helper in `split` turning an
-offset into a 1-based line is new, and §9.6 measures it against multi-byte
-characters, because "count the newlines" is right and "divide by something" is
-the bug.
+`split::StatementSpan` carries byte offsets, and §9.1 found that a span **owns
+the comment above it** — `-- header` then `SELECT 1` is one span starting at the
+dash. Three things the user reads are wrong if they use `span.start`:
 
-### 6.4 A band that outlives the tabs
+* the write confirmation (§4.1), which would show `-- header` where it means to
+  show the `INSERT` it is asking permission for;
+* the line in `report.sql:42`, which would name the comment's line;
+* the preview's "nothing to run", for a span that is *only* comment.
+
+So `split` gains two small functions: the 1-based line of a byte offset, and the
+first code byte of a span — the latter built on `mask_noncode`, which already
+knows where code is. A second opinion about MySQL comment syntax would be a
+second thing to get wrong. §9.6 measures both.
+
+### 6.4 Stripping a BOM, in the one place both readers share
+
+§9.7 measured MySQL refusing a statement with a leading BOM, and
+`files::read_file` does not strip one. That makes it a **latent bug in the
+editor** as well: open a BOM'd `.sql` today and running its first statement
+fails with a syntax error pointing at an invisible character.
+
+`files::read_file` is where it is fixed, because the batch runner and the editor
+both read through it. The `OpenedFile` it returns already records `encoding` and
+`lineEnding` honestly, so "this file had a BOM" belongs there too rather than
+being silently undone — a Save that dropped a BOM the file came with would be
+editing bytes nobody asked us to edit.
+
+### 6.5 A band that outlives the tabs
 
 `#flyway-pane` is the closest thing and the wrong shape: it *replaces* the grid,
 which is right for a migrations tab that has no result set and wrong for a
@@ -375,7 +406,7 @@ The honest cost: it is a third thing that can occupy that band, after
 reused (Stage 22), and this is the first that must coexist with the strip
 rather than replace it, because a run ends by turning one into the other.
 
-### 6.5 A quit that knows a job is running
+### 6.6 A quit that knows a job is running
 
 `files.confirmQuit` asks about unsaved buffers. Nothing asks about a job, so a
 schema export or a batch run dies silently on quit today. One predicate — *is a
@@ -430,30 +461,163 @@ time rule in §3.2 rather than being invented twice.
   another tab run a query and get its rows back while the job is still mid-
   stream. Without its own connection this blocks, and the test says so.
 
-## 9. The six facts to measure first
+## 9. The facts, measured — 2026-10-14
 
-Stage 22 measured six and two of them changed the design, which is the reason
-this section exists before any code.
+Stage 22 measured six and two of them moved the design, which is why this came
+before the code. Eight here, and **three change something**. All of them live in
+`src-tauri/tests/measure_sqlfiles.rs`, three offline and five `#[ignore]`d:
 
-1. **`split` on real files.** No trailing semicolon, a UTF-8 BOM, CRLF line
-   endings, a trailing comment after the last statement. Each of these is
-   ordinary in a file and absent from an editor buffer, and each could make the
-   statement count in the preview wrong.
-2. **A file of only comments.** Zero statements, or one empty span? The preview
-   has to say "nothing to run" rather than produce a zero-byte CSV.
-3. **Streaming, then the next statement, on one connection.** sqlx holds the
-   connection for the life of a `fetch` stream. Proving that the next statement
-   runs cleanly after a stream is dropped — and after a stream is *abandoned*
-   mid-way by a cancel — decides whether the job needs one connection or one per
-   statement.
-4. **CSV throughput** on the million-row `wide` table, so the progress line's
-   update rate and any buffering are chosen rather than guessed. Stage 22 §9.5
-   found batch size mattered 250× on load; the equivalent here is unknown.
-5. **A `USE` inside a script.** Does it persist to the next file on the same
-   connection? If it does, the report must name the database per file, or a
-   later script silently runs somewhere else.
-6. **Byte offset to line number** with multi-byte characters above the
-   statement, which is where an offset-based line number goes wrong.
+```bash
+cargo test --test measure_sqlfiles                       # §9.1, 9.2, 9.6
+mise run db-up && mise run export-probe-up
+cargo test --test measure_sqlfiles -- --ignored --nocapture --test-threads=1
+```
+
+### 9.1 `split` on real files — two findings ⚠️ design changed
+
+A file is not an editor buffer. Measured:
+
+| Shape | Statements |
+|---|---|
+| two plain statements | 2 ✅ |
+| no trailing semicolon | 2 ✅ |
+| CRLF | 2 ✅ |
+| `;;` between statements | 2 ✅ (no empty span) |
+| trailing comment after the last statement | 2 ✅ |
+| **UTF-8 BOM** | 2, and the BOM is **inside the first statement** ⚠️ |
+| **leading comment** | 1, and the span is `-- header` + newline + `SELECT 1` ⚠️ |
+| block comment between two statements | 2, attached to the **following** one |
+
+**A span owns the comment above it.** That is right for execution and wrong for
+everything the user reads: the write confirmation (§4.1) would show
+`-- header` where it means to show the `INSERT`, and the line number would point
+at the comment. So the preview and every message use the **first code byte** of
+a span, not its start — see §9.6.
+
+**The BOM is a bug, not a wrinkle** — see §9.7.
+
+### 9.2 Nothing to run is cleanly nothing ✅
+
+Six shapes — a line comment, a block comment, empty, whitespace, a lone `;`, a
+comment then `;` — all give **zero** statements, never an empty span. So the
+preview's "nothing to run" row is a count of zero rather than a special case,
+and the runner can never send an empty string to the server.
+
+### 9.3 A connection survives an abandoned stream ✅
+
+The fact that decides one connection or many. On one connection:
+
+* a stream read to the end, then another statement — works;
+* a stream **dropped after 5 of 7500 rows**, then another statement — works;
+* and again after that — works.
+
+So §5 keeps one connection for the whole job, and **Stop can land mid-result**
+without poisoning what follows. If this had failed, the job would have needed a
+connection per statement.
+
+### 9.4 CSV throughput: 64k rows/s, and the flush size barely matters ⚠️ design changed
+
+Streaming `export_probe.wide` (1,000,000 rows, 121 MB of CSV) through the real
+path — stream, `export::csv_row`, write:
+
+| Write every | Time | Rows/s | MB/s |
+|---|---|---|---|
+| 1 row | 18.43s | 54,272 | 6.6 |
+| 1,000 rows | 15.53s | 64,410 | 7.8 |
+| 100,000 rows | 15.57s | 64,214 | 7.8 |
+
+Two things follow. **Buffer 1,000 rows and stop thinking about it** — past that
+there is nothing left to win, and the gap from 1 to 1,000 is 19%, not the 250×
+Stage 22 §9.5 found for `INSERT` batching. Writing every row is *fine*, which
+was not obvious.
+
+**And the renderer is the bottleneck, not the server or the disk.** Stage 22
+measured the same table reading at ~317k rows/s with no rendering; adding CSV
+takes it to 64k. That is a 5× cost in `csv_row`, which allocates per field. Not
+fixed here — this feature does not need it — but it is where any future speed
+comes from, and the progress line should not pretend otherwise.
+
+**The progress tick follows from it.** At 64k rows/s a 250ms tick is one per
+16,000 rows, so progress reports every 25,000 rows rather than per row or per
+batch.
+
+### 9.5 `USE` persists — and the first measurement of it lied ⚠️ design changed
+
+The fact §3.4 rests on: the job runs every file on one connection, so a `USE`
+inside one script changes where later files run.
+
+**It does persist.** Both `Executor::execute("USE …")` and
+`sqlx::raw_sql("USE …")` change the session database, and it survives into the
+next statement.
+
+**The first attempt said the opposite**, and the measurement was wrong, not the
+server. It asked `SELECT DATABASE()` through `sqlx::query`, which prepares; sqlx
+caches prepared statements per connection by SQL text; MySQL resolves
+`DATABASE()` at **prepare** time. Prepared before the `USE`, the cached
+statement kept replaying the old answer:
+
+```
+prepared before USE:        Some("poc")
+same prepared after USE:    Some("poc")      <- stale, and no error
+text protocol after USE:    Some("export_probe")
+```
+
+Then a second wrong theory — that `execute` could not change the database and
+`raw_sql` could — survived until both were measured on connections that had
+never prepared the question. Neither theory was right. The instrument was the
+problem, twice.
+
+**What this changes:** §3.4 promises the report names the database each file ran
+against, and it **must not ask the server through the ordinary path** to find
+out. The job tracks it — which is what `session.rs` already does with
+`tab.current_db` — or reads it over the text protocol. A stale answer here would
+mean a report that confidently names the wrong database.
+
+The measurement now tests the **consequence** instead: `t` exists in
+`export_probe` and not in `poc`, so an unqualified `FROM t` is a question only
+the session's real database can answer.
+
+### 9.6 Byte offsets, line numbers, and the first code byte ✅
+
+Counting newline **bytes** in the prefix is the right arithmetic — a multi-byte
+character contains no `0x0A` — and spans always land on character boundaries, so
+slicing to one cannot panic on an accented comment.
+
+The useful part is §9.1's consequence. `split::mask_noncode` already knows where
+code is, so the first code byte is *the first non-whitespace byte of the masked
+span* — no second opinion about comment syntax, which would be a second thing to
+get wrong:
+
+```
+span at   0 (line 1) · code at  65 (line 2) · shows "SELECT 1"
+span at  75 (line 3) · code at  90 (line 4) · shows "SELECT 2"
+```
+
+It returns `None` for a span that is all comment, which is the same answer §9.2
+needs.
+
+### 9.7 A BOM is refused by the server ⚠️ design changed
+
+§9.1 left the BOM inside the first statement and `files::read_file` does not
+strip one. MySQL's verdict:
+
+```
+plain                  -> ok
+leading line comment   -> ok
+leading block comment  -> ok
+leading BOM            -> REFUSED: 1064 … You have an error in your SQL syntax
+BOM then comment       -> REFUSED: 1064 … near the invisible character
+```
+
+So **the reader strips a leading BOM**, and it is not optional. A `.sql` file
+saved by Notepad is exactly where a folder of hand-written scripts comes from,
+and without this the first file fails with a syntax error pointing at a
+character nobody can see.
+
+This is **a latent bug in the editor too**: open a BOM'd `.sql` file today and
+running its first statement fails the same way. Stripping it in
+`files::read_file` fixes both, and is the right place precisely because both
+paths read through it.
 
 ## 10. Engines
 

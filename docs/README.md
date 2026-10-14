@@ -29,7 +29,7 @@ decisions that were corrected along the way.
 | 20 | [The assistant through a CLI](stage-20-assistant-through-a-cli.md) | ✅ **Built** — answers from a CLI the person is already signed into (Claude Code, Copilot CLI) instead of an API key; tools stripped, nothing executed; a kept ACP session |
 | 21 | [The assistant docked](stage-21-the-assistant-docked.md) | ✅ **Built** — the chat is a panel rather than a modal, so nothing behind it is inert; one-click Run into a buffer; the window reopens where it was left; every Copy says what happened |
 | 22 | [Export a schema](stage-22-schema-export.md) | ✅ **Built** — a re-runnable script for selected databases, tables, views, routines, triggers and events, with or without data; one file or one per database; six facts measured first and two of them moved the design; proved by a round trip that loads the script back. Hands-on through the real UI outstanding — the recipe is in `dev/README.md` |
-| 23 | [Run a folder of SQL files](stage-23-run-sql-files.md) | 📋 **Planned** — select a folder, run every script in it, and write each result set out as CSV with all rows; a rail button, a progress strip that does not block the app, and a report that outlives the tab you were on; writes named before they run, a failure stops the batch; six facts to measure first |
+| 23 | [Run a folder of SQL files](stage-23-run-sql-files.md) | 🚧 **In progress** — select a folder, run every script in it, and write each result set out as CSV with all rows; a rail button, a progress strip that does not block the app, and a report that outlives the tab you were on; writes named before they run, a failure stops the batch; eight facts measured first and three of them changed the design |
 
 ## Rules
 

@@ -30,6 +30,11 @@ run = [
   "cargo test --manifest-path src-tauri/Cargo.toml --test sample_files",
   "cargo test --manifest-path src-tauri/Cargo.toml --test packaging",
   "cargo test --manifest-path src-tauri/Cargo.toml --test mcp_http",
+  # Stage 23 §9.1/9.2/9.6 — facts about `split` on real files, which are pure
+  # and so belong in the offline suite. They are measurements kept as tests:
+  # if `split` ever changes its mind about a leading comment, the design that
+  # was built on the answer should fail here.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test measure_sqlfiles",
   "node --test scripts/set-version.test.mjs",
   "node --test scripts/attribution.test.mjs",
 ]
@@ -55,6 +60,11 @@ run = [
   # reproduced, not run as part of a suite.
   "cargo test --manifest-path src-tauri/Cargo.toml --test live_export_probe -- --ignored --test-threads=1 --skip measure",
   "cargo test --manifest-path src-tauri/Cargo.toml --test keychain -- --ignored",
+  # Stage 23 §9.3/9.5/9.7 — an abandoned stream, `USE` persistence and the
+  # prepared-statement cache, all of which the design depends on and none of
+  # which can be read off the code. `--skip csv_throughput` leaves out the one
+  # that streams a million rows three times.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test measure_sqlfiles -- --ignored --test-threads=1 --skip csv_throughput",
 ]
 
 [tasks.set-version]
