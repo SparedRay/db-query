@@ -397,6 +397,47 @@ pub fn insert_header(row: &MySqlRow, opts: &InsertOptions) -> Result<String, Str
         .map(|d| format!("{d}\n"))
 }
 
+/// The SQL literal for one cell of a **live row**.
+///
+/// The one place that turns a row's cell into a literal, used by `insert_row`
+/// below and by the schema export's `stream_table` — the two writers of
+/// re-runnable scripts, which must not disagree about what a value looks like.
+///
+/// **Binary goes out as hex**, which is the whole reason this exists.
+/// `CellValue` keeps only a length for binary — it is built for a grid, and
+/// holding every BLOB in memory to render `<binary, 12 bytes>` would be absurd
+/// — so `sqlgen::literal` refuses one outright rather than write a placeholder
+/// into a script. Here the row is in hand, so the bytes are read straight off
+/// it.
+///
+/// Hex for **every** binary-typed column, not only the ones whose bytes fail to
+/// look like text: hex is the only spelling whose meaning does not depend on
+/// the loading client's `character_set_client`, and a column the user declared
+/// binary is one where that difference is the difference between the right
+/// bytes and the wrong ones.
+///
+/// The buffered path (`to_inserts`) still refuses binary instead of doing this,
+/// and that is not an oversight — it works from a result set the grid already
+/// decoded, where the bytes are gone and only the placeholder is left. The
+/// refusal is the honest answer there; this is the honest answer here.
+pub fn row_literal(row: &MySqlRow, idx: usize, column: &ColumnMeta) -> Result<String, String> {
+    let value = decode_cell(row, idx);
+    if matches!(value, CellValue::Null) {
+        return Ok("NULL".into());
+    }
+    if column.type_hint == TypeHint::Binary {
+        let bytes = crate::decode::cell_bytes(row, idx).ok_or_else(|| {
+            format!(
+                "Could not read the bytes of `{}`, so the export would have written \
+                 something other than what is stored.",
+                column.name
+            )
+        })?;
+        return Ok(sqlgen::binary_literal(&bytes));
+    }
+    sqlgen::literal(&value, column.type_hint)
+}
+
 /// One `INSERT` per row on the streaming path.
 ///
 /// Deliberately not batched: batching needs rows held back until a chunk is
@@ -412,10 +453,10 @@ pub fn insert_row(row: &MySqlRow, opts: &InsertOptions, buf: &mut String) -> Res
         .iter()
         .map(|c| sqlgen::quote_ident(&c.name))
         .collect::<Result<_, String>>()?;
-    let values: Vec<String> = row_cells(row)
+    let values: Vec<String> = columns
         .iter()
-        .zip(&columns)
-        .map(|(v, c)| sqlgen::literal(v, c.type_hint))
+        .enumerate()
+        .map(|(i, c)| row_literal(row, i, c))
         .collect::<Result<_, String>>()?;
     buf.push_str(&format!(
         "INSERT INTO {target} ({}) VALUES ({});\n",

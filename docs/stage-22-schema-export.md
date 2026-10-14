@@ -523,6 +523,55 @@ bytes raw and grep goes quiet on a binary file rather than reporting zero
 matches. `-a` is needed. Our own scripts stay text — `sqlgen::binary_literal`
 writes hex.
 
+### 9b.6 Two of Stage 6's deferred items, closed — 2026-10-14
+
+Stage 6 is frozen, so its list of deferred items cannot be edited; this is
+where the two it still named are answered.
+
+**"Export disagrees with the grid about binary."** Half of it was fixed long
+ago: a binary-*collation* `VARCHAR` renders as text in the grid and exports as
+text, which `export.rs`'s `text_in_a_binary_typed_column_still_exports` pins.
+The other half survived until this stage made it visible — the schema export
+writes a `BLOB` as hex, and the result-set export of the same column refused
+it.
+
+The refusal was right where it was made. A script built from the grid's rows
+*cannot* carry binary: `CellValue` keeps only a length, because it exists to be
+shown and holding every BLOB in memory to render `<binary, 4 bytes>` would be
+absurd. Writing the placeholder into a script would be the Stage 0 failure
+again — no error, wrong answer.
+
+But the **unbounded re-run** never had that excuse. It holds the `MySqlRow`, so
+the bytes are right there. So `export::row_literal` is now the one place that
+turns a live row's cell into a literal, used by `insert_row` and by the schema
+export's `stream_table`, which is what the streaming section's own comment
+already promised: *"using the same `decode` and `sqlgen` calls, so the two paths
+cannot disagree about what a value looks like."* It had drifted out of true the
+moment this stage needed something that module did not have.
+
+**Hex for every binary-typed column, not only the illegible ones.** The
+tempting refinement is to hex only when the bytes fail `bytes_as_text`, keeping
+a legible `VARBINARY` readable. It is wrong: a string literal's bytes depend on
+the loading client's `character_set_client`, and for a column somebody declared
+binary that is the difference between the right bytes and the wrong ones. Hex
+has one meaning everywhere.
+
+Proved live against `awkward_types`, which holds all three cases in one row — a
+`VARBINARY`, a `BLOB`, and a `utf8mb4_bin VARCHAR` whose bytes are perfectly
+legible text. The script is built, loaded, and the bytes compared with `HEX()`;
+asserting that we wrote `0x…` would only prove we wrote hex, not that the hex
+was right. It fails when `insert_row` is put back the way it was.
+
+**"Dead API surface."** `split_sql` and `has_stored_password` were already
+gone. `session::disconnect_all` was the last of the three, and it is **deleted
+rather than wired up**. Its comment said "used on shutdown", and there is no
+shutdown hook to use it from: Tauri's exit events are synchronous, so calling
+it would mean blocking the app's exit on a network round trip that can hang.
+What it buys is a polite `COM_QUIT` instead of an `Aborted connection` line in
+the server's log — `disconnect` itself notes that the `Arc` drop closes the
+sockets either way, and the OS closes them at exit regardless. A hang on quit
+is a much worse bug than a log line.
+
 ## 10. Engines
 
 Gated by a new `Capabilities::schema_export`, not by the engine's name — the

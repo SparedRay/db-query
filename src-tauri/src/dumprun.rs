@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use futures_util::StreamExt;
 use sqlx::{Executor, MySqlConnection, Row};
 
-use crate::decode::{columns_of, decode_cell};
+use crate::decode::columns_of;
 use crate::dump::{self, DumpOptions};
 use crate::schema::{self, ObjectDdl};
 
@@ -748,7 +748,7 @@ async fn stream_table(
         let row = row.map_err(|e| format!("Reading {qualified}: {e}"))?;
         let columns = columns_of(&row);
         let values: Vec<String> = (0..row.len())
-            .map(|i| cell_literal(&row, i, &columns[i]))
+            .map(|i| crate::export::row_literal(&row, i, &columns[i]))
             .collect::<Result<_, String>>()?;
 
         if in_batch == 0 {
@@ -787,40 +787,6 @@ async fn stream_table(
         bytes: sink.bytes,
     });
     Ok(rows)
-}
-
-/// One cell, as a literal.
-///
-/// **Binary columns do not go through `CellValue`.** That type carries only a
-/// length for binary — it exists to be shown in a grid, and holding every BLOB
-/// in memory to render "<binary, 12 bytes>" would be absurd — so
-/// `sqlgen::literal` refuses one outright rather than write a placeholder into
-/// a script. That refusal is right, and it is why the result-set export cannot
-/// write binary at all.
-///
-/// Here it can: the row is in hand, so the bytes are read straight off it and
-/// written as hex. Found by the round-trip test, which failed on the probe's
-/// `VARBINARY` column.
-fn cell_literal(
-    row: &sqlx::mysql::MySqlRow,
-    idx: usize,
-    column: &crate::decode::ColumnMeta,
-) -> Result<String, String> {
-    let value = decode_cell(row, idx);
-    if matches!(value, crate::decode::CellValue::Null) {
-        return Ok("NULL".into());
-    }
-    if column.type_hint == crate::decode::TypeHint::Binary {
-        let bytes = crate::decode::cell_bytes(row, idx).ok_or_else(|| {
-            format!(
-                "Could not read the bytes of `{}`, so the export would have written \
-                 something other than what is stored.",
-                column.name
-            )
-        })?;
-        return Ok(crate::sqlgen::binary_literal(&bytes));
-    }
-    crate::sqlgen::literal(&value, column.type_hint)
 }
 
 #[cfg(test)]
