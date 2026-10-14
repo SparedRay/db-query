@@ -71,6 +71,16 @@ podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/seed.sql
 echo "fixture ready on 127.0.0.1:3306 (root / devpassword, database poc)"
 """
 
+[tasks.export-probe-up]
+description = "Build the export_probe database (Stage 22: views on views, trigger order, 1M rows)"
+run = """
+until podman exec db-query-mysql mysqladmin ping -uroot -pdevpassword --silent 2>/dev/null; do
+  echo "waiting for the MySQL fixture (mise run db-up)…"; sleep 2
+done
+podman exec -i db-query-mysql mysql -uroot -pdevpassword < dev/export-probe.sql
+echo "export_probe ready (1,000,000 rows in wide)"
+"""
+
 [tasks.db-down]
 description = "Stop and remove the MySQL fixture container"
 run = "podman stop db-query-mysql && podman rm db-query-mysql"
