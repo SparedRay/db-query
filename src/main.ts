@@ -49,7 +49,7 @@ import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
 import { TabManager, clearResult, type ScriptTab, type TabKind } from "./tabs";
 import {
-  ConnectionManager, COLOURS, newConnectionId, type ConnectionEntry,
+  ConnectionManager, COLOURS, newConnectionId, serverLabel, type ConnectionEntry,
 } from "./connections";
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
@@ -2058,14 +2058,12 @@ conns = new ConnectionManager($("rail"), {
     // activation overwrites it. A test disagreed: reconnecting to a connection
     // whose tabs already exist activates nothing, so the line stands — and it
     // is the only confirmation the user gets that the reconnect worked.
-    // Optional-chained like `engineLabel` in connections.ts, and for the same
-    // reason: this is a cosmetic line, and a missing field in it must not be
-    // able to throw on the connect path. It did, once, in the ten minutes
-    // between writing it and running the tests.
-    const engine = info.capabilities?.engine;
-    const label = !engine ? "Server" : engine === "mysql" ? "MySQL" : engine;
+    // `serverLabel` rather than the same two lines again: this said
+    // `${info.serverVersion}` with no fallback, so a server that would not
+    // report its version would have printed the word `null` here.
     results.setMessage(
-      `Connected to ${entry.profile.name} — ${label} ${info.serverVersion}.`,
+      `Connected to ${entry.profile.name} — ` +
+        `${serverLabel(info.capabilities?.engine, info.serverVersion)}.`,
     );
 
     // Restored tabs are their own evidence — they are on screen. A tab that did

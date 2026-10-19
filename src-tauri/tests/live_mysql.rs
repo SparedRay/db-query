@@ -102,11 +102,8 @@ async fn m1_connects_and_lists_databases() {
     let info = session::connect(&state, config(), PASSWORD.into())
         .await
         .unwrap();
-    assert!(
-        info.server_version.starts_with('8'),
-        "got {}",
-        info.server_version
-    );
+    let version = info.server_version.clone().expect("MySQL always says");
+    assert!(version.starts_with('8'), "got {version}");
     assert!(info.databases.iter().any(|d| d == "poc"));
 
     // An unattached tab has no session at all.

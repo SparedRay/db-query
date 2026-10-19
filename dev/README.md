@@ -1,13 +1,15 @@
 # Dev fixtures
 
-Three throwaway containers for the milestone checks — MySQL, Elasticsearch and
-Ollama. All rootless podman, all bound to localhost, none of them something the
-app depends on at runtime. No sudo after the one-time `apt install podman`.
+Four throwaway containers for the milestone checks — MySQL, Elasticsearch
+(twice) and Ollama. All rootless podman, all bound to localhost, none of them
+something the app depends on at runtime. No sudo after the one-time
+`apt install podman`.
 
 | Fixture | Up | Down | Tests |
 |---|---|---|---|
 | MySQL 8 | `mise run db-up` | `mise run db-down` | `mise run test-live` |
 | Elasticsearch 8.15 | `mise run es-up` | `mise run es-down` | `mise run test-es` |
+| Elasticsearch, secured | `mise run es-secure-up` | `mise run es-secure-down` | `mise run test-es-secure` |
 | Ollama | `mise run ollama-up` | `mise run ollama-down` | `mise run test-ollama` |
 
 Each `*-up` task starts the container, waits for it to answer, and seeds it, so
@@ -49,6 +51,30 @@ covering a keyword, a double and a date. It is enough to prove the second
 engine end to end: `SELECT user, total FROM orders ORDER BY total DESC` returns
 rows through the ordinary grid, and `DELETE FROM orders` is refused before a
 request is sent — the capability model says this engine has no writes.
+
+### The secured one, on 9201
+
+Security off is what makes the fixture above one command, and it is also what
+made it blind: a cluster that cannot tell one account from another can never
+answer **403**, and a 403 was the whole of [Stage 11
+§12](../docs/stage-11-elasticsearch.md) — an account with index privileges and
+no cluster privileges could not connect at all.
+
+`es-secure-up` is a second cluster, on **9201**, with three accounts:
+
+| Account | Password | Holds |
+|---|---|---|
+| `elastic` | `measure-me-9201` | superuser: reads the root, reports a version |
+| `restricted` | `restricted-9201` | `index_admin` — no cluster privileges, everything on `orders*` |
+| `nobody` | `nobody-9201` | nothing at all: cannot run even `SELECT 1` |
+
+Connect as `restricted` with **Basic** auth and `http://localhost:9201`. The
+connection comes up, the tree fills, queries run — and the status shows the
+version as `?`, because `GET /` needs the `monitor` *cluster* privilege and
+nothing else this engine does needs any cluster privilege at all.
+
+TLS is off and the passwords are in the task, deliberately: the cluster holds
+two documents and exists to be thrown away.
 
 ## Ollama
 

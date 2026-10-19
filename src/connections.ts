@@ -109,10 +109,22 @@ export function address(p: ProfileView): string {
   return `${p.user}@${p.host}:${p.port}`;
 }
 
-function engineLabel(entry: ConnectionEntry): string {
-  const engine = entry.capabilities?.engine;
-  if (!engine) return "Server";
-  return engine === "mysql" ? "MySQL" : engine;
+/**
+ * What server this is, as a person reads it: `MySQL 8.4.0`, `elasticsearch ?`.
+ *
+ * **One formatter, two callers** — this tooltip and the connect line in
+ * `main.ts`, which used to spell the same thing out itself and had drifted:
+ * it had no fallback for a missing version at all. An Elasticsearch account
+ * without the `monitor` cluster privilege connects fine and cannot be told the
+ * version (Stage 11 §12), so `null` is an ordinary value here and must render
+ * as `?` wherever a version is shown.
+ *
+ * Optional-chained because this is cosmetic: a missing field in a tooltip must
+ * not be able to throw on the connect path. It did, once.
+ */
+export function serverLabel(engine: string | undefined, version: string | null | undefined): string {
+  const label = !engine ? "Server" : engine === "mysql" ? "MySQL" : engine;
+  return `${label} ${version ?? "?"}`;
 }
 
 export class ConnectionManager {
@@ -314,7 +326,7 @@ export class ConnectionManager {
       el.title =
         `${entry.profile.name}\n${address(entry.profile)}\n` +
         (entry.connected
-          ? `Connected — ${engineLabel(entry)} ${entry.serverVersion ?? "?"}`
+          ? `Connected — ${serverLabel(entry.capabilities?.engine, entry.serverVersion)}`
           : entry.saved
             ? "Saved, not connected"
             : "Not connected") +

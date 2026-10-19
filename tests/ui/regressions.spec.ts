@@ -559,6 +559,56 @@ test("a connection that needs no secret connects without asking", async ({ page 
 });
 
 /**
+ * A cluster that will not say what version it is still connects — and the
+ * places that show a version show `?`, not `null`.
+ *
+ * Reported in use (Stage 11 §12): an Elasticsearch account with index
+ * privileges and no cluster privileges was refused outright, because the probe
+ * asked `GET /` for a version and that endpoint needs the `monitor` *cluster*
+ * privilege. The backend now reports "connected, version unknown" as a state
+ * rather than a failure, which only helps if the frontend can render it: the
+ * connect line had no fallback at all, and would have printed the word `null`
+ * at the user.
+ */
+test("a cluster that will not report its version shows ? and still connects", async ({ page }) => {
+  await installBackend(page, {
+    list_profiles: () => ({
+      profiles: [
+        {
+          ...SAVED,
+          kind: "elasticsearch",
+          url: "http://localhost:9200",
+          auth: { type: "none" },
+          rememberPassword: false,
+          needsSecret: false,
+        },
+      ],
+      warning: null,
+    }),
+    connect_saved: () => ({
+      id: SAVED.id,
+      serverVersion: null,
+      databases: ["docker-cluster"],
+      currentDatabase: null,
+      capabilities: { engine: "elasticsearch", namespaceLabel: "catalog" },
+    }),
+  });
+  await visit(page);
+
+  await page.locator(".rail-item").click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+
+  // The tooltip, not the connect line: `setMessage` paints into `#grid`, and
+  // the first tab activation has already repainted it by the time this reads —
+  // the same overwrite Stage 12 argued about. Both now go through one
+  // `serverLabel`, so what is asserted here is what that line prints too.
+  const tip = (await page.locator(".rail-item").first().getAttribute("title")) ?? "";
+  expect(tip).toContain("Connected — elasticsearch ?");
+  expect(tip).not.toContain("null");
+  expect(tip).not.toContain("undefined");
+});
+
+/**
  * An older backend does not send `needsSecret` at all, and "we do not know"
  * must fall back to asking. Reading an absent value as "needs nothing" would
  * turn a missing field into a silently skipped password prompt.

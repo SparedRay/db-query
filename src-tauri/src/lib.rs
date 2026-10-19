@@ -461,7 +461,12 @@ async fn assistant_system(
     let (server_version, schema_text) = match connection_id {
         Some(id) => match session::server(state, id).await {
             Ok(server) => {
-                let version = server.server_version.clone();
+                // The prompt needs a word, not an `Option`: "unknown" is
+                // what the no-connection arms below already say.
+                let version = server
+                    .server_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
                 caps = Some(server.capabilities.clone());
 
                 // An engine with no namespaces — a local Elasticsearch cluster

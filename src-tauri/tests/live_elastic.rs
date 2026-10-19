@@ -22,7 +22,11 @@ fn engine() -> ElasticEngine {
 #[tokio::test]
 #[ignore]
 async fn the_cluster_reports_its_version() {
-    let v = engine().version().await.expect("is the fixture up?");
+    let v = engine()
+        .probe()
+        .await
+        .expect("is the fixture up?")
+        .expect("a cluster with security off reports its version");
     assert!(!v.is_empty());
     println!("elasticsearch {v}");
 }
@@ -183,7 +187,7 @@ async fn a_cluster_connects_and_runs_a_script_through_the_ordinary_path() {
     let info = session::connect(&state, profile(), String::new())
         .await
         .expect("connect failed — is the fixture up?");
-    assert!(!info.server_version.is_empty());
+    assert!(info.server_version.is_some_and(|v| !v.is_empty()));
     // The capabilities the UI will read come from the engine, not a guess.
     assert!(!info.capabilities.writes);
     assert_eq!(info.capabilities.engine, "elasticsearch");

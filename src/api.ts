@@ -345,7 +345,10 @@ export interface Capabilities {
 
 export interface ConnInfo {
   id: string;
-  serverVersion: string;
+  /** `null` when the server will not say — an Elasticsearch account without the
+   *  `monitor` cluster privilege can run every query here and still not be
+   *  allowed to read the cluster's version. Shown as `?`. */
+  serverVersion: string | null;
   databases: string[];
   currentDatabase: string | null;
   capabilities: Capabilities;
