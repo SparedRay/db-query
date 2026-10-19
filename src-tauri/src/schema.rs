@@ -299,7 +299,7 @@ pub async fn describe_cache(state: &AppState) -> String {
         out.push_str(&format!(
             "connection {id}\n  engine   {} {}\n  profile db {}\n",
             server.capabilities.engine,
-            server.server_version,
+            server.server_version.as_deref().unwrap_or("unknown"),
             server
                 .profile
                 .database

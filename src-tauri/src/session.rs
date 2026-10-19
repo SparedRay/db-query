@@ -228,7 +228,12 @@ fn default_colour() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct ConnInfo {
     pub id: ConnectionId,
-    pub server_version: String,
+    /// `None` when the server is reachable but will not say. Elasticsearch
+    /// reports its version only to an account holding the `monitor` cluster
+    /// privilege, and an account without it can still run every query in the
+    /// app — so "unknown" is a state a connection can be in, not a failure.
+    /// The frontend renders it as `?`.
+    pub server_version: Option<String>,
     pub databases: Vec<String>,
     pub current_database: Option<String>,
     /// What this engine supports. Sent to the frontend because a menu offering
@@ -280,7 +285,8 @@ pub struct ServerConn {
     /// Everything that differs between engines. MySQL's implementation is a
     /// dispatch vtable over the code that has always been here; see `mysql.rs`.
     pub engine: Box<dyn crate::engine::Engine>,
-    pub server_version: String,
+    /// `None` when the server would not say; see `ConnInfo::server_version`.
+    pub server_version: Option<String>,
     /// What this connection's engine supports. Held here so `exec` can ask
     /// without knowing which engine it is talking to.
     pub capabilities: crate::engine::Capabilities,
@@ -595,7 +601,7 @@ pub async fn connect(
         meta: Some(Mutex::new(meta)),
         schema_cache: Mutex::new(HashMap::new()),
         engine: Box::new(crate::mysql::MysqlEngine::new()),
-        server_version: server_version.clone(),
+        server_version: Some(server_version.clone()),
         capabilities: capabilities.clone(),
         introspection_count: AtomicU64::new(0),
     });
@@ -603,7 +609,7 @@ pub async fn connect(
 
     Ok(ConnInfo {
         id,
-        server_version,
+        server_version: Some(server_version),
         databases,
         current_database,
         capabilities,
@@ -671,7 +677,7 @@ pub async fn list_connections(state: &AppState) -> Vec<ConnectionStatus> {
                 colour: s.profile.colour.clone(),
                 host_label: s.host_label(),
                 connected: true,
-                server_version: Some(s.server_version.clone()),
+                server_version: s.server_version.clone(),
                 open_tabs: mine.len(),
                 running_tabs: mine
                     .iter()
@@ -942,9 +948,11 @@ async fn connect_elastic(
     let secret = (!password.is_empty()).then_some(password);
     let engine = crate::elastic::ElasticEngine::new(&profile.url, profile.auth.clone(), secret);
 
-    // Reachability and version in one call, before anything is stored: a
-    // connection that failed must leave no trace, exactly as for MySQL.
-    let server_version = engine.version().await?;
+    // Reachability, credentials and usability before anything is stored: a
+    // connection that failed must leave no trace, exactly as for MySQL. The
+    // version comes back only if this account may read it — see
+    // `ElasticEngine::probe`.
+    let server_version = engine.probe().await?;
     // Narrowed by the profile here, not inside the engine: what a *connection*
     // can do is the engine's declaration minus what its profile forbids, and
     // the engine has no opinion about that.
@@ -1015,7 +1023,7 @@ pub(crate) mod tests {
             meta: None,
             schema_cache: Mutex::new(HashMap::new()),
             engine: Box::new(engine),
-            server_version: "test".into(),
+            server_version: Some("test".into()),
             capabilities,
             introspection_count: AtomicU64::new(0),
         }))

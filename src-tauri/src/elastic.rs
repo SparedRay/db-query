@@ -269,8 +269,48 @@ impl ElasticEngine {
         Ok(page)
     }
 
-    /// The cluster's version, which doubles as a reachability check.
-    pub async fn version(&self) -> Result<String, String> {
+    /// Reachability, credentials, and the version **if this account may read
+    /// it**. `Ok(None)` means the cluster answered and the credentials were
+    /// accepted; the version simply is not ours to ask for.
+    ///
+    /// # Why the root response cannot be the gate
+    ///
+    /// Reported in use, 2026-10-19: a new connection was refused outright with
+    ///
+    /// > Not permitted: action [cluster:monitor/main] is unauthorized for user
+    /// > [...] with effective roles [index_admin], this action is granted by
+    /// > the cluster privileges [monitor,manage,all]
+    ///
+    /// `GET /` is the only endpoint that reports a version, and it needs the
+    /// `monitor` **cluster** privilege. Nothing else this engine does needs any
+    /// cluster privilege at all. Measured against 8.15.0 with a role of
+    /// `{"cluster": [], "indices": [{"names": ["orders*"], "privileges":
+    /// ["all"]}]}` (2026-10-19): `GET /` → 403, while `SELECT ... FROM`,
+    /// `SELECT 1`, `SHOW TABLES`, `SHOW CATALOGS` and `DESCRIBE` all → 200. So
+    /// the probe was demanding a privilege the app never uses, and turning away
+    /// accounts that could have run every query in it.
+    ///
+    /// # A 403 says more about the credentials than a 200 would
+    ///
+    /// Measured the same day: a wrong password and no password at all both come
+    /// back **401** ("unable to authenticate user", "missing authentication
+    /// credentials"). Only an authenticated request that is not authorised gets
+    /// 403. The status alone therefore separates "wrong password" — still
+    /// fatal — from "not allowed to ask", and a 403 is positive proof that the
+    /// credentials were accepted.
+    ///
+    /// # What the 403 falls back to
+    ///
+    /// `SELECT 1` over `_sql`: the thing the app is *for*, rather than the thing
+    /// that happens to report a version. It is a real check, not a formality —
+    /// an account holding no privileges at all gets 403 `indices:data/read/sql
+    /// ... granted by the index privileges [read,all]` from it (measured), and
+    /// that message is the actionable one. An account that gets past it can run
+    /// SQL, which is the whole of this engine.
+    ///
+    /// The ordinary path still costs one request. The second is paid only by an
+    /// account that cannot read the root.
+    pub async fn probe(&self) -> Result<Option<String>, String> {
         let response = self
             .auth
             .apply(self.client.get(&self.base), self.secret.as_deref())
@@ -280,15 +320,23 @@ impl ElasticEngine {
 
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
+        if status == 403 {
+            // Allowed to work, not allowed to ask. The `?` carries the SQL
+            // endpoint's own refusal, which names a privilege worth requesting.
+            self.query("SELECT 1", 1, None).await?;
+            return Ok(None);
+        }
         if !(200..300).contains(&status) {
             return Err(httpsql::error_message(status, &text));
         }
+        // A root response without a version number is the same state as a root
+        // response we are not allowed to see: the cluster is there and the
+        // version is not known. One encoding for it, not two.
         let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         Ok(v.get("version")
             .and_then(|v| v.get("number"))
             .and_then(|n| n.as_str())
-            .unwrap_or("unknown")
-            .to_string())
+            .map(str::to_owned))
     }
 }
 

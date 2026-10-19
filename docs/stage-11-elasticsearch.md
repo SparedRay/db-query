@@ -373,7 +373,8 @@ rather than a crash in someone's session.
 ## 10. What is still open
 
 - ~~**Nobody has clicked through it.**~~ Done 2026-09-09 — see §11, which is
-  what that review found.
+  what that review found. A second cluster, with a restricted account, was
+  tried on 2026-10-19 — see §12.
 - **Lint is still MySQL-flavoured** (§6 Phase 3). Schema-aware checks work
   because they read the tree; dialect-specific rules have not been audited.
 - **A new tab's `dialect` still says "mysql"** regardless of its connection,
@@ -459,3 +460,109 @@ seed's `{"index":{}}` mints a fresh document id per run, so **every `es-up`
 appended another copy of the fixture data**. `es-up` now deletes the index first
 and gives each document an explicit `_id`; running it twice leaves three
 documents. A fixture that is not idempotent lies the second time you use it.
+
+---
+
+## 12. The probe asked for a privilege the app never uses — 2026-10-19
+
+Reported from a second, real cluster. A new connection was refused outright:
+
+> Not permitted: action [cluster:monitor/main] is unauthorized for user
+> [...] with effective roles [index_admin], this action is granted by the
+> cluster privileges [monitor,manage,all]
+
+The existing connection kept working, because its account is privileged. The
+new one's was not, and the app would not let it in.
+
+### What the probe was doing
+
+`connect_elastic` opened with `engine.version()`, whose doc comment read "the
+cluster's version, which doubles as a reachability check". Two jobs in one call,
+and the one nobody had checked was the cost: `GET /` is the only endpoint that
+reports a version, and it needs the **`monitor` cluster privilege**.
+
+Nothing else this engine does needs any cluster privilege at all.
+
+### Measured, against 8.15.0 — 2026-10-19
+
+A cluster with security on and a role of
+`{"cluster": [], "indices": [{"names": ["orders*"], "privileges": ["all"]}]}`,
+which is the shape the report named:
+
+| Request | Result |
+|---|---|
+| `GET /` | **403** `cluster:monitor/main` |
+| `SELECT user, total FROM orders` | 200, rows |
+| `SELECT 1` | 200 |
+| `SHOW TABLES` | 200, the index it can see |
+| `SHOW CATALOGS` | 200, the cluster |
+| `DESCRIBE "orders"` | 200, the columns |
+
+So the account could have run **every query in the app**. The only thing it
+could not do was the thing the app insisted on before letting it try.
+
+Two more, because the fix turns on them:
+
+- **A wrong password, and no password, both return 401** ("unable to
+  authenticate user", "missing authentication credentials"). Only an
+  authenticated-but-unauthorised request returns 403. A 403 is therefore
+  positive evidence that the credentials were *accepted* — it says more about
+  them than a 200 from an endpoint that needs no privilege would.
+- **An account holding nothing at all gets 403 from `_sql` too**, naming
+  `indices:data/read/sql ... granted by the index privileges [read,all]`. So a
+  query is a real check, not a formality, and its message is the actionable one.
+
+### The fix
+
+`version()` became `probe()`, returning `Result<Option<String>, String>` — and
+the three answers it can give are now distinct:
+
+| | |
+|---|---|
+| `Ok(Some(v))` | the root answered; this is its version |
+| `Ok(None)` | the cluster is there and the credentials are good; the version is not ours to read |
+| `Err(_)` | unreachable, or the credentials were rejected, or this account cannot query |
+
+On a 403 it asks `SELECT 1` over `_sql` — **the thing the app is for**, rather
+than the thing that happens to report a version. An account that gets past that
+can run SQL, which is the whole of this engine; an account that cannot is
+refused with the privilege it is actually short of, instead of with
+`cluster:monitor/main`, which was never the problem.
+
+The ordinary path still costs one request. The second is paid only by an account
+that cannot read the root.
+
+### "Unknown" is a state, so it has a type
+
+`version()` returned `"unknown"` when a root response carried no version
+number — a magic string nobody looked at. With the probe, "connected and the
+version is not known" became an ordinary outcome, so it is an `Option` the whole
+way up: `ConnInfo.server_version` and `ServerConn.server_version` are
+`Option<String>`, `ConnectionStatus` already was (its `Some(...)` wrapper is now
+simply gone), and the assistant prompt and `describe_cache` say the word
+"unknown" at the edge where a sentence needs one.
+
+The frontend shows `?`. It already did in the rail tooltip; **the connect line
+did not** — it interpolated `info.serverVersion` raw and would have printed the
+word `null` at the user. Both now go through one `serverLabel(engine, version)`
+in `connections.ts`, which is also the duplicated engine-label logic the old
+comment in `main.ts` apologised for.
+
+### A fixture that can say no
+
+The live Elasticsearch suite runs against `es-up`, which sets
+`xpack.security.enabled=false`. **It can never produce a 403**, which is why
+nothing failed: there was no account to be short of a privilege. Two things came
+out of that:
+
+- **`mise run es-secure-up`** — a second cluster on 9201 with security on and
+  three accounts (superuser, index-only, nothing-at-all).
+  `tests/live_elastic_secure.rs` drives all three through `session::connect`,
+  and is where the measurements above came from.
+- **`tests/elastic_probe.rs`** — the same branches against canned HTTP, in the
+  *offline* suite, bodies copied from that cluster. A regression test that needs
+  a container is a regression test that does not run.
+
+Falsified three ways: removing the 403 branch, trusting it without the `SELECT
+1`, and folding 401 in with 403 each fail their own test. The frontend's `?`
+falsifies too — without the fallback the tooltip reads `elasticsearch null`.

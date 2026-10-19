@@ -39,6 +39,10 @@ run = [
   # on purpose. Needs no server, so there is no excuse for postponing it — the
   # dialog's own backend call is exactly the gap Stage 22 §9b.7 fell into.
   "cargo test --manifest-path src-tauri/Cargo.toml --test sqlfiles_scan",
+  # Stage 11 §12 — the connect probe against canned HTTP. Offline on purpose:
+  # the live Elasticsearch fixture runs with security off and can never answer
+  # 403, so the branch a user actually hit has no other cover here.
+  "cargo test --manifest-path src-tauri/Cargo.toml --test elastic_probe",
   "node --test scripts/set-version.test.mjs",
   "node --test scripts/attribution.test.mjs",
 ]
@@ -200,6 +204,75 @@ echo "elasticsearch ready on http://localhost:9200 (index: orders, 3 docs)"
 description = "Stop and remove the Elasticsearch fixture"
 run = "podman stop db-query-es && podman rm db-query-es"
 
+# A **second** cluster, with security on, on 9201 — not a flag on `es-up`.
+#
+# `es-up` deliberately runs with security off, which is why it is a one-command
+# fixture; but a cluster that cannot tell one account from another cannot
+# produce a 403, and a 403 is the whole of Stage 11 §12. An index-only account
+# could not connect at all, because the probe asked `GET /` for a version and
+# `GET /` needs the `monitor` *cluster* privilege. Nothing else this engine does
+# needs any cluster privilege, so there was no test anywhere that could fail.
+#
+# Three accounts, because the fix turns on telling them apart:
+#   elastic    — superuser: reads the root, reports a version
+#   restricted — `index_admin`: no cluster privileges, full rights on `orders*`
+#   nobody     — nothing at all: cannot even run `SELECT 1`
+#
+# TLS is off so the fixture stays one command. It holds two documents and a
+# throwaway password; nothing here is a secret worth having.
+[tasks.es-secure-up]
+description = "Start a second Elasticsearch fixture with security on, and three accounts"
+run = """
+set -e
+if podman container exists db-query-es-secure; then
+  podman start db-query-es-secure >/dev/null
+else
+  podman run -d --name db-query-es-secure     -e discovery.type=single-node     -e xpack.security.enabled=true     -e xpack.security.http.ssl.enabled=false     -e xpack.security.transport.ssl.enabled=false     -e xpack.license.self_generated.type=basic     -e ELASTIC_PASSWORD=measure-me-9201     -e ES_JAVA_OPTS='-Xms512m -Xmx512m'     -p 9201:9200 docker.elastic.co/elasticsearch/elasticsearch:8.15.0 >/dev/null
+fi
+
+su="-u elastic:measure-me-9201"
+i=1
+until curl -sf $su http://localhost:9201/ >/dev/null 2>&1; do
+  if [ "$i" -gt 60 ]; then
+    echo "the secured cluster did not answer in 180s. Try: podman logs db-query-es-secure" >&2
+    exit 1
+  fi
+  if [ "$i" = 2 ]; then echo "waiting for Elasticsearch to finish starting…"; fi
+  i=$((i + 1))
+  sleep 3
+done
+
+# Idempotent for the same reason `es-up` is: `{"index":{}}` mints a new id per
+# run, so a seed without explicit `_id`s appends another copy every time.
+curl -s -X DELETE $su http://localhost:9201/orders >/dev/null
+curl -sf -X PUT $su http://localhost:9201/orders -H 'content-type: application/json' -d '{
+  "mappings": {"properties": {
+    "user": {"type": "keyword"},
+    "total": {"type": "double"},
+    "created_at": {"type": "date"}
+  }}
+}' >/dev/null
+curl -sf -X POST $su http://localhost:9201/orders/_bulk -H 'content-type: application/x-ndjson' --data-binary '
+{"index":{"_id":"1"}}
+{"user":"ada","total":120.5,"created_at":"2026-01-02T00:00:00Z"}
+{"index":{"_id":"2"}}
+{"user":"grace","total":80.0,"created_at":"2026-01-03T00:00:00Z"}
+' >/dev/null
+curl -sf -X POST $su http://localhost:9201/orders/_refresh >/dev/null
+
+curl -sf -X PUT $su http://localhost:9201/_security/role/index_admin   -H 'content-type: application/json'   -d '{"cluster":[],"indices":[{"names":["orders*"],"privileges":["all"]}]}' >/dev/null
+curl -sf -X PUT $su http://localhost:9201/_security/user/restricted   -H 'content-type: application/json'   -d '{"password":"restricted-9201","roles":["index_admin"]}' >/dev/null
+curl -sf -X PUT $su http://localhost:9201/_security/role/nothing_at_all   -H 'content-type: application/json' -d '{"cluster":[],"indices":[]}' >/dev/null
+curl -sf -X PUT $su http://localhost:9201/_security/user/nobody   -H 'content-type: application/json'   -d '{"password":"nobody-9201","roles":["nothing_at_all"]}' >/dev/null
+
+echo "secured elasticsearch ready on http://localhost:9201 (index: orders, 2 docs)"
+echo "  elastic/measure-me-9201 · restricted/restricted-9201 · nobody/nobody-9201"
+"""
+
+[tasks.es-secure-down]
+description = "Stop and remove the secured Elasticsearch fixture"
+run = "podman stop db-query-es-secure && podman rm db-query-es-secure"
+
 # Flyway is **not** run in a container, deliberately. The app invokes the user's
 # own CLI with its working directory set to the project folder, because that is
 # how a relative `locations` resolves. In a container the paths are mounts, the
@@ -264,6 +337,10 @@ run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_flyway -- --i
 [tasks.test-es]
 description = "Tests needing the Elasticsearch fixture (see es-up)"
 run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic -- --ignored --test-threads=1"
+
+[tasks.test-es-secure]
+description = "Tests needing the secured Elasticsearch fixture (see es-secure-up)"
+run = "cargo test --manifest-path src-tauri/Cargo.toml --test live_elastic_secure -- --ignored --test-threads=1"
 
 # The model is small on purpose: it runs on CPU in a couple of GB, and the
 # point of the fixture is to prove the OpenAI-compatible adapter is real, not
