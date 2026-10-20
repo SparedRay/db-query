@@ -442,10 +442,30 @@ export interface FlywayApplyFailed {
   suggestsRepair: boolean;
 }
 
+/**
+ * One `flyway info`, and enough to know later whether it is still true.
+ *
+ * `folders` are the folders Flyway read the migrations from — its own
+ * `filepath`s, never `locations`. `fingerprint` digests those folders' contents
+ * (Stage 24 §2.2): ask `flywayFingerprint` for the same folders later, and an
+ * identical answer means the files have not moved, so this reading still
+ * describes what an apply would do. Matching costs milliseconds where asking
+ * Flyway costs seconds.
+ */
+export interface FlywayReading {
+  migrations: FlywayMigration[];
+  folders: string[];
+  fingerprint: string;
+}
+
 /** What an apply did. `executed` is Flyway's own count. */
 export interface FlywayApplied {
   executed: number;
   target: string | null;
+  /** The list as it is now, from an `info` that ran in the same invocation —
+   *  free. `null` for a targeted apply (not batched) or a failed one, and the
+   *  caller then asks for itself. */
+  info: FlywayReading | null;
 }
 
 /** One migration a repair touched. Enough to name it; the row it describes is
@@ -469,6 +489,8 @@ export interface FlywayRepaired {
   removed: FlywayTouched[];
   deleted: FlywayTouched[];
   aligned: FlywayTouched[];
+  /** As `FlywayApplied.info`: the refreshed list, from the same invocation. */
+  info: FlywayReading | null;
 }
 
 export interface ProfileList {
@@ -1028,7 +1050,12 @@ export const api = {
    *  is on the PATH. `outOfOrder` is asked with the same flag an apply would
    *  use, so what is reported as pending is what Flyway would actually run. */
   flywayInfo: (projectId: string, environment: string, program: string, outOfOrder: boolean) =>
-    invoke<FlywayMigration[]>("flyway_info", { projectId, environment, program, outOfOrder }),
+    invoke<FlywayReading>("flyway_info", { projectId, environment, program, outOfOrder }),
+
+  /** Has anything in these folders changed? The cheap half of Stage 24: ~4ms
+   *  for a thousand files, against ~4.8s for a `flyway info`. Compare the
+   *  answer with the `fingerprint` of the reading those folders came from. */
+  flywayFingerprint: (folders: string[]) => invoke<string>("flyway_fingerprint", { folders }),
 
   /** Apply the pending migrations. Rust refuses if the target moved since
    *  `confirmed` was shown, or if any matching connection is read-only. */
@@ -1060,8 +1087,17 @@ export const api = {
     environment: string,
     confirmed: FlywayConfirmed,
     program: string,
+    // Not repair's own business: it steers the `info` that runs in the same
+    // invocation, so the refreshed list matches what the pane was showing.
+    outOfOrder: boolean,
   ) =>
-    invoke<FlywayRepaired>("flyway_repair", { projectId, environment, confirmed, program }),
+    invoke<FlywayRepaired>("flyway_repair", {
+      projectId,
+      environment,
+      confirmed,
+      program,
+      outOfOrder,
+    }),
 
   /** The whole diagnostic report — build, Flyway probe, log tail — as text
    *  meant to be pasted where somebody can read it. */

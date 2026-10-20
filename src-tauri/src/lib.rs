@@ -1723,7 +1723,7 @@ async fn flyway_info(
     environment: String,
     program: String,
     out_of_order: bool,
-) -> Result<Vec<flywaycli::Migration>, String> {
+) -> Result<flywaycli::Reading, String> {
     let (path, _, _) = flyway_target(&app, &project_id)?;
 
     let program = program_or_default(program);
@@ -1735,7 +1735,7 @@ async fn flyway_info(
         &program,
         std::path::Path::new(&path),
         &environment,
-        "info",
+        &["info"],
         out_of_order_flag(out_of_order),
     )
     .await?;
@@ -1753,7 +1753,29 @@ async fn flyway_info(
             out.stderr.trim()
         ));
     }
-    flywaycli::migrations(&out.stdout)
+    // The list, the folders it came out of, and a fingerprint of them — so the
+    // next write dialog can find out whether this answer is still true without
+    // starting another JVM. Stage 24 §2.2.
+    flywaycli::Reading::of(&out.stdout)
+}
+
+/// Has anything changed in these folders since a reading was taken?
+///
+/// **The whole point of Stage 24.** `flyway info` costs ~4.8s whatever it
+/// finds, because the cost is JVM start; this costs ~4ms for a thousand files.
+/// A matching fingerprint means the migration files are byte-for-byte the ones
+/// the stored reading described, so the confirmation built from it still
+/// describes what will run.
+///
+/// The folders are the ones a previous `info` reported, handed back by the
+/// caller. Nothing here resolves `locations`; see `flywaycli::folders_of`.
+#[tauri::command]
+async fn flyway_fingerprint(folders: Vec<String>) -> Result<String, String> {
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || flywaycli::fingerprint(&folders))
+            .await
+            .map_err(|e| format!("The migration folders could not be read: {e}"))?,
+    )
 }
 
 /// The `-target` flag for "apply up to here", or nothing.
@@ -1830,6 +1852,13 @@ pub struct Applied {
     pub executed: u32,
     /// The schema version afterwards, when Flyway reports one.
     pub target: Option<String>,
+    /// The list as it is **now**, read by an `info` that ran in the same
+    /// invocation — free, and fresher than a second process could be.
+    ///
+    /// `None` when there was none to read: a targeted apply, which is not
+    /// batched (see below), or an apply that failed and took the rest of the
+    /// batch down with it. The caller then asks for itself, as it always did.
+    pub info: Option<flywaycli::Reading>,
 }
 
 /// Apply this connection's pending migrations.
@@ -1870,6 +1899,19 @@ async fn flyway_migrate(
 
     let mut flags = out_of_order_flag(out_of_order);
     flags.extend(target_flag(target.as_deref()));
+    // **The refresh rides along, unless this is a targeted apply.**
+    //
+    // Flyway's flags are invocation-wide, and `-target` does not only steer
+    // `migrate`: measured against 13.5.0 on 2026-10-19, `-target=2 migrate
+    // info` reported V3 and V4 as `Above Target` rather than `Pending`, which
+    // `Migration::group()` maps to `Done` — so a batched refresh after "apply
+    // up to here" would show the migrations it deliberately left alone as
+    // though they had run. That path keeps its two invocations.
+    let ops: &[&str] = if target.is_some() {
+        &["migrate"]
+    } else {
+        &["migrate", "info"]
+    };
     logbook::info(
         "flyway",
         format!(
@@ -1881,7 +1923,7 @@ async fn flyway_migrate(
         &program_or_default(program),
         std::path::Path::new(&path),
         &environment,
-        "migrate",
+        ops,
         flags,
     )
     .await
@@ -1900,9 +1942,12 @@ async fn flyway_migrate(
             message: c.message,
         });
     }
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).map_err(|e| {
+    let doc: serde_json::Value = serde_json::from_str(&out.stdout).map_err(|e| {
         ApplyFailed::ours(format!("Flyway's answer could not be read as JSON: {e}"))
     })?;
+    // The migrate's own result, whether it came alone or with the info behind
+    // it. `result_for` is the one place that knows the two shapes.
+    let v = flywaycli::result_for(&doc, "migrate").unwrap_or(&doc);
     let executed = v
         .get("migrationsExecuted")
         .and_then(|x| x.as_u64())
@@ -1922,7 +1967,26 @@ async fn flyway_migrate(
             .get("targetSchemaVersion")
             .and_then(|x| x.as_str())
             .map(str::to_string),
+        // Best effort by construction: the apply succeeded, and a refresh that
+        // could not be read is a reason to ask again, never a reason to report
+        // a successful apply as failed.
+        info: flywaycli::Reading::of(&out.stdout).ok(),
     })
+}
+
+/// What a repair did, and the list as it is now.
+///
+/// Flattened, so the frontend reads `removed` / `deleted` / `aligned` exactly
+/// where it always has, and `info` is simply one more field.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairOutcome {
+    #[serde(flatten)]
+    pub repaired: flywaycli::Repaired,
+    /// From the `info` that ran in the same invocation. `None` only when that
+    /// could not be read, which is a reason to ask again rather than to call
+    /// the repair a failure.
+    pub info: Option<flywaycli::Reading>,
 }
 
 /// Repair this environment's schema history.
@@ -1946,7 +2010,11 @@ async fn flyway_repair(
     environment: String,
     confirmed: flyway::Confirmed,
     program: String,
-) -> Result<flywaycli::Repaired, String> {
+    // Not repair's business — it steers the `info` that follows in the same
+    // invocation, so the refreshed list is the one the pane was showing.
+    // Measured harmless on a batched `repair info` (13.5.0, 2026-10-19).
+    out_of_order: bool,
+) -> Result<RepairOutcome, String> {
     let (path, project, profiles) = flyway_target(&app, &project_id)?;
     if let Some(reason) = flyway::write_refusal(
         &project,
@@ -1960,12 +2028,13 @@ async fn flyway_repair(
     }
 
     logbook::info("flyway", format!("repairing {environment}"));
+    // The refresh rides along: one JVM instead of two (Stage 24 §2.1).
     let out = flywaycli::run(
         &program_or_default(program),
         std::path::Path::new(&path),
         &environment,
-        "repair",
-        vec![],
+        &["repair", "info"],
+        out_of_order_flag(out_of_order),
     )
     .await?;
 
@@ -1983,7 +2052,10 @@ async fn flyway_repair(
             out.stderr.trim()
         ));
     }
-    flywaycli::repaired(&out.stdout)
+    Ok(RepairOutcome {
+        repaired: flywaycli::repaired(&out.stdout)?,
+        info: flywaycli::Reading::of(&out.stdout).ok(),
+    })
 }
 
 /// A project's path, the project as the file reads **now**, and the saved
@@ -2364,6 +2436,7 @@ pub fn run() {
             flyway_remove_project,
             flyway_select_environment,
             flyway_info,
+            flyway_fingerprint,
             flyway_migrate,
             flyway_repair,
             open_tab,

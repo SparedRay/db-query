@@ -91,12 +91,18 @@ fn remember(op: &str, finished: &Finished) {
     }
 }
 
-/// Build the arguments for one operation. Split out from the spawning so the
+/// Build the arguments for one invocation. Split out from the spawning so the
 /// **shape of the command line is testable without running anything.**
+///
+/// **`ops` is a list because Flyway takes a list.** Measured against 13.5.0 on
+/// 2026-10-19: `repair migrate info` ran all three in one JVM in 4.83s, where
+/// three separate invocations cost 4.8s *each* — nearly all of it JVM start,
+/// which a thousand migrations add half a second to (Stage 24 §1). The order
+/// is the order they run in.
 pub fn arguments(
     config_file_name: &str,
     environment: &str,
-    op: &str,
+    ops: &[&str],
     extra: &[String],
 ) -> Vec<String> {
     let mut args = vec![
@@ -106,8 +112,10 @@ pub fn arguments(
         "-outputType=json".to_string(),
     ];
     args.extend(extra.iter().cloned());
-    // The operation last: it is what the flags apply to.
-    args.push(op.to_string());
+    // The operations last: they are what the flags apply to. Flags are
+    // invocation-wide, which is why a targeted apply is not batched — see
+    // `lib.rs`'s `flyway_migrate`.
+    args.extend(ops.iter().map(|op| op.to_string()));
     args
 }
 
@@ -378,7 +386,7 @@ fn section(name: &str, text: &str) -> String {
     }
 }
 
-/// Run one Flyway operation against a project file.
+/// Run Flyway operations against a project file, in one invocation.
 ///
 /// `project` is the path to the `flyway.toml`; its folder becomes the working
 /// directory and only its file name is passed to `-configFiles`, which is
@@ -387,7 +395,7 @@ pub async fn run(
     program: &str,
     project: &Path,
     environment: &str,
-    op: &str,
+    ops: &[&str],
     extra: Vec<String>,
 ) -> Result<Finished, String> {
     let dir: PathBuf = project
@@ -400,7 +408,7 @@ pub async fn run(
         .ok_or_else(|| format!("{} is not a readable file name.", project.display()))?
         .to_string();
 
-    let args = arguments(&file, environment, op, &extra);
+    let args = arguments(&file, environment, ops, &extra);
     spawn(program, args, Some(dir)).await
 }
 
@@ -597,14 +605,59 @@ impl Complaint {
     }
 }
 
+// ------------------------------------------------- one output, several results
+
+/// Flyway's answer, parsed once.
+fn document(stdout: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(stdout)
+        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))
+}
+
+/// The result of one operation inside an answer that may hold several.
+///
+/// **Two shapes, because Flyway sends two.** Measured against 13.5.0 on
+/// 2026-10-19:
+///
+///   * one operation → the result *is* the document, with `"operation"` naming
+///     it;
+///   * several that all succeeded → `{"individualResults": [ … ]}`, one object
+///     per operation, in the order they ran;
+///   * several where one **failed** → the single shape again, for the operation
+///     that failed, and the rest never ran.
+///
+/// So this is the one place that knows the difference, and every reader below
+/// goes through it. A document whose `"operation"` says nothing is returned as
+/// itself: older Flyway output, and the shape most of this module's fixtures
+/// were captured in.
+pub fn result_for<'a>(doc: &'a serde_json::Value, op: &str) -> Option<&'a serde_json::Value> {
+    if let Some(list) = doc.get("individualResults").and_then(|r| r.as_array()) {
+        return list
+            .iter()
+            .find(|r| r.get("operation").and_then(|o| o.as_str()) == Some(op));
+    }
+    match doc.get("operation").and_then(|o| o.as_str()) {
+        Some(theirs) if theirs != op => None,
+        _ => Some(doc),
+    }
+}
+
 /// Pull `{ "error": { … } }` out of any operation's output.
 ///
 /// Checked **before** the success shape, because a refused `migrate` returns an
 /// object with nothing else in it — no `migrations`, no `success` — so code
 /// that reads the success shape first sees an empty run rather than a refusal.
+///
+/// Measured (2026-10-19): a batch stops at the operation that failed and
+/// reports it in the single shape, so the top level is where the error is. The
+/// walk through `individualResults` is belt and braces for a Flyway that one
+/// day reports a later failure differently — it costs one lookup.
 pub fn complaint(stdout: &str) -> Option<Complaint> {
     let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
-    let e = v.get("error")?;
+    let e = v.get("error").or_else(|| {
+        v.get("individualResults")
+            .and_then(|r| r.as_array())
+            .and_then(|list| list.iter().find_map(|r| r.get("error")))
+    })?;
     Some(Complaint {
         code: e
             .get("errorCode")
@@ -662,9 +715,13 @@ impl Repaired {
 }
 
 /// Read what `repair` says it did.
+///
+/// Through `result_for`, so an answer that also carries the `info` that
+/// followed in the same invocation reads exactly the same way.
 pub fn repaired(stdout: &str) -> Result<Repaired, String> {
-    let v: serde_json::Value = serde_json::from_str(stdout)
-        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))?;
+    let doc = document(stdout)?;
+    let v = result_for(&doc, "repair")
+        .ok_or_else(|| "Flyway's answer carried no repair result.".to_string())?;
 
     let list = |key: &str| -> Vec<Touched> {
         v.get(key)
@@ -707,9 +764,13 @@ pub fn repaired(stdout: &str) -> Result<Repaired, String> {
 }
 
 /// The migrations `info` reported, in the order Flyway listed them.
+///
+/// Through `result_for`, so the `info` that rode along with a `migrate` or a
+/// `repair` is read by the same code as an `info` asked on its own.
 pub fn migrations(stdout: &str) -> Result<Vec<Migration>, String> {
-    let v: serde_json::Value = serde_json::from_str(stdout)
-        .map_err(|e| format!("Flyway's answer could not be read as JSON: {e}"))?;
+    let doc = document(stdout)?;
+    let v = result_for(&doc, "info")
+        .ok_or_else(|| "Flyway's answer carried no info result.".to_string())?;
     let list = v
         .get("migrations")
         .and_then(|m| m.as_array())
@@ -741,6 +802,143 @@ pub fn migrations(stdout: &str) -> Result<Vec<Migration>, String> {
             ..m
         })
         .collect())
+}
+
+// ------------------------------------------- has anything changed on disk?
+
+/// What one `info` answered, and enough to know when it has gone stale.
+///
+/// The folders and the fingerprint travel to the frontend with the list,
+/// because the frontend is what decides whether to ask Flyway again — see
+/// Stage 24 §2.2.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Reading {
+    pub migrations: Vec<Migration>,
+    /// Every folder Flyway read a migration from, sorted.
+    pub folders: Vec<String>,
+    /// [`fingerprint`] of those folders at the moment this was read.
+    pub fingerprint: String,
+}
+
+impl Reading {
+    /// Build a reading from an answer that contains an `info` result.
+    pub fn of(stdout: &str) -> Result<Self, String> {
+        let migrations = migrations(stdout)?;
+        let folders = folders_of(&migrations);
+        Ok(Self {
+            fingerprint: fingerprint(&folders),
+            folders,
+            migrations,
+        })
+    }
+}
+
+/// The folders the migrations came out of, sorted and deduplicated.
+///
+/// **From Flyway's own `filepath`, never from `locations`.** That setting can
+/// be a list, can be relative to the working directory, can name a classpath
+/// entry and can be overridden per environment; resolving it here would
+/// produce a path that is merely plausible. See the module docs of `flyway.rs`,
+/// which is why this app has never parsed it.
+pub fn folders_of(migrations: &[Migration]) -> Vec<String> {
+    let mut folders: Vec<String> = migrations
+        .iter()
+        .filter_map(|m| m.filepath.as_deref())
+        .filter_map(|p| {
+            let cut = p.rfind(['/', '\\'])?;
+            (cut > 0).then(|| p[..cut].to_string())
+        })
+        .collect();
+    folders.sort_unstable();
+    folders.dedup();
+    folders
+}
+
+/// A digest of everything in these folders that could change what `info` says.
+///
+/// **Why this exists**: `flyway info` costs ~4.8s whatever the folder holds,
+/// because the cost is JVM start; a `stat` of a thousand files costs ~4ms
+/// (Stage 24 §1). So "has anything changed" is answered from the disk, and
+/// Flyway is asked again only when the answer is yes.
+///
+/// Each entry contributes its name, length and modification time, and each
+/// folder its own modification time — which is what catches a file being
+/// **added or removed**, including a whole new subfolder, since a directory's
+/// mtime moves when its contents are created or deleted.
+///
+/// Not a cryptographic hash and not trying to be: this compares two readings
+/// of the same machine's disk minutes apart. It is FNV-1a so that it is stable
+/// across processes, which `DefaultHasher` does not promise.
+///
+/// An unreadable folder digests as the word `gone`, so a folder that
+/// disappears invalidates the reading rather than silently matching.
+///
+/// **Sorted here, not trusted to arrive sorted.** `folders_of` sorts, but the
+/// list comes back from the frontend to be compared, and a caller that handed
+/// the same folders over in a different order would get a different digest —
+/// a cache that never hits, whose only symptom is the slowness this exists to
+/// remove. Caught by its own test.
+pub fn fingerprint(folders: &[String]) -> String {
+    let mut folders: Vec<&String> = folders.iter().collect();
+    folders.sort_unstable();
+    folders.dedup();
+
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+
+    let stamp = |m: &std::fs::Metadata| -> u128 {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    };
+
+    for folder in folders {
+        eat(folder.as_bytes());
+        eat(b"\x1f");
+        let dir = std::path::Path::new(folder);
+        match std::fs::metadata(dir) {
+            Ok(m) => eat(stamp(&m).to_string().as_bytes()),
+            Err(_) => {
+                eat(b"gone");
+                continue;
+            }
+        }
+        // Sorted, because a directory listing is in whatever order the
+        // filesystem feels like and a fingerprint that moved with it would
+        // report a change on every reading.
+        let mut entries: Vec<(String, u64, u128)> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(Result::ok)
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    match e.metadata() {
+                        Ok(m) => (name, m.len(), stamp(&m)),
+                        Err(_) => (name, 0, 0),
+                    }
+                })
+                .collect(),
+            Err(_) => {
+                eat(b"unreadable");
+                continue;
+            }
+        };
+        entries.sort_unstable();
+        for (name, len, mtime) in entries {
+            eat(name.as_bytes());
+            eat(len.to_string().as_bytes());
+            eat(mtime.to_string().as_bytes());
+            eat(b"\x1e");
+        }
+    }
+    format!("{h:016x}")
 }
 
 #[cfg(test)]
@@ -801,7 +999,7 @@ mod tests {
 
     #[test]
     fn the_command_line_is_a_vector_in_the_order_flyway_takes() {
-        let args = arguments("flyway.toml", "uat", "info", &[]);
+        let args = arguments("flyway.toml", "uat", &["info"], &[]);
         assert_eq!(
             args,
             [
@@ -817,7 +1015,7 @@ mod tests {
     /// containing odd characters rather than a way to run something else.
     #[test]
     fn an_awkward_environment_name_stays_one_argument() {
-        let args = arguments("a b.toml", "dev; rm -rf /", "info", &[]);
+        let args = arguments("a b.toml", "dev; rm -rf /", &["info"], &[]);
         assert_eq!(args[0], "-configFiles=a b.toml");
         assert_eq!(args[1], "-environment=dev; rm -rf /");
         assert_eq!(args.len(), 4, "still four arguments, not a command line");
@@ -825,7 +1023,7 @@ mod tests {
 
     #[test]
     fn extra_flags_come_before_the_operation() {
-        let args = arguments("f.toml", "dev", "migrate", &["-outOfOrder=true".into()]);
+        let args = arguments("f.toml", "dev", &["migrate"], &["-outOfOrder=true".into()]);
         assert_eq!(args[3], "-outOfOrder=true");
         assert_eq!(
             args[4], "migrate",
@@ -1165,12 +1363,218 @@ mod tests {
             "definitely-not-a-real-program",
             std::path::Path::new("/tmp/flyway.toml"),
             "dev",
-            "info",
+            &["info"],
             vec![],
         )
         .await
         .unwrap_err();
         assert!(e.contains("was not found"), "{e}");
         assert!(e.contains("Settings"), "it has to say where to fix it: {e}");
+    }
+
+    // ------------------------------------------------- Stage 24: one JVM, several results
+
+    /// A real `repair info` answer, trimmed. The shape — and the order — are
+    /// Flyway 13.5.0's own, captured 2026-10-19.
+    const BATCHED: &str = r#"{
+      "individualResults": [
+        {
+          "database": "flyway_perf",
+          "flywayVersion": "13.5.0",
+          "migrationsAligned": [],
+          "migrationsDeleted": [],
+          "migrationsRemoved": [ { "version": "4", "description": "deliberately broken" } ],
+          "operation": "repair",
+          "repairActions": [ "Removed failed migrations" ],
+          "warnings": []
+        },
+        {
+          "allSchemasEmpty": false,
+          "database": "flyway_perf",
+          "flywayVersion": "13.5.0",
+          "migrations": [
+            { "version": "1", "description": "first", "state": "Success",
+              "filepath": "/srv/app/migrations/V1__first.sql", "type": "SQL" },
+            { "version": "4", "description": "deliberately broken", "state": "Pending",
+              "filepath": "/srv/app/migrations/V4__deliberately_broken.sql", "type": "SQL" }
+          ],
+          "operation": "info"
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn the_operations_are_the_tail_of_the_command_line() {
+        let args = arguments(
+            "f.toml",
+            "dev",
+            &["repair", "info"],
+            &["-outOfOrder=true".into()],
+        );
+        assert_eq!(
+            args,
+            [
+                "-configFiles=f.toml",
+                "-environment=dev",
+                "-outputType=json",
+                "-outOfOrder=true",
+                "repair",
+                "info",
+            ],
+            "flags first, then the operations in the order they run"
+        );
+    }
+
+    /// **The point of `result_for`.** The same readers serve an answer that
+    /// holds two results and one that holds one, so nothing above them has to
+    /// know whether the refresh rode along.
+    #[test]
+    fn a_batched_answer_is_read_by_the_same_readers() {
+        let r = repaired(BATCHED).expect("the repair result is in there");
+        assert_eq!(r.actions, ["Removed failed migrations"]);
+        assert_eq!(r.removed.len(), 1);
+        assert_eq!(r.removed[0].version.as_deref(), Some("4"));
+
+        let m = migrations(BATCHED).expect("and so is the info result");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[1].group(), Group::Pending, "repaired, so pending again");
+    }
+
+    /// An operation that was not in the invocation is **absent**, not the first
+    /// result that happened to be there. `Applied` leans on this: a migrate
+    /// answer read for its `info` must come back empty rather than wrong.
+    #[test]
+    fn an_operation_that_did_not_run_is_absent() {
+        let doc: serde_json::Value = serde_json::from_str(BATCHED).unwrap();
+        assert!(result_for(&doc, "migrate").is_none());
+        assert!(result_for(&doc, "repair").is_some());
+
+        // And in the single shape, where `operation` names one thing only.
+        let single: serde_json::Value = serde_json::from_str(INFO).unwrap();
+        assert!(result_for(&single, "info").is_some());
+        assert!(result_for(&single, "migrate").is_none());
+    }
+
+    /// A batch stops at the operation that failed and reports it in the single
+    /// shape (measured), which `complaint` already handled. This is the other
+    /// shape, in case a later Flyway reports it from inside the list.
+    #[test]
+    fn an_error_inside_a_batch_is_still_a_complaint() {
+        let doc = r#"{"individualResults":[{"operation":"repair"},
+          {"operation":"migrate","error":{"errorCode":"VALIDATE_ERROR",
+           "message":"Validate failed: run repair to fix the schema history."}}]}"#;
+        let c = complaint(doc).expect("an error anywhere is still a refusal");
+        assert_eq!(c.code.as_deref(), Some("VALIDATE_ERROR"));
+        assert!(c.suggests_repair());
+    }
+
+    // ------------------------------------------------- Stage 24: the fingerprint
+
+    /// The folders come from Flyway's `filepath`, sorted, deduplicated — and a
+    /// migration without one simply contributes nothing.
+    #[test]
+    fn the_folders_are_the_ones_the_files_are_in() {
+        let m = |p: Option<&str>| Migration {
+            version: None,
+            description: "d".into(),
+            state: "Pending".into(),
+            category: None,
+            kind: None,
+            filepath: p.map(str::to_string),
+            installed_on_utc: None,
+            installed_by: None,
+            execution_time_ms: None,
+            group: Group::Pending,
+        };
+        let folders = folders_of(&[
+            m(Some("/srv/b/V2__x.sql")),
+            m(Some("/srv/a/V1__x.sql")),
+            m(Some("/srv/b/V3__x.sql")),
+            m(None),
+            m(Some(r"C:\srv\c\V4__x.sql")),
+        ]);
+        assert_eq!(folders, ["/srv/a", "/srv/b", r"C:\srv\c"]);
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("db-query-fp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// **The fact the whole design rests on**: two readings of an untouched
+    /// folder agree, and every way a migration folder can change disagrees.
+    #[test]
+    fn a_fingerprint_moves_when_the_folder_does_and_not_otherwise() {
+        let dir = scratch("moves");
+        let folders = vec![dir.to_string_lossy().to_string()];
+        std::fs::write(dir.join("V1__a.sql"), "SELECT 1;").unwrap();
+
+        let first = fingerprint(&folders);
+        assert_eq!(first, fingerprint(&folders), "nothing happened");
+
+        // Edited: the reported case — a script commented out and back again.
+        std::fs::write(dir.join("V1__a.sql"), "-- SELECT 1;").unwrap();
+        let edited = fingerprint(&folders);
+        assert_ne!(edited, first, "an edited migration must invalidate");
+
+        // Added, which a file's own stat cannot see — the folder's mtime does.
+        std::fs::write(dir.join("V2__b.sql"), "SELECT 2;").unwrap();
+        let added = fingerprint(&folders);
+        assert_ne!(added, edited, "a new migration must invalidate");
+
+        // Removed.
+        std::fs::remove_file(dir.join("V2__b.sql")).unwrap();
+        assert_ne!(
+            fingerprint(&folders),
+            added,
+            "a removed file must invalidate"
+        );
+
+        // A whole new subfolder, which is where a new `locations` entry would
+        // show up first.
+        std::fs::create_dir(dir.join("daily")).unwrap();
+        let nested = fingerprint(&folders);
+        assert_ne!(nested, edited, "a new subfolder must invalidate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder that is no longer there does not read as "unchanged".
+    #[test]
+    fn a_folder_that_vanished_invalidates_the_reading() {
+        let dir = scratch("gone");
+        let folders = vec![dir.to_string_lossy().to_string()];
+        std::fs::write(dir.join("V1__a.sql"), "SELECT 1;").unwrap();
+        let before = fingerprint(&folders);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        let after = fingerprint(&folders);
+        assert_ne!(after, before);
+        assert_eq!(after, fingerprint(&folders), "and it is stable while gone");
+    }
+
+    /// Two folders in the other order are the same two folders. `folders_of`
+    /// sorts, but a caller handing them back could not be relied on to.
+    #[test]
+    fn the_order_of_the_folders_does_not_change_the_fingerprint() {
+        let a = scratch("order-a");
+        let b = scratch("order-b");
+        std::fs::write(a.join("V1__a.sql"), "SELECT 1;").unwrap();
+        std::fs::write(b.join("V2__b.sql"), "SELECT 2;").unwrap();
+        let (a, b) = (
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+        );
+
+        let one = fingerprint(&[a.clone(), b.clone()]);
+        let two = fingerprint(&[b.clone(), a.clone()]);
+        assert_eq!(
+            one, two,
+            "the fingerprint is of a set of folders, not of a list"
+        );
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
