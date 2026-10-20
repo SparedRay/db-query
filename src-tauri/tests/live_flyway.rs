@@ -38,7 +38,7 @@ fn project() -> PathBuf {
 }
 
 async fn info(environment: &str) -> flywaycli::Finished {
-    flywaycli::run(&program(), &project(), environment, "info", vec![])
+    flywaycli::run(&program(), &project(), environment, &["info"], vec![])
         .await
         .expect("flyway did not run — is `mise run flyway-up` done?")
 }
@@ -98,7 +98,7 @@ async fn the_environment_chooses_which_database_is_reported() {
 #[tokio::test]
 #[ignore]
 async fn an_unknown_environment_comes_back_as_flyways_own_refusal() {
-    let out = flywaycli::run(&program(), &project(), "nope", "info", vec![])
+    let out = flywaycli::run(&program(), &project(), "nope", &["info"], vec![])
         .await
         .expect("flyway ran");
     assert!(
@@ -197,7 +197,7 @@ fn reset(db: &str) {
 async fn applying_runs_the_pending_migrations_and_stops_at_the_broken_one() {
     reset("flyway_qa");
 
-    let out = flywaycli::run(&program(), &project(), "qa", "migrate", vec![])
+    let out = flywaycli::run(&program(), &project(), "qa", &["migrate"], vec![])
         .await
         .expect("flyway ran");
 
@@ -239,9 +239,9 @@ async fn applying_runs_the_pending_migrations_and_stops_at_the_broken_one() {
 #[ignore]
 async fn a_failed_migration_blocks_the_next_apply_with_an_instruction() {
     reset("flyway_qa");
-    let _ = flywaycli::run(&program(), &project(), "qa", "migrate", vec![]).await;
+    let _ = flywaycli::run(&program(), &project(), "qa", &["migrate"], vec![]).await;
 
-    let again = flywaycli::run(&program(), &project(), "qa", "migrate", vec![])
+    let again = flywaycli::run(&program(), &project(), "qa", &["migrate"], vec![])
         .await
         .expect("flyway ran");
 
@@ -291,7 +291,7 @@ fn sql(db: &str, statement: &str) -> String {
 #[ignore]
 async fn repair_clears_the_failed_entry_and_changes_nothing_in_the_database() {
     reset("flyway_qa");
-    let _ = flywaycli::run(&program(), &project(), "qa", "migrate", vec![]).await;
+    let _ = flywaycli::run(&program(), &project(), "qa", &["migrate"], vec![]).await;
 
     // V1–V3 applied, V4 failed. That is the situation repair exists for.
     let before = sql("flyway_qa", "SHOW COLUMNS FROM widgets;");
@@ -305,7 +305,7 @@ async fn repair_clears_the_failed_entry_and_changes_nothing_in_the_database() {
         "V4 is recorded as failed: {history}"
     );
 
-    let out = flywaycli::run(&program(), &project(), "qa", "repair", vec![])
+    let out = flywaycli::run(&program(), &project(), "qa", &["repair"], vec![])
         .await
         .expect("flyway ran");
     assert!(out.ok(), "{}", out.stderr);
@@ -355,7 +355,7 @@ async fn repair_clears_the_failed_entry_and_changes_nothing_in_the_database() {
 async fn repairing_a_healthy_history_reports_that_it_did_nothing() {
     reset("flyway_qa");
 
-    let out = flywaycli::run(&program(), &project(), "qa", "repair", vec![])
+    let out = flywaycli::run(&program(), &project(), "qa", &["repair"], vec![])
         .await
         .expect("flyway ran");
     assert!(out.ok());
@@ -404,7 +404,7 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
         &program(),
         &toml,
         "qa",
-        "migrate",
+        &["migrate"],
         vec!["-target=3".to_string()],
     )
     .await
@@ -430,7 +430,7 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
 
     // `info` notices nothing at all.
     let listed = flywaycli::migrations(
-        &flywaycli::run(&program(), &toml, "qa", "info", vec![])
+        &flywaycli::run(&program(), &toml, "qa", &["info"], vec![])
             .await
             .unwrap()
             .stdout,
@@ -448,7 +448,7 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
     );
 
     // And the apply is refused, with the instruction the button now follows.
-    let refused = flywaycli::run(&program(), &toml, "qa", "migrate", vec![])
+    let refused = flywaycli::run(&program(), &toml, "qa", &["migrate"], vec![])
         .await
         .unwrap();
     let c = flywaycli::complaint(&refused.stdout).expect("refused");
@@ -460,7 +460,7 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
     // Measured against Flyway 13.5.0 on 2026-09-16: `repairActions` came back
     // as "Aligned applied migration checksums", and nothing was removed
     // — there was nothing failed to remove.
-    let fixed = flywaycli::run(&program(), &toml, "qa", "repair", vec![])
+    let fixed = flywaycli::run(&program(), &toml, "qa", &["repair"], vec![])
         .await
         .expect("flyway ran");
     assert!(fixed.ok(), "{}", fixed.stderr);
@@ -490,7 +490,7 @@ async fn an_edited_migration_looks_healthy_until_apply_and_repair_is_the_way_out
         &program(),
         &toml,
         "qa",
-        "migrate",
+        &["migrate"],
         vec!["-target=3".to_string()],
     )
     .await
@@ -517,7 +517,7 @@ async fn clean(environment: &str) {
         &program(),
         &project(),
         environment,
-        "clean",
+        &["clean"],
         vec!["-cleanDisabled=false".into()],
     )
     .await
@@ -526,7 +526,7 @@ async fn clean(environment: &str) {
 
 /// A `migrate`, as the app runs one.
 async fn migrate(environment: &str, extra: Vec<String>) -> flywaycli::Finished {
-    flywaycli::run(&program(), &project(), environment, "migrate", extra)
+    flywaycli::run(&program(), &project(), environment, &["migrate"], extra)
         .await
         .expect("flyway did not run — is `mise run flyway-up` done?")
 }
@@ -772,5 +772,140 @@ async fn a_later_run_replaces_the_stored_one() {
         "info",
         "the store keeps the newest run, which is why the UI copies the report onto the tab \
          before it re-reads the list"
+    );
+}
+
+// ---------------------------------------------- Stage 24: one JVM, several results
+
+/// **The measurement the stage is built on, kept as a test.**
+///
+/// `repair info` runs both in one JVM and answers with `individualResults` —
+/// so the refresh after a write costs nothing, where a second invocation costs
+/// another ~4.8s of JVM start (Stage 24 §1). If a future Flyway stopped doing
+/// this, the app would still work and would silently be twice as slow; this is
+/// what notices.
+#[tokio::test]
+#[ignore]
+async fn two_operations_run_in_one_invocation_and_both_results_come_back() {
+    let out = flywaycli::run(&program(), &project(), "qa", &["repair", "info"], vec![])
+        .await
+        .expect("flyway did not run — is `mise run flyway-up` done?");
+    assert!(out.ok(), "exit {:?}: {}", out.code, out.stderr);
+
+    let doc: serde_json::Value = serde_json::from_str(&out.stdout).expect("JSON");
+    assert!(
+        doc.get("individualResults").is_some(),
+        "a batch answers with individualResults: {}",
+        &out.stdout[..out.stdout.len().min(200)]
+    );
+
+    // And the readers find each of them, which is what lets everything above
+    // `result_for` stay ignorant of whether the refresh rode along.
+    let repaired = flywaycli::repaired(&out.stdout).expect("the repair result");
+    assert!(repaired.is_empty(), "nothing is failed in the fixture");
+    let list = flywaycli::migrations(&out.stdout).expect("the info result");
+    assert!(!list.is_empty(), "and the list is really a list");
+}
+
+/// **Why a targeted apply is not batched.**
+///
+/// `-target` is an invocation-wide flag, so it reaches the `info` too: the
+/// migrations above the target come back as `Above Target`, which
+/// `Migration::group()` maps to `Done`. A batched refresh after "apply up to
+/// here" would therefore show the migrations it deliberately did not run as
+/// though it had.
+///
+/// This test asserts the trap still exists. The day Flyway stops reporting it
+/// that way, batching the targeted path becomes safe — and this is where that
+/// shows up.
+#[tokio::test]
+#[ignore]
+async fn a_target_reaches_the_info_in_the_same_invocation() {
+    // Against the probe database, which the mutating tests own, and cleaned
+    // first so the versions are predictable.
+    let out = flywaycli::run(
+        &program(),
+        &project(),
+        "probe",
+        &["clean"],
+        vec!["-cleanDisabled=false".into()],
+    )
+    .await
+    .expect("flyway did not run");
+    assert!(out.ok(), "clean failed: {}", out.stderr);
+
+    let out = flywaycli::run(
+        &program(),
+        &project(),
+        "probe",
+        &["migrate", "info"],
+        vec!["-target=1".into()],
+    )
+    .await
+    .expect("flyway did not run");
+    assert!(out.ok(), "exit {:?}: {}", out.code, out.stderr);
+
+    let list = flywaycli::migrations(&out.stdout).expect("the info result");
+    let states: Vec<(&str, &str)> = list
+        .iter()
+        .map(|m| (m.version.as_deref().unwrap_or("-"), m.state.as_str()))
+        .collect();
+    assert_eq!(states[0], ("1", "Success"), "the target itself ran");
+    assert!(
+        states[1..].iter().all(|(_, s)| *s == "Above Target"),
+        "the point of this test: {states:?}"
+    );
+    // Which is the wrong group — the reason `flyway_migrate` sends `migrate`
+    // alone when there is a target.
+    assert!(
+        list[1..]
+            .iter()
+            .all(|m| m.group() == db_query_lib::flywaycli::Group::Done),
+        "Above Target reads as Done, so a batched refresh would lie"
+    );
+}
+
+/// The folders and the fingerprint, against the real fixture folder.
+#[tokio::test]
+#[ignore]
+async fn a_reading_names_the_real_folder_and_notices_it_change() {
+    let out = info("development").await;
+    let reading = flywaycli::Reading::of(&out.stdout).expect("a reading");
+
+    let expected = repo().join("dev/flyway/migrations");
+    assert_eq!(
+        reading.folders,
+        [expected.to_string_lossy().to_string()],
+        "one folder, the one `locations` resolves to"
+    );
+    assert_eq!(
+        reading.fingerprint,
+        flywaycli::fingerprint(&reading.folders),
+        "stable while nothing moves"
+    );
+
+    // A file appears — the case a per-file `stat` cannot see on its own.
+    let extra = expected.join("R__stage24_probe.sql");
+    std::fs::write(&extra, "-- not a migration anybody applies\nSELECT 1;\n").unwrap();
+    let changed = flywaycli::fingerprint(&reading.folders);
+    std::fs::remove_file(&extra).unwrap();
+
+    assert_ne!(
+        changed, reading.fingerprint,
+        "a new file in the migrations folder must invalidate the reading"
+    );
+
+    // **And it does not come back.** Removing the file again moves the
+    // folder's mtime a second time, so the fingerprint differs from both
+    // earlier values — the digest answers "has anything happened here", not
+    // "is the content equivalent to before". That is the safe direction: the
+    // cost of a folder that was changed and changed back is one extra `info`,
+    // where the other error would be a confirmation built on a stale list.
+    let after = flywaycli::fingerprint(&reading.folders);
+    assert_ne!(after, changed, "the removal moved it too");
+    assert_eq!(
+        after,
+        flywaycli::fingerprint(&reading.folders),
+        "and it is stable once the folder is left alone"
     );
 }

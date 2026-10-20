@@ -98,7 +98,7 @@ const PENDING_ONLY = [
  * A backend with a projects store that behaves like the real one: adding,
  * removing and listing all see the same list.
  */
-function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
+function flywayCommands(initial: unknown[], extra: Record<string, unknown> = {}) {
   let store = [...initial] as Array<Record<string, unknown>>;
   return {
     ...schemaBackend,
@@ -124,6 +124,39 @@ function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
     refresh_schema: () => null,
     ...extra,
   };
+}
+
+/**
+ * The folders a stubbed `info` pretends its migrations came from.
+ *
+ * Stage 24 made `flyway_info` answer with a *reading* — the list, the folders
+ * it came from and a fingerprint of them — so the app can ask the disk whether
+ * anything moved instead of starting another JVM. Every stub below still
+ * returns a plain list, which is the thing each test is about, and this wraps
+ * it into the shape the app now receives.
+ *
+ * **`flyway_fingerprint` is deliberately left unstubbed** here: the call fails,
+ * the app cannot prove the files are unchanged, and it asks Flyway again — so
+ * every test written before this stage still exercises what it was written to
+ * exercise. The tests that are about reuse stub it on purpose.
+ */
+const STUB_FOLDERS = ["/srv/app/migrations"];
+
+function asReading(value: unknown) {
+  return Array.isArray(value)
+    ? { migrations: value, folders: STUB_FOLDERS, fingerprint: "stub-fingerprint" }
+    : value;
+}
+
+/** The backend every test here installs, with `flyway_info` answering a reading. */
+function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
+  const merged = flywayCommands(initial, extra) as Record<
+    string,
+    (a: Record<string, unknown>) => unknown
+  >;
+  const info = merged.flyway_info;
+  merged.flyway_info = async (a: Record<string, unknown>) => asReading(await info(a));
+  return merged;
 }
 
 /** The sidebar section, with nothing connected and no environment opened. */
@@ -711,6 +744,12 @@ test("the repair confirmation says where, and what it does not undo", async ({ p
   expect(await commandNames(page)).not.toContain("flyway_repair");
 });
 
+/**
+ * The stubbed `flyway_repair` answers without the `info` that the real one now
+ * carries back from the same invocation (Stage 24 §2.1), so this is also the
+ * **fallback** path: no refreshed list came with the run, so the app asks for
+ * one. The batched path has its own test.
+ */
 test("confirming repairs, says what Flyway did, and re-reads the list", async ({ page }) => {
   await withProject(page);
   const before = (await infoCalls(page)).length;
@@ -725,6 +764,9 @@ test("confirming repairs, says what Flyway did, and re-reads the list", async ({
     environment: "uat",
     confirmed: { url: "jdbc:mysql://uat.example.com:3306/flyway", user: "uat_app" },
     program: "",
+    // Not repair's own business: it steers the `info` that runs beside it, so
+    // the refreshed list matches what the pane was showing.
+    outOfOrder: false,
   });
   await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
   await expect(page.locator("#flyway-body")).toContainText("V3");
@@ -1471,4 +1513,210 @@ test("a refusal, which carries nothing but a message, still reads", async ({ pag
   await expect(body.locator(".fw-mig")).toHaveCount(0);
   // And the header still says which operation it was.
   await expect(body.locator(".fw-head")).toContainText("migrate");
+});
+
+// ------------------------------------------------ Stage 24: fewer JVMs
+
+/**
+ * Why any of this exists, measured 2026-10-19: `flyway info` costs ~4.8s
+ * whatever it finds, because almost all of it is JVM start — four migrations
+ * cost the same as a thousand, and `flyway --version` costs the same again.
+ * The reported workflow spent ten of those on three operations.
+ *
+ * `fingerprinted` stubs the cheap half: the app asks the disk whether the
+ * migration folders have moved, and `flyway_fingerprint` answers with whatever
+ * the reading claimed, so "nothing changed" is the default and a test that
+ * wants a change says so.
+ */
+function fingerprinted(extra: Record<string, unknown> = {}, fingerprint = "stub-fingerprint") {
+  return { flyway_fingerprint: () => fingerprint, ...extra };
+}
+
+/**
+ * How many times Flyway has been asked for `info`, **once it has stopped going
+ * up**.
+ *
+ * `expect.poll(…).toBe(n)` returns the moment it matches, so it cannot say
+ * "and nothing further happened" — it would pass on the sample taken before
+ * the call it is meant to catch. Two equal readings in a row can. This is the
+ * same settling the tab-strip scroll test uses, and for the same reason.
+ */
+async function settledInfoCalls(page: Page): Promise<number> {
+  let last = -1;
+  await expect
+    .poll(async () => {
+      const now = (await infoCalls(page)).length;
+      const same = now === last;
+      last = now;
+      return same;
+    })
+    .toBe(true);
+  return last;
+}
+
+test("a write dialog after a look asks the disk, not Flyway again", async ({ page }) => {
+  await withProject(page, fingerprinted());
+  const before = (await infoCalls(page)).length;
+
+  await page.click("#btn-mig-view-repair");
+  await expect(page.locator("dialog.ask")).toBeVisible();
+
+  expect(await commandNames(page)).toContain("flyway_fingerprint");
+  expect((await infoCalls(page)).length).toBe(before);
+  // And it says where its description came from, rather than implying it just
+  // looked — the one thing a fingerprint cannot prove is what somebody else
+  // did to that database.
+  await expect(page.locator("dialog.ask")).toContainText("From the reading taken");
+  await expect(page.locator("dialog.ask")).toContainText("have not changed since");
+});
+
+test("an edited migration file makes the next dialog ask Flyway", async ({ page }) => {
+  // The reported workflow: scripts commented out, run by hand, uncommented.
+  // The fingerprint answers something else, so the reading cannot be reused.
+  await withProject(page, fingerprinted({}, "the-files-moved"));
+  const before = (await infoCalls(page)).length;
+
+  await page.click("#btn-mig-view-repair");
+  await expect(page.locator("dialog.ask")).toBeVisible();
+
+  expect((await infoCalls(page)).length).toBeGreaterThan(before);
+  await expect(page.locator("dialog.ask")).toContainText("Checked just now");
+});
+
+test("Check first asks Flyway however untouched the files are", async ({ page }) => {
+  await withProject(page, fingerprinted());
+
+  await page.check("#mig-check-first");
+  const before = (await infoCalls(page)).length;
+
+  await page.click("#btn-mig-view-repair");
+  await expect(page.locator("dialog.ask")).toBeVisible();
+
+  expect((await infoCalls(page)).length).toBeGreaterThan(before);
+  await expect(page.locator("dialog.ask")).toContainText("Checked just now");
+  // Ticking it is not itself a reason to re-read the pane: that would spend
+  // the very Flyway start the box exists to control.
+  expect(await commandNames(page)).toContain("flyway_info");
+});
+
+test("Check first belongs to the environment, not to the window", async ({ page }) => {
+  await withProject(page, fingerprinted());
+
+  await page.check("#mig-check-first");
+  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await expect(page.locator("#mig-check-first")).not.toBeChecked();
+
+  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await expect(page.locator("#mig-check-first")).toBeChecked();
+});
+
+test("a repair that brings the refreshed list back does not ask for it again", async ({ page }) => {
+  await withProject(
+    page,
+    fingerprinted({
+      flyway_repair: () => ({
+        actions: ["Removed failed migrations"],
+        removed: [{ version: "3", description: "deliberately broken" }],
+        deleted: [],
+        aligned: [],
+        // What the real command now returns: the `info` that ran in the same
+        // JVM, which is both free and fresher than a second process.
+        info: {
+          migrations: PENDING_ONLY,
+          folders: ["/srv/app/migrations"],
+          fingerprint: "after-the-repair",
+        },
+      }),
+    }),
+  );
+
+  const before = await settledInfoCalls(page);
+
+  await page.click("#btn-mig-view-repair");
+  await page.locator('dialog.ask button:has-text("Repair uat")').click();
+  await expect.poll(async () => commandNames(page)).toContain("flyway_repair");
+
+  await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
+  // One JVM for the whole click: the dialog reused the reading and the list
+  // came back with the repair, so Flyway was never asked for `info`…
+  expect(await settledInfoCalls(page)).toBe(before);
+  // …and it is the list on screen: the repaired migration is pending again.
+  const pending = page.locator('.mig-group[data-group="pending"]');
+  await expect(pending.locator(".mig-group-count")).toHaveText(String(PENDING_ONLY.length));
+  await expect(pending.locator(".mig .d")).toHaveText([PENDING_ONLY[0].description]);
+});
+
+test("an apply that brings the refreshed list back does not ask for it again", async ({ page }) => {
+  await withProject(
+    page,
+    fingerprinted({
+      flyway_info: () => PENDING_ONLY,
+      flyway_migrate: () => ({
+        executed: 1,
+        target: "2",
+        info: {
+          migrations: [MIGRATIONS[0]],
+          folders: ["/srv/app/migrations"],
+          fingerprint: "after-the-apply",
+        },
+      }),
+    }),
+  );
+
+  const before = await settledInfoCalls(page);
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+  await expect.poll(async () => commandNames(page)).toContain("flyway_migrate");
+
+  await expect(page.locator("#flyway-body")).toContainText("applied 1 migration");
+  expect(await settledInfoCalls(page)).toBe(before);
+});
+
+test("a failed apply still ends with a list on screen", async ({ page }) => {
+  // No `info` comes back from a failed run — Flyway stops the batch at the
+  // operation that failed — so the app asks for one itself, as it always did.
+  await withProject(
+    page,
+    fingerprinted({
+      flyway_info: () => PENDING_ONLY,
+      flyway_migrate: () => {
+        throw { message: "Validate failed", suggestsRepair: true };
+      },
+    }),
+  );
+  const before = (await infoCalls(page)).length;
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+
+  await expect.poll(async () => (await infoCalls(page)).length).toBeGreaterThan(before);
+  await expect(page.locator("#btn-mig-view-repair")).toHaveClass(/urge/);
+});
+
+/**
+ * Shape, not behaviour — and the narrow pane, because that is where it breaks.
+ *
+ * `Check first` is a fourth item in a flex row that held three. Measured while
+ * writing this: at 640px the row runs out of width and, without wrapping,
+ * simply cuts the last item off. No behavioural test can see that; every
+ * button still works perfectly while being invisible.
+ */
+test("the actions row fits its toggles and buttons on a narrow pane", async ({ page }) => {
+  await withProject(page, fingerprinted());
+
+  const row = page.locator("#mig-view-actions");
+  const items = [
+    "#mig-out-of-order",
+    "#mig-check-first",
+    "#btn-mig-view-apply",
+    "#btn-mig-view-repair",
+    "#btn-mig-view-refresh",
+  ];
+  for (const sel of items) await expect(row.locator(sel)).toBeVisible();
+
+  await page.setViewportSize({ width: 640, height: 760 });
+  for (const sel of items) await expect(row.locator(sel)).toBeVisible();
+  const clipped = await row.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+  expect(clipped, "the actions row is overflowing, so something is cut off").toBe(false);
 });

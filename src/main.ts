@@ -28,6 +28,7 @@ import {
   type FlywayMatch,
   type FlywayProjectView,
   type FlywayMigration,
+  type FlywayReading,
   type Recipe,
   type CliStatus,
   type Provider,
@@ -4444,6 +4445,40 @@ const migrationsCollapsed = new Set<FlywayGroup>(["done"]);
 const migrationsOutOfOrder = new Map<string, boolean>();
 
 /**
+ * **Check before every write**, per environment, for this session.
+ *
+ * Off by default, which is the whole of Stage 24: a stored reading is reused
+ * when the migration files are provably unchanged, so clicking Repair after
+ * looking at the environment costs no second `flyway info` — measured at 4.8s
+ * each, almost all of it JVM start, whether the folder holds four migrations
+ * or a thousand.
+ *
+ * Ticked, every write dialog asks Flyway first. Reported as the way the person
+ * wants to decide it: *"if i know no one else is working I can work from cache
+ * if in doubts i can force the check before running"*. A fingerprint sees the
+ * files; it cannot see somebody else applying a migration to that database,
+ * and this is the switch for when that is a real possibility.
+ *
+ * Beside `Out of order` and keyed like it, for the same reason: both change
+ * what the button next to them does, and carrying either from dev onto UAT
+ * would be deciding something about UAT that nobody looked at.
+ */
+const migrationsCheckFirst = new Map<string, boolean>();
+
+/**
+ * The last `info` per environment: its list, the folders it came from, the
+ * fingerprint of those folders, and when it was read.
+ *
+ * `outOfOrder` is part of the entry rather than of the key because it is part
+ * of the *answer*: `Ignored` becomes `Pending` with the flag on, so a reading
+ * taken under one setting does not describe the other.
+ */
+const migrationsReading = new Map<
+  string,
+  { reading: FlywayReading; at: number; outOfOrder: boolean }
+>();
+
+/**
  * Environments where Flyway has asked for a repair but nothing is *failed*.
  *
  * The case is a migration edited after it ran: `info` still reports it as
@@ -4731,12 +4766,15 @@ async function showSelected() {
   if (switched) ui.list.replaceChildren();
   migProgressShow(`Asking Flyway about ${t.env.id}`, "flyway info");
   try {
-    const list = await api.flywayInfo(t.project.id, t.env.id, settings.flywayPath, outOfOrderFor(key));
+    const reading = await api.flywayInfo(
+      t.project.id,
+      t.env.id,
+      settings.flywayPath,
+      outOfOrderFor(key),
+    );
     if (selectedKey() !== key) return;
-    if (!list.length) return migrationsMessage("This environment has no migrations.");
-    renderMigrationGroups(list);
-    showMigrationSource(list);
-    syncApplyButton(t.env, list);
+    // Kept, so the next write dialog can ask the disk instead of Flyway.
+    paintReading(key, reading);
   } catch (err) {
     if (selectedKey() !== key) return;
     // Flyway's own words. It explains itself well, and paraphrasing would
@@ -4755,13 +4793,109 @@ function outOfOrderFor(key: string): boolean {
 }
 
 /**
+ * Paint a reading that has **just** arrived, and remember it.
+ *
+ * Split out of `showSelected` so the `info` that rides along with a repair or
+ * an apply can be shown without asking Flyway a second time (Stage 24 §2.1).
+ * Remembering comes first: a reading for an environment the user has since left
+ * is still a true reading of it, and throwing it away would cost them the next
+ * check.
+ */
+function paintReading(key: string, reading: FlywayReading) {
+  migrationsReading.set(key, { reading, at: Date.now(), outOfOrder: outOfOrderFor(key) });
+  if (selectedKey() !== key) return;
+  const t = selectedTarget();
+  if (!t) return;
+  if (!reading.migrations.length) {
+    return migrationsMessage("This environment has no migrations.");
+  }
+  renderMigrationGroups(reading.migrations);
+  showMigrationSource(reading.migrations);
+  syncApplyButton(t.env, reading.migrations);
+}
+
+/**
+ * The reading a confirmation will be built from, and how old it is.
+ *
+ * **The check is not dropped; it is asked of the disk first.** `flyway info`
+ * costs ~4.8s because the cost is JVM start (Stage 24 §1); fingerprinting the
+ * folders it read costs ~4ms for a thousand files. So the question "could this
+ * answer have changed" is answered cheaply, and Flyway is asked again only
+ * when it could have.
+ *
+ * Returns `null` when Flyway was asked and refused — the caller has already
+ * had the message painted for it.
+ */
+async function readingForWrite(
+  key: string,
+  project: FlywayProjectView,
+  env: FlywayEnvironment,
+  button: HTMLButtonElement,
+): Promise<{ reading: FlywayReading; readAt: number | null } | null> {
+  const held = migrationsReading.get(key);
+  const reusable =
+    held &&
+    !migrationsCheckFirst.get(key) &&
+    held.outOfOrder === outOfOrderFor(key) &&
+    // No folders means no way to tell whether anything moved — an environment
+    // with no migrations at all. Nothing to reuse and nothing to confirm.
+    held.reading.folders.length > 0;
+
+  if (reusable) {
+    // Cheap enough not to need a loader; `whileBusy` is still here because a
+    // slow network share is somebody's migrations folder.
+    const now = await whileBusy(button, "Checking…", () =>
+      api.flywayFingerprint(held.reading.folders).catch(() => null),
+    );
+    if (now !== null && now === held.reading.fingerprint) {
+      return { reading: held.reading, readAt: held.at };
+    }
+  }
+
+  // **Before the confirmation, not after.** This is a Flyway run — a JVM
+  // start, seconds — asked so the dialog can name what will actually happen.
+  // It reported nothing at all once, so the click sat there: reported as "it
+  // does not show any loader until we confirm".
+  const fresh = await whileBusy(button, "Checking…", () =>
+    api
+      .flywayInfo(project.id, env.id, settings.flywayPath, outOfOrderFor(key))
+      .catch(() => null),
+  );
+  if (!fresh) return null;
+  paintReading(key, fresh);
+  return { reading: fresh, readAt: null };
+}
+
+/**
+ * How old the reading behind a confirmation is, as a sentence for the dialog.
+ *
+ * **The honest half of reusing one.** A fingerprint proves the files have not
+ * moved; it proves nothing about somebody else writing to that database. So a
+ * dialog built from a stored reading says so and says when, rather than
+ * implying it just looked.
+ */
+function readingAge(readAt: number | null): string {
+  if (readAt === null) return "Checked just now.";
+  const secs = Math.max(0, Math.round((Date.now() - readAt) / 1000));
+  const when =
+    secs < 60
+      ? `${secs} second${secs === 1 ? "" : "s"} ago`
+      : `${Math.round(secs / 60)} minute${Math.round(secs / 60) === 1 ? "" : "s"} ago`;
+  return `From the reading taken ${when} — the migration files have not changed since.`;
+}
+
+/**
  * The selected environment, said in full: where it points, as whom, which of
  * your connections that is, and where the files are read from.
  */
 function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironment) {
   const host = migUi().detail;
   host.hidden = false;
-  els.migViewActions.querySelector(".mig-ooo")?.remove();
+  // **All of them.** There are two of these labels since Stage 24 — `Out of
+  // order` and `Check first` — and removing only the first left one behind on
+  // every redraw, which an existing test caught by finding two checkboxes
+  // wearing the same id.
+  for (const old of [...els.migViewActions.querySelectorAll(".mig-ooo")]) old.remove();
   const file = project.path.split(/[\\/]/).pop() ?? project.path;
   const folder = project.path.slice(0, project.path.length - file.length - 1);
 
@@ -4803,6 +4937,26 @@ function showEnvironmentDetail(project: FlywayProjectView, env: FlywayEnvironmen
   label.append(box, document.createTextNode("Out of order"));
   // With the buttons: it changes what Apply will run.
   els.migViewActions.append(label);
+
+  // **Check first**, beside it, because it decides the same kind of thing:
+  // what the button next to it does before it does it.
+  const check = document.createElement("label");
+  check.className = "mig-ooo";
+  check.title =
+    "Ask Flyway again before every Apply or Repair, even when the migration " +
+    "files have not changed.\n\nOff, the dialog is built from the last " +
+    "reading whenever the files are provably untouched — which saves a " +
+    "Flyway start, a few seconds, per click. Tick it when somebody else may " +
+    "be applying migrations to this database.";
+  const checkBox = document.createElement("input");
+  checkBox.type = "checkbox";
+  checkBox.id = "mig-check-first";
+  checkBox.checked = migrationsCheckFirst.get(key) ?? false;
+  // No re-ask on change: it decides what the *next* write dialog does, and
+  // re-reading here would spend the very Flyway start it exists to control.
+  checkBox.onchange = () => migrationsCheckFirst.set(key, checkBox.checked);
+  check.append(checkBox, document.createTextNode("Check first"));
+  els.migViewActions.append(check);
 }
 
 /**
@@ -4848,6 +5002,15 @@ async function projectMenu(p: FlywayProjectView) {
     await api.flywayRemoveProject(p.id);
     for (const key of [...migrationsOutOfOrder.keys()]) {
       if (key.startsWith(`${p.id}\u0000`)) migrationsOutOfOrder.delete(key);
+    }
+    // And the readings and the per-environment switch: a project that is gone
+    // has no files to fingerprint, so holding its reading would be holding a
+    // claim nothing can check.
+    for (const key of [...migrationsReading.keys()]) {
+      if (key.startsWith(`${p.id}\u0000`)) migrationsReading.delete(key);
+    }
+    for (const key of [...migrationsCheckFirst.keys()]) {
+      if (key.startsWith(`${p.id}\u0000`)) migrationsCheckFirst.delete(key);
     }
     if (migSelected?.projectId === p.id) migSelected = null;
     await renderMigrations();
@@ -5092,14 +5255,9 @@ async function applyMigrations(upTo?: string) {
   const { project, env } = target;
   const key = selKey(project.id, env.id);
   const outOfOrder = outOfOrderFor(key);
-  // **Before the confirmation, not after.** This is a second Flyway run — a
-  // JVM start, seconds — asked so the dialog can name what will actually be
-  // applied. It reported nothing at all, so the click sat there: reported as
-  // "it does not show any loader until we confirm".
-  const list = await whileBusy(migUi().apply, "Checking\u2026", () =>
-    api.flywayInfo(project.id, env.id, settings.flywayPath, outOfOrder).catch(() => null),
-  );
-  if (!list) return void showSelected();
+  const read = await readingForWrite(key, project, env, migUi().apply);
+  if (!read) return void showSelected();
+  const list = read.reading.migrations;
 
   const pending = list.filter((m) => m.group === "pending");
   // Up to and including the row that asked, in the order Flyway reported.
@@ -5115,7 +5273,8 @@ async function applyMigrations(upTo?: string) {
     `Flyway will run ${running.length === 1 ? "this" : "these"} against ${describeTarget(env)}` +
       `\n\nIn this order:\n\n${named}\n\n` +
       (outOfOrder ? "Out of order is on.\n\n" : "") +
-      "This changes the database. It cannot be undone from here.",
+      "This changes the database. It cannot be undone from here.\n\n" +
+      readingAge(read.readAt),
     [
       { value: "cancel", label: "Cancel", primary: true },
       { value: "go", label: `Apply to ${env.id}`, danger: true },
@@ -5124,6 +5283,8 @@ async function applyMigrations(upTo?: string) {
   if (go !== "go") return;
 
   const doneBusy = buttonBusy(migUi().apply, "Applying\u2026");
+  // Whether the list on screen is already the list as it is now.
+  let painted = false;
   // What we know: the operation, where, and which migrations were asked for.
   migProgressShow(
     `Applying ${pending.length} migration${pending.length === 1 ? "" : "s"} to ${env.id}`,
@@ -5140,6 +5301,14 @@ async function applyMigrations(upTo?: string) {
       // which is what Flyway does on its own.
       stop === -1 ? null : (upTo ?? null),
     );
+    // The list Flyway reported in the same invocation, free (Stage 24 §2.1).
+    // A targeted apply has none — `-target` would have made its `info` call
+    // everything above the target `Above Target`, so that one is not batched —
+    // and `showSelected` below asks for it.
+    if (out.info) {
+      paintReading(key, out.info);
+      painted = true;
+    }
     const refreshed = await refreshMatchedSchemas(env);
     migrationsOutcome(
       `Flyway applied ${out.executed} migration${out.executed === 1 ? "" : "s"} to ${env.id}` +
@@ -5167,7 +5336,10 @@ async function applyMigrations(upTo?: string) {
     migProgressHide();
     doneBusy();
   }
-  await showSelected();
+  // Only when the run did not bring a list with it: a batched `info` has
+  // already been painted, and asking again would spend the Flyway start this
+  // stage exists to save.
+  if (!painted) await showSelected();
 }
 
 /**
@@ -5227,11 +5399,9 @@ async function repairMigrations() {
   const { project, env } = target;
   const key = selKey(project.id, env.id);
 
-  const list = await whileBusy(migUi().repair, "Checking\u2026", () =>
-    api.flywayInfo(project.id, env.id, settings.flywayPath, outOfOrderFor(key)).catch(() => null),
-  );
-  if (!list) return void showSelected();
-  const failed = list.filter((m) => m.group === "failed");
+  const read = await readingForWrite(key, project, env, migUi().repair);
+  if (!read) return void showSelected();
+  const failed = read.reading.migrations.filter((m) => m.group === "failed");
 
   const named = failed
     .map((m) => `  ${m.version ? `V${m.version}` : "repeatable"}  ${m.description}`)
@@ -5262,7 +5432,8 @@ async function repairMigrations() {
         "tables. An edited migration stays applied exactly as it was first " +
         "executed \u2014 the edit is recorded as though it had always been " +
         "there, not applied to the database.\n\n" +
-        "You will be told what it changed."),
+        "You will be told what it changed.") +
+      `\n\n${readingAge(read.readAt)}`,
     [
       { value: "cancel", label: "Cancel", primary: true },
       { value: "go", label: `Repair ${env.id}`, danger: true },
@@ -5271,6 +5442,7 @@ async function repairMigrations() {
   if (go !== "go") return;
 
   const doneBusy = buttonBusy(migUi().repair, "Repairing\u2026");
+  let painted = false;
   migProgressShow(
     `Repairing the schema history of ${env.id}`,
     failed.length
@@ -5283,7 +5455,13 @@ async function repairMigrations() {
       env.id,
       { url: env.url, user: env.user },
       settings.flywayPath,
+      outOfOrderFor(key),
     );
+    // The refreshed list came back with the repair, in the same JVM.
+    if (out.info) {
+      paintReading(key, out.info);
+      painted = true;
+    }
     migrationsRepairAsked.delete(key);
     const touched = [...out.removed, ...out.deleted, ...out.aligned];
     migrationsOutcome(
@@ -5307,7 +5485,7 @@ async function repairMigrations() {
     migProgressHide();
     doneBusy();
   }
-  await showSelected();
+  if (!painted) await showSelected();
 }
 
 /**
