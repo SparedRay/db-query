@@ -6,8 +6,13 @@ import {
   note,
   defaultCsvOptions,
   MCP_PUT_QUERY_EVENT,
+  MCP_PUT_NOTES_EVENT,
   type AppDefaults,
   type McpPutQuery,
+  type McpPutNotes,
+  type McpNotesOutcome,
+  type DictionaryMerged,
+  type DictionarySkipped,
   type McpStatus,
   type ConnProfile,
   type TableRef,
@@ -3584,7 +3589,8 @@ syncBusy();
 
 // --------------------------------------------------------------- MCP server
 //
-// A tool outside this app can put a query in the editor. It cannot run one —
+// A tool outside this app can put a query in the editor, and write notes into
+// the dictionary beside it. It cannot run one, and it cannot save either —
 // see `src-tauri/src/mcp.rs`, where the absence of an execute tool is the
 // design rather than a gap.
 
@@ -3639,6 +3645,83 @@ void listen<McpPutQuery>(MCP_PUT_QUERY_EVENT, (event) => {
   }
   session.schedule();
 });
+
+/**
+ * Notes arrived from an MCP client: merged into the dictionary **buffer**,
+ * never into the file.
+ *
+ * The one tool that writes anything, and this is where its restraint lives.
+ * The agent sends structure; Rust composes the TOML against the text as it
+ * stands *this instant* — so notes that arrive mid-sentence land in front of
+ * whatever is being typed rather than behind it — and the result is a dirty
+ * tab somebody reads and saves. Ctrl+Z undoes the lot in one go.
+ *
+ * Unlike `put_query`, the client is **told what happened**. A tab that failed
+ * to arrive is visible the moment you look at the window; a note that failed
+ * to merge is not, and a note nobody notices is missing is the failure this
+ * stage exists to prevent. The call is waiting on `mcpNotesLanded`, so every
+ * path out of here answers it — including the ones that give up.
+ */
+void listen<McpPutNotes>(MCP_PUT_NOTES_EVENT, (event) => void notesFromMcp(event.payload));
+
+async function notesFromMcp(payload: McpPutNotes) {
+  const { request, connectionId, database, tables, replace } = payload;
+  const answer = (outcome: McpNotesOutcome) =>
+    void api.mcpNotesLanded(request, outcome).catch(() => {});
+  const giveUp = (problem: string) => {
+    results.setMessage(problem);
+    answer({ applied: [], skipped: [], problem });
+  };
+
+  const entry = conns.get(connectionId);
+  if (!entry) {
+    giveUp("Notes arrived from an MCP client for a connection that is no longer open.");
+    return;
+  }
+
+  let tab: ScriptTab;
+  let merged: DictionaryMerged;
+  try {
+    tab = await dictionaryTabFor(entry, tabs.activeConnection() === connectionId);
+    merged = await api.dictionaryMerge(tabs.textOf(tab), database, tables, replace);
+  } catch (err) {
+    giveUp(String(err));
+    return;
+  }
+
+  const wrote = merged.applied.filter((a) => a.wrote.length).map((a) => a.table);
+  if (wrote.length) {
+    tabs.proposeDoc(tab, merged.text);
+    void refreshDictBand();
+  }
+  results.setMessage(notesMessage(tab.title, entry.profile.name, wrote, merged.skipped));
+  answer({ applied: merged.applied, skipped: merged.skipped, problem: null });
+}
+
+/** What the person is told. Names the tables, because the next thing they do
+ *  is look for them. */
+function notesMessage(
+  title: string,
+  connection: string,
+  wrote: string[],
+  skipped: DictionarySkipped[],
+) {
+  if (!wrote.length) {
+    const why = skipped.length ? ` ${skipped[0].why}` : "";
+    return (
+      `An MCP client sent notes for ${connection} and nothing changed in ${title}.${why}`
+    );
+  }
+  const named = wrote.slice(0, 4).join(", ");
+  const more = wrote.length > 4 ? ` and ${wrote.length - 4} more` : "";
+  const left = skipped.length
+    ? ` ${skipped.length} ${skipped.length === 1 ? "was" : "were"} not written — see the tab.`
+    : "";
+  return (
+    `An MCP client wrote notes for ${named}${more} into ${title}. ` +
+    `Nothing is saved — read it and press Ctrl+S.${left}`
+  );
+}
 
 // --------------------------------------------------------------- migrations
 //
@@ -4775,26 +4858,37 @@ async function describeInDictionary(connId: string, table: string, column: strin
  * `files.ts` applies to any opened file.
  */
 async function openDictionary(entry: ConnectionEntry) {
-  const id = entry.profile.id;
   if (!entry.profile.dictionary) {
     if (!(await attachDictionary(entry))) return;
   }
-
-  let opened: OpenedFile;
   try {
-    opened = await api.dictionaryOpen(id);
+    await dictionaryTabFor(entry, true);
   } catch (err) {
     results.setMessage(String(err));
-    return;
   }
+}
 
+/**
+ * The tab holding this connection's dictionary, reading the file in if it is
+ * not already open.
+ *
+ * `activate` is false when something other than the person asked — notes from
+ * an MCP client land in the buffer whether or not that workspace is the one on
+ * screen, and pulling somebody's view across is not part of the deal. A tab
+ * that has to be *created* is activated regardless, exactly as an arriving
+ * query's is: a buffer nobody can see is worse than a switch nobody asked for.
+ *
+ * Throws rather than reporting, so the caller decides who hears about it.
+ */
+async function dictionaryTabFor(entry: ConnectionEntry, activate: boolean): Promise<ScriptTab> {
+  const opened: OpenedFile = await api.dictionaryOpen(entry.profile.id);
   const existing = tabs.all().find((t) => t.filePath === opened.path);
   if (existing) {
-    tabs.activate(existing.id);
-    return;
+    if (activate) tabs.activate(existing.id);
+    return existing;
   }
-  tabs.create({
-    connectionId: id,
+  return tabs.create({
+    connectionId: entry.profile.id,
     kind: "dictionary",
     contents: opened.contents,
     title: opened.name,

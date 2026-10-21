@@ -180,6 +180,8 @@ Drawn before building: <https://claude.ai/artifact/QiqnQdoPMUBe3qN2UvY6gp>
 - **D7** The file opens in a tab, saves with Ctrl+S, and offers no Run.
 - **D8** "Describe for the assistant…" inserts a stub in that tab.
 - **D9** The chat header says the dictionary is being sent.
+- **D10** An MCP client can write notes into the dictionary tab — reviewed and
+  saved by the person, never written to the file by the server.
 
 ## 6. Task tracker
 
@@ -329,3 +331,69 @@ reconciled.
 Both new packages are MIT and recorded in `THIRD-PARTY-LICENSES.txt`, which is
 generated from the bundle's own sourcemap — so they appeared there only after
 the bundle was rebuilt, which is the point of generating it that way.
+
+### Slice 5 — `put_notes`, the one tool that writes · built 2026-10-21
+- [x] `dictionary::merge`: text-level, comment-preserving, every write read back
+- [x] `put_notes` as the fifth MCP tool, and the test that had to be edited
+- [x] the round trip: the tool waits for the window and reports what landed
+- [x] `proposeDoc`, the twin of `replaceDoc` that leaves the tab dirty
+- [x] 13 Rust tests, 4 more in `mcp.rs`, 7 UI tests · D10 met
+
+The use case this was asked for: *"I will connect an agent with code context so
+it can write proper context on tables"*. An agent reading the application's own
+code knows what `status` means; nobody has time to write three hundred notes by
+hand.
+
+**It writes to the buffer, not the file.** The notes travel structured, Rust
+composes the TOML against the text as it stands **this instant**, and the result
+lands in the dictionary tab dirty. So notes arriving while somebody is halfway
+through a sentence land in front of that sentence rather than behind it, a save
+is still the person's keystroke, and one Ctrl+Z puts the whole arrival back.
+Nothing here grows a fifth risk class: no SQL, no database write, no disk write.
+
+**Text, not a round trip through the parser.** Re-serialising a parsed
+dictionary would be a dozen lines and would destroy the file — `starter()`
+writes every real table as a *commented-out* stub, so most of a young
+dictionary is comments, and `serde` does not keep comments. `merge` therefore
+edits the text: it fills an existing key in place, adds one after a section's
+last key, and replaces a generated stub **where it stands** rather than
+appending a live section below it (385 stubs plus 385 live sections is a file
+nobody can read).
+
+**Every write is read back.** TOML has more ways to spell an entry than this
+edits — a `[tables.x.columns]` subtable, a `[databases.db.tables.x]` override,
+an inline table. Rather than handle each, `merge` writes, re-parses, and checks
+the dictionary now *says* what was asked; a write that does not read back is
+reverted and reported by name. Removing that check fails two tests, and one of
+them proves the uncaught case would have left **unparseable TOML** in somebody's
+editor.
+
+**The user's own sentence outranks a generated one.** `replace` is off by
+default: anything already written comes back as `kept`, per field, and the tool
+tells the client to send `replace: true` only if it means to overwrite their
+words.
+
+**Why this one waits for the window**, where `put_query` answers immediately: a
+tab that failed to arrive is visible the moment you look at the app, and a note
+that failed to merge is not. A note nobody notices is missing is the failure
+this whole stage exists to prevent — so `put_notes` holds the call on a oneshot
+channel for up to ten seconds, and every path through the frontend handler
+answers it, including the ones that give up. A client is never told "placed"
+without the window having said so.
+
+Two things worth recording:
+
+**The fifth tool is in the test, not in a count.** `advertises_exactly_the_four_tools`
+had to be renamed and its list extended by hand, which is exactly what asserting
+the list rather than the length is for — `nothing_advertised_can_execute` still
+passes unchanged.
+
+**A falsification that passed, and what the measurement said.** `proposeDoc`
+first carried `isolateHistory.of("full")`, reasoning from `replaceRange`'s
+lesson that an arrival landing within half a second of a keystroke would merge
+into that typing and one Ctrl+Z would throw away both. Removing the annotation
+failed nothing. Measured: the gap in the real path is **50ms**, well inside
+CodeMirror's grouping window, and undo *still* separates them — a change
+spanning the whole document is never grouped with the typing inside it. The
+annotation was a line claiming to prevent something that cannot happen, so it
+is gone and the comment says why.

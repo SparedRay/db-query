@@ -454,6 +454,542 @@ pub fn starter(database: &str, tables: &[String]) -> String {
     out
 }
 
+// ------------------------------------------------------------------ the merge
+//
+// Stage 25 slice 5. Something outside the app — an agent with the code in
+// front of it — proposes what a table means, and the proposal has to end up in
+// a file a person already owns and may be in the middle of editing.
+//
+// # Text, not a round trip through the parser
+//
+// Re-serialising a parsed dictionary would be a dozen lines and would destroy
+// the file: `starter()` writes every real table as a *commented-out* stub, so
+// most of a young dictionary is comments, and `serde` does not keep comments.
+// Everything below therefore edits the text in place, which is also what makes
+// the result reviewable as a diff.
+//
+// # Every write is read back
+//
+// TOML has more ways to spell an entry than this module edits — a
+// `[tables.x.columns]` subtable, a `[databases.db.tables.x]` override, an
+// inline table. Rather than handle each, [`merge`] writes, re-parses, and
+// checks that the dictionary now *says* what was asked. A write that does not
+// read back is reverted and reported, so the failure mode is "your note was
+// not written, here is why" rather than a corrupted file or a silent loss.
+
+/// The longest note this accepts, in characters.
+///
+/// A dictionary note is a sentence or two: §2's measurement is that the whole
+/// annotation budget for a prompt is 8,000 characters, so one note that
+/// spends an eighth of it is a mistake rather than a style.
+pub const MAX_NOTE_CHARS: usize = 1_000;
+
+/// What to write about one table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteEdit {
+    pub table: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub join: Option<String>,
+    #[serde(default)]
+    pub columns: BTreeMap<String, String>,
+}
+
+/// What one table's edit did. **Both halves matter**: `kept` is how a caller
+/// learns that a sentence somebody wrote by hand was left alone, which is the
+/// difference between "done" and "done, and I overwrote you".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Applied {
+    pub table: String,
+    /// Field labels written: `note`, `join`, `columns.status`.
+    pub wrote: Vec<String>,
+    /// Field labels left as they were, because they already said something.
+    pub kept: Vec<String>,
+}
+
+/// A table whose notes were not written at all, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skipped {
+    pub table: String,
+    pub why: String,
+}
+
+/// The merged text, and what became of each table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Merged {
+    pub text: String,
+    pub applied: Vec<Applied>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// Write notes into a dictionary's text.
+///
+/// `database` is only consulted to answer *what the file currently says* — a
+/// per-database override has to be seen, or a write would be reported as
+/// landing when it is being shadowed. Writes themselves always go to the
+/// shared `[tables.<name>]` section, which is the keying the whole file is
+/// built on (§ "Keyed by table").
+///
+/// `replace` decides the one question that is not ours: whether a note
+/// somebody already wrote may be overwritten. Default off — the person's own
+/// sentence outranks a generated one, and an agent that means it can say so.
+pub fn merge(
+    text: &str,
+    database: &str,
+    edits: &[NoteEdit],
+    replace: bool,
+) -> Result<Merged, String> {
+    // A file that does not parse cannot be merged into: every decision below
+    // asks what it currently says, and the answer would be a guess.
+    parse(text).map_err(|e| {
+        format!("The dictionary as it stands cannot be read, so nothing was written: {e}")
+    })?;
+
+    let mut out = text.to_string();
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+
+    for edit in edits {
+        let spelled = edit.table.trim();
+        if spelled.is_empty() {
+            skipped.push(Skipped {
+                table: edit.table.clone(),
+                why: "No table name was given.".into(),
+            });
+            continue;
+        }
+        match apply(&out, database, spelled, edit, replace) {
+            Ok((next, done)) => {
+                out = next;
+                applied.push(done);
+            }
+            Err(why) => skipped.push(Skipped {
+                table: spelled.to_string(),
+                why,
+            }),
+        }
+    }
+
+    Ok(Merged {
+        text: out,
+        applied,
+        skipped,
+    })
+}
+
+/// One table's edit: decide the fields, write them, read them back.
+fn apply(
+    text: &str,
+    database: &str,
+    spelled: &str,
+    edit: &NoteEdit,
+    replace: bool,
+) -> Result<(String, Applied), String> {
+    let name = fold(spelled);
+    let said = parse(text)
+        .ok()
+        .and_then(|l| l.dictionary.table(database, &name));
+
+    // What was asked for, in spending order: what the table is, then how it
+    // joins, then its columns — the order §2 settled for the prompt, and the
+    // order a reader of the file wants them in.
+    let mut asked: Vec<(Vec<String>, String, String)> = Vec::new();
+    let mut want = |path: Vec<String>, label: String, value: Option<&String>| {
+        if let Some(v) = value.map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            asked.push((path, label, v.to_string()));
+        }
+    };
+    want(vec!["note".into()], "note".into(), edit.note.as_ref());
+    want(vec!["join".into()], "join".into(), edit.join.as_ref());
+    for (column, value) in &edit.columns {
+        let column = column.trim();
+        if column.is_empty() {
+            continue;
+        }
+        want(
+            vec!["columns".into(), fold(column)],
+            format!("columns.{column}"),
+            Some(value),
+        );
+    }
+
+    if asked.is_empty() {
+        return Err("Nothing to write: every note in it was empty.".into());
+    }
+    if let Some((_, label, value)) = asked
+        .iter()
+        .find(|(_, _, v)| v.chars().count() > MAX_NOTE_CHARS)
+    {
+        return Err(format!(
+            "`{label}` is {} characters; a dictionary note is a sentence or two, and {MAX_NOTE_CHARS} \
+             is the limit. Nothing was written for this table.",
+            value.chars().count()
+        ));
+    }
+
+    // Already written, and nobody said to overwrite: kept, and said so.
+    let mut wrote = Vec::new();
+    let mut kept = Vec::new();
+    let mut writing = Vec::new();
+    for (path, label, value) in asked {
+        let already = existing(said.as_ref(), &path);
+        if already.is_some() && !replace {
+            kept.push(label);
+        } else {
+            wrote.push(label);
+            writing.push((path, value));
+        }
+    }
+
+    let done = Applied {
+        table: name.clone(),
+        wrote,
+        kept,
+    };
+    if writing.is_empty() {
+        // Nothing to do, and that is not a failure: the file already says it.
+        return Ok((text.to_string(), done));
+    }
+
+    let mut out = text.to_string();
+    match table_section(&out, &name) {
+        Some(_) => {
+            for (path, value) in &writing {
+                // Re-found each time: every write moves the offsets after it.
+                let body = table_section(&out, &name).ok_or_else(|| {
+                    "The section disappeared while it was being written.".to_string()
+                })?;
+                out = set_key(&out, body, path, value);
+            }
+        }
+        None => {
+            let section = new_section(spelled, &writing);
+            match stub_block(&out, &name) {
+                // A generated stub is replaced where it stands. `starter()`
+                // writes one per real table, so appending below would leave a
+                // young dictionary saying everything twice with the dead copy
+                // on top.
+                Some((from, to)) => out.replace_range(from..to, &section),
+                None => {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    if !out.is_empty() && !out.ends_with("\n\n") {
+                        out.push('\n');
+                    }
+                    out.push_str(&section);
+                }
+            }
+        }
+    }
+
+    // The write is only a write if the dictionary now says it.
+    let got = parse(&out)
+        .map_err(|e| {
+            format!(
+                "Writing this would have left the file unreadable, so nothing was written \
+                 for `{name}`. Its entry may use a form this app does not edit — a \
+                 `[tables.{name}.columns]` subtable, or an inline table. ({e})"
+            )
+        })?
+        .dictionary
+        .table(database, &name);
+    for (path, value) in &writing {
+        if existing(got.as_ref(), path).as_deref() != Some(value.as_str()) {
+            return Err(format!(
+                "After writing, the dictionary still reads differently for `{name}`, so \
+                 nothing was written: something else in the file decides this entry — a \
+                 `[databases.*.tables.{name}]` override, most likely."
+            ));
+        }
+    }
+
+    Ok((out, done))
+}
+
+/// What the dictionary currently says at one field path, trimmed, or `None`
+/// when it says nothing there.
+fn existing(said: Option<&TableNote>, path: &[String]) -> Option<String> {
+    let said = said?;
+    let value = match path {
+        [one] if one == "note" => said.note.as_deref(),
+        [one] if one == "join" => said.join.as_deref(),
+        [first, column] if first == "columns" => said.columns.get(column).map(String::as_str),
+        _ => None,
+    }?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+// ------------------------------------------------------------- reading TOML as text
+
+/// Every line, with its byte offset. The newline stays on the line, so
+/// splicing one preserves whatever the file uses.
+fn text_lines(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        out.push((at, line));
+        at += line.len();
+    }
+    out
+}
+
+/// A dotted key at the start of `s`: its folded segments, and how many bytes
+/// it took. Quoted segments are read but never written back quoted unless they
+/// have to be — this is for *finding* a key.
+fn dotted(s: &str) -> Option<(Vec<String>, usize)> {
+    let mut rest = s;
+    let mut used = 0;
+    let mut path = Vec::new();
+    loop {
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        used += rest.len() - trimmed.len();
+        rest = trimmed;
+
+        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let segment = match quote {
+            Some(q) => {
+                let body = &rest[1..];
+                // A key with an escaped quote in it is not a key this edits;
+                // failing to read it means "no match", which is correct.
+                let end = body.find(q)?;
+                let segment = body[..end].to_string();
+                let taken = 1 + end + q.len_utf8();
+                used += taken;
+                rest = &rest[taken..];
+                segment
+            }
+            None => {
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    return None;
+                }
+                let segment = rest[..end].to_string();
+                used += end;
+                rest = &rest[end..];
+                segment
+            }
+        };
+        path.push(fold(&segment));
+
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        used += rest.len() - trimmed.len();
+        rest = trimmed;
+        match rest.strip_prefix('.') {
+            Some(after) => {
+                used += 1;
+                rest = after;
+            }
+            None => return Some((path, used)),
+        }
+    }
+}
+
+/// Does this line open a section? `[[array]]` counts: it ends the section
+/// above it just the same, even though nothing here matches one.
+fn is_header(line: &str) -> bool {
+    line.trim_start().starts_with('[')
+}
+
+/// The folded path a `[section]` header names, when it is one this can read.
+fn header_path(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix('[')?;
+    if rest.starts_with('[') {
+        return None;
+    }
+    let (path, used) = dotted(rest)?;
+    rest[used..].trim_start().starts_with(']').then_some(path)
+}
+
+/// The folded key a line assigns to, and the byte index just past the key's
+/// own text — so the key can be rewritten exactly as the user spelled it.
+fn key_line(line: &str) -> Option<(Vec<String>, usize)> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    if rest.starts_with('#') || rest.starts_with('[') {
+        return None;
+    }
+    let (path, used) = dotted(rest)?;
+    rest[used..]
+        .trim_start()
+        .starts_with('=')
+        .then(|| (path, indent + used))
+}
+
+/// Where `[tables.<name>]`'s body is: from just after its header line to the
+/// start of the next header, or the end of the file.
+fn table_section(text: &str, name: &str) -> Option<(usize, usize)> {
+    let mut body: Option<usize> = None;
+    for (at, line) in text_lines(text) {
+        if !is_header(line) {
+            continue;
+        }
+        if let Some(start) = body {
+            return Some((start, at));
+        }
+        if header_path(line).is_some_and(|p| p.len() == 2 && p[0] == "tables" && p[1] == name) {
+            body = Some(at + line.len());
+        }
+    }
+    body.map(|start| (start, text.len()))
+}
+
+/// The byte range of a generated stub for this table — `# [tables.x]` and the
+/// empty `# note = ""` lines under it — when that is what is there.
+///
+/// Narrow on purpose: only lines whose uncommented form assigns an **empty
+/// string** are taken. A commented line somebody wrote themselves is left
+/// exactly where it is.
+fn stub_block(text: &str, name: &str) -> Option<(usize, usize)> {
+    let lines = text_lines(text);
+    let mut found: Option<(usize, usize)> = None;
+    for (i, (at, line)) in lines.iter().enumerate() {
+        let Some(bare) = line.trim_start().strip_prefix('#') else {
+            continue;
+        };
+        if !header_path(bare).is_some_and(|p| p.len() == 2 && p[0] == "tables" && p[1] == name) {
+            continue;
+        }
+        let mut end = at + line.len();
+        for (next_at, next) in &lines[i + 1..] {
+            let Some(bare) = next.trim_start().strip_prefix('#') else {
+                break;
+            };
+            let empty = key_line(bare).is_some_and(|(_, key_end)| {
+                let value = bare[key_end..].trim_start().trim_start_matches('=').trim();
+                value == "\"\"" || value == "''"
+            });
+            if !empty {
+                break;
+            }
+            end = next_at + next.len();
+        }
+        found = Some((*at, end));
+        break;
+    }
+    found
+}
+
+// ------------------------------------------------------------- writing TOML as text
+
+/// Set one key inside a section's body, replacing its line when it is there
+/// and adding one after the section's last key when it is not — so a trailing
+/// comment or blank line stays below rather than being written over.
+fn set_key(text: &str, body: (usize, usize), path: &[String], value: &str) -> String {
+    let (start, end) = body;
+    let section = &text[start..end];
+
+    let mut after_last_key = 0;
+    for (at, line) in text_lines(section) {
+        match key_line(line) {
+            Some((found, key_end)) if found == path => {
+                let newline = if line.ends_with('\n') { "\n" } else { "" };
+                let mut out = text.to_string();
+                out.replace_range(
+                    start + at..start + at + line.len(),
+                    // `key_end` is where the key's own text stops, so the
+                    // whitespace the file had around `=` is rewritten rather
+                    // than doubled.
+                    &format!(
+                        "{} = {}{newline}",
+                        line[..key_end].trim_end(),
+                        quoted(value)
+                    ),
+                );
+                return out;
+            }
+            Some(_) => after_last_key = at + line.len(),
+            None => {}
+        }
+    }
+
+    let at = start + after_last_key;
+    let mut insert = String::new();
+    if at > 0 && !text[..at].ends_with('\n') {
+        insert.push('\n');
+    }
+    insert.push_str(&format!("{} = {}\n", key_text(path), quoted(value)));
+    let mut out = text.to_string();
+    out.insert_str(at, &insert);
+    out
+}
+
+/// A whole `[tables.<name>]` section, for a table the file has never mentioned.
+///
+/// The name is written as the caller spelled it. Lookups fold, so the case
+/// makes no difference to what is found — and a file somebody reads is better
+/// off saying `OrderLines` where their schema does.
+fn new_section(spelled: &str, fields: &[(Vec<String>, String)]) -> String {
+    let mut out = format!(
+        "[{}]\n",
+        key_text(&[String::from("tables"), spelled.to_string()])
+    );
+    for (path, value) in fields {
+        out.push_str(&format!("{} = {}\n", key_text(path), quoted(value)));
+    }
+    out
+}
+
+/// A dotted key, quoting only the segments that need it.
+fn key_text(path: &[impl AsRef<str>]) -> String {
+    path.iter()
+        .map(|segment| {
+            let segment = segment.as_ref();
+            if bare_key(segment) {
+                segment.to_string()
+            } else {
+                quoted(segment)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn bare_key(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A TOML basic string.
+///
+/// Hand-written rather than borrowed from the serializer because the
+/// serializer writes *documents*: there is no "give me one value" entrance to
+/// it. The property that matters is tested by reading the result back through
+/// `parse` rather than by eye — see `prose_with_quotes_and_newlines_survives`.
+fn quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            // Every other control character, which a basic string may not
+            // hold literally. Prose pasted out of a terminal has them.
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,5 +1422,363 @@ mod tests {
         forget();
         let e = load(Path::new("/nonexistent/db-query/dictionary.toml")).expect_err("must fail");
         assert!(e.contains("dictionary at /nonexistent"), "{e}");
+    }
+
+    // ----------------------------------------- Stage 25 slice 5: the merge
+
+    /// One table's worth of notes, as `put_notes` sends them.
+    fn edit(
+        table: &str,
+        note: Option<&str>,
+        join: Option<&str>,
+        columns: &[(&str, &str)],
+    ) -> NoteEdit {
+        NoteEdit {
+            table: table.into(),
+            note: note.map(str::to_string),
+            join: join.map(str::to_string),
+            columns: columns
+                .iter()
+                .map(|(c, v)| ((*c).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    fn merged(text: &str, edits: &[NoteEdit], replace: bool) -> Merged {
+        merge(text, "warehouse", edits, replace).expect("the file parses, so the merge runs")
+    }
+
+    /// The plain case: a table nobody has mentioned gets a section, and the
+    /// dictionary says what was asked **when read back through the parser** —
+    /// which is the only assertion worth making about generated TOML.
+    #[test]
+    fn a_table_the_file_never_mentioned_gets_a_section() {
+        let out = merged(
+            SAMPLE,
+            &[edit(
+                "shipments",
+                Some("One row per parcel that left the building."),
+                Some("shipments.order_id = orders.id"),
+                &[("carrier", "DHL, UPS or ROYAL. Never null after dispatch.")],
+            )],
+            false,
+        );
+        assert_eq!(out.skipped, vec![]);
+        assert_ne!(out.text, SAMPLE, "the text changed");
+        assert_eq!(
+            out.applied[0].wrote,
+            vec!["note", "join", "columns.carrier"],
+            "in spending order: what it is, how it joins, then its columns"
+        );
+
+        let d = parse(&out.text).expect("the result parses").dictionary;
+        let said = d.table("warehouse", "shipments").expect("described now");
+        assert_eq!(
+            said.note.as_deref(),
+            Some("One row per parcel that left the building.")
+        );
+        assert_eq!(said.join.as_deref(), Some("shipments.order_id = orders.id"));
+        assert_eq!(
+            d.column("warehouse", "shipments", "carrier").as_deref(),
+            Some("DHL, UPS or ROYAL. Never null after dispatch.")
+        );
+
+        // And nothing that was already there moved.
+        assert!(d.describes("warehouse", "orders"));
+        assert_eq!(
+            d.column("warehouse", "orders", "status").as_deref(),
+            Some("P=pending, S=shipped, X=cancelled.")
+        );
+    }
+
+    /// The stub case, which is what the generated starter leaves behind: the
+    /// key is there and empty, so it is **filled**, not duplicated. A second
+    /// `note` key in one section is a TOML error, so getting this wrong would
+    /// break the file rather than look untidy.
+    #[test]
+    fn an_empty_note_in_an_existing_section_is_filled_in_place() {
+        let text = "[tables.orders]\nnote = \"\"\ncolumns.status = \"\"\n";
+        let out = merged(
+            text,
+            &[edit(
+                "orders",
+                Some("One row per order."),
+                None,
+                &[("status", "P, S or X.")],
+            )],
+            false,
+        );
+        assert_eq!(out.text.matches("note = ").count(), 1, "{}", out.text);
+        assert_eq!(
+            out.text.matches("columns.status = ").count(),
+            1,
+            "{}",
+            out.text
+        );
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.table("warehouse", "orders").unwrap().note.as_deref(),
+            Some("One row per order.")
+        );
+        assert_eq!(
+            d.column("warehouse", "orders", "status").as_deref(),
+            Some("P, S or X.")
+        );
+    }
+
+    /// **The safeguard.** A sentence somebody wrote by hand outranks a
+    /// generated one: it is kept, and the caller is told it was kept rather
+    /// than left to assume it was written.
+    #[test]
+    fn a_note_somebody_wrote_is_kept_unless_replacing_is_asked_for() {
+        let edits = [edit(
+            "orders",
+            Some("A guess at what orders means."),
+            None,
+            &[],
+        )];
+
+        let out = merged(SAMPLE, &edits, false);
+        assert_eq!(out.applied[0].kept, vec!["note"]);
+        assert!(out.applied[0].wrote.is_empty());
+        assert_eq!(out.text, SAMPLE, "the text is untouched byte for byte");
+
+        let out = merged(SAMPLE, &edits, true);
+        assert_eq!(out.applied[0].wrote, vec!["note"]);
+        assert!(out.applied[0].kept.is_empty());
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.table("warehouse", "orders").unwrap().note.as_deref(),
+            Some("A guess at what orders means.")
+        );
+        // The rest of that section survived the replacement.
+        assert_eq!(
+            d.table("warehouse", "orders").unwrap().join.as_deref(),
+            Some("orders.customer_id = customers.id")
+        );
+    }
+
+    /// A column note goes into **its own** table's section. The section is
+    /// found by its header rather than by order, so the one risk worth a test
+    /// is a note landing in the section above or below.
+    #[test]
+    fn a_column_note_lands_in_its_own_section() {
+        let out = merged(
+            SAMPLE,
+            &[edit(
+                "order_lines",
+                None,
+                None,
+                &[("qty", "Base units, never packs.")],
+            )],
+            false,
+        );
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.column("warehouse", "order_lines", "qty").as_deref(),
+            Some("Base units, never packs.")
+        );
+        assert_eq!(d.column("warehouse", "orders", "qty"), None);
+        // The section it was already in keeps its own note.
+        assert!(d.table("warehouse", "order_lines").unwrap().note.is_some());
+    }
+
+    /// **Why `stub_block` exists.** `starter()` writes one commented-out
+    /// section per real table — 385 of them in the reported setup — so
+    /// appending live sections underneath would leave the file saying
+    /// everything twice with the dead copy on top. The stub is replaced where
+    /// it stands, and every other table's stub is left alone.
+    #[test]
+    fn a_generated_stub_is_replaced_where_it_stands() {
+        let text = starter("warehouse", &["orders".into(), "order_lines".into()]);
+        let out = merged(
+            &text,
+            &[edit("orders", Some("One row per order."), None, &[])],
+            false,
+        );
+
+        assert!(
+            !out.text.contains("# [tables.orders]"),
+            "the stub it filled is gone: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("# [tables.order_lines]"),
+            "the other table's stub is untouched: {}",
+            out.text
+        );
+        assert!(
+            out.text
+                .contains("# What the tables and columns of `warehouse` mean."),
+            "the file's own header comment survives: {}",
+            out.text
+        );
+        assert_eq!(
+            out.text.matches("[tables.orders]").count(),
+            1,
+            "{}",
+            out.text
+        );
+
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.table("warehouse", "orders").unwrap().note.as_deref(),
+            Some("One row per order.")
+        );
+    }
+
+    /// Prose is prose: quotation marks, a backslash, a newline, a tab and a
+    /// control character that a basic string may not hold literally. Asserted
+    /// by reading it back rather than by eye, because what matters is what the
+    /// parser makes of it.
+    #[test]
+    fn prose_with_quotes_and_newlines_survives() {
+        let prose = "Status is \"P\" or \"S\".\nPath: C:\\tmp\tand a bell: \u{7}";
+        let out = merged("", &[edit("orders", Some(prose), None, &[])], false);
+        let d = parse(&out.text).expect("the result parses").dictionary;
+        assert_eq!(
+            d.table("warehouse", "orders").unwrap().note.as_deref(),
+            Some(prose)
+        );
+    }
+
+    /// A form this module does not edit is **refused**, not papered over. The
+    /// write would make the file unreadable — two definitions of one table —
+    /// so it is reverted and the reason names the shape.
+    #[test]
+    fn a_columns_subtable_is_refused_rather_than_corrupted() {
+        let text = "[tables.orders]\nnote = \"One row per order.\"\n\n[tables.orders.columns]\nstatus = \"P, S or X.\"\n";
+        let out = merged(
+            text,
+            &[edit("orders", None, None, &[("total", "Cents.")])],
+            false,
+        );
+
+        assert_eq!(out.text, text, "nothing was written");
+        assert!(out.applied.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+        assert!(
+            out.skipped[0].why.contains("subtable"),
+            "the reason names the shape: {}",
+            out.skipped[0].why
+        );
+        // And the file still reads the way it did.
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.column("warehouse", "orders", "status").as_deref(),
+            Some("P, S or X.")
+        );
+    }
+
+    /// A per-database override decides this entry, so writing the shared one
+    /// would be a write that **reads back differently** — reported rather than
+    /// claimed. The readback is the only thing that catches this.
+    #[test]
+    fn an_override_that_shadows_the_write_is_reported() {
+        let text = "[tables.orders]\nnote = \"Shared.\"\n\n[databases.warehouse.tables.orders]\nnote = \"Frozen copy.\"\n";
+        let out = merged(
+            text,
+            &[edit("orders", Some("A better sentence."), None, &[])],
+            true,
+        );
+
+        assert_eq!(out.text, text, "nothing was written");
+        assert_eq!(out.skipped.len(), 1);
+        assert!(
+            out.skipped[0].why.contains("databases"),
+            "the reason names what decides it: {}",
+            out.skipped[0].why
+        );
+    }
+
+    /// A file somebody is halfway through editing cannot be merged into:
+    /// every decision above asks what it currently says.
+    #[test]
+    fn a_file_that_does_not_parse_is_refused_whole() {
+        let err = merge(
+            "[tables.orders\nnote = \"x\"",
+            "warehouse",
+            &[edit("orders", Some("x"), None, &[])],
+            false,
+        )
+        .expect_err("a broken file is an error, not a merge");
+        assert!(err.contains("cannot be read"), "{err}");
+    }
+
+    /// Nothing to say is said out loud. An agent that sent empty strings has a
+    /// bug, and a silent success would hide it.
+    #[test]
+    fn an_edit_with_nothing_in_it_is_skipped_with_a_reason() {
+        let out = merged(
+            SAMPLE,
+            &[edit("orders", Some("   "), Some(""), &[("status", " ")])],
+            false,
+        );
+        assert!(out.applied.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+        assert!(
+            out.skipped[0].why.contains("empty"),
+            "{}",
+            out.skipped[0].why
+        );
+        assert_eq!(out.text, SAMPLE);
+    }
+
+    /// A note the length of an essay is refused: the whole annotation budget
+    /// for one prompt is 8,000 characters (§2).
+    #[test]
+    fn a_note_longer_than_the_limit_is_refused() {
+        let long = "x".repeat(MAX_NOTE_CHARS + 1);
+        let out = merged(SAMPLE, &[edit("shipments", Some(&long), None, &[])], false);
+        assert!(out.applied.is_empty());
+        assert!(
+            out.skipped[0].why.contains(&MAX_NOTE_CHARS.to_string()),
+            "{}",
+            out.skipped[0].why
+        );
+        assert_eq!(out.text, SAMPLE);
+    }
+
+    /// One table's failure is one table's failure. The others are still
+    /// written, which is what makes a twenty-table call worth making.
+    #[test]
+    fn one_bad_table_does_not_cost_the_others() {
+        let out = merged(
+            SAMPLE,
+            &[
+                edit("", Some("nameless"), None, &[]),
+                edit("shipments", Some("One row per parcel."), None, &[]),
+            ],
+            false,
+        );
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.applied.len(), 1);
+        assert_eq!(out.applied[0].table, "shipments");
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert!(d.describes("warehouse", "shipments"));
+    }
+
+    /// The case somebody types is not the case a lookup needs, and both are
+    /// true here: `ORDERS` finds the `[tables.orders]` that is already in the
+    /// file rather than adding a second section.
+    #[test]
+    fn the_case_of_the_name_does_not_decide_which_section_is_written() {
+        let out = merged(
+            SAMPLE,
+            &[edit("  ORDERS  ", None, None, &[("TOTAL", "Cents.")])],
+            false,
+        );
+        assert_eq!(
+            out.text.matches("[tables.orders]").count(),
+            1,
+            "{}",
+            out.text
+        );
+        assert!(!out.text.contains("[tables.ORDERS]"), "{}", out.text);
+        let d = parse(&out.text).expect("parses").dictionary;
+        assert_eq!(
+            d.column("warehouse", "orders", "total").as_deref(),
+            Some("Cents.")
+        );
     }
 }
