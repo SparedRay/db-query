@@ -1412,18 +1412,27 @@ test("output that is not a report is shown as it came", async ({ page }) => {
   await expect(body).toContainText("JAVA_TOOL_OPTIONS");
 });
 
-test("the output pane can be collapsed and says which it is", async ({ page }) => {
+/**
+ * Stage 26 moved this: the output has no Hide button of its own, because the
+ * pane it lives in grew a header that collapses either kind of output. What is
+ * still asserted is the same property — it can be shut, and it says which
+ * output it is while shut.
+ */
+test("the output pane collapses from the pane header, which says which it is", async ({ page }) => {
   await withProject(page);
-  const toggle = page.locator("#btn-flyway-toggle");
-  await expect(toggle).toHaveText("Hide");
+  const head = page.locator("#res-toggle");
+  await expect(page.locator("#res-title")).toHaveText("Flyway output");
   await expect(page.locator("#flyway-body")).toBeVisible();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
 
-  await toggle.click();
-  await expect(toggle).toHaveText("Show");
+  await head.click();
   await expect(page.locator("#flyway-body")).toBeHidden();
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  // Shut, the header is what says anything at all about this pane.
+  await expect(page.locator("#res-summary")).toBeVisible();
+  await expect(page.locator("#res-summary")).not.toBeEmpty();
 
-  await toggle.click();
+  await head.click();
   await expect(page.locator("#flyway-body")).toBeVisible();
 });
 

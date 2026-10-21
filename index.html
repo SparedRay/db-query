@@ -122,6 +122,25 @@
         <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>
 
         <section id="results-pane">
+          <!-- Stage 26. The pane's own header, and the one place either kind of
+               output is collapsed from: a SQL grid and Flyway's report are the
+               same pane in two costumes, so two toggles would have been two
+               habits to learn. Shut, it is this strip at the bottom of the
+               window; the height lives in `--editor-h` and is never touched by
+               collapsing, so reopening lands on the size you dragged to.
+
+               A <button> spanning the row rather than a caret you have to hit:
+               the whole strip is the target, which is what makes it a habit. -->
+          <button type="button" id="res-toggle" class="res-head"
+                  aria-expanded="true" aria-controls="results-body">
+            <span class="twisty open" id="res-caret"></span>
+            <span class="res-title" id="res-title">Results</span>
+            <!-- What is worth seeing while the pane is shut: the status chips in
+                 one line, or Flyway's operation. Hidden while it is open, where
+                 the result bar already says it. -->
+            <span class="res-summary" id="res-summary"></span>
+            <kbd class="res-key">Ctrl+J</kbd>
+          </button>
           <!-- A long job's progress, raised by whoever is running one. The
                migrations view has had this since Stage 20 as `#mig-progress`;
                it moved out here when the schema export needed the same thing,
@@ -129,47 +148,50 @@
                migrations. Unlike Flyway, a job that we are running ourselves
                knows its real progress, so this says counts rather than only
                elapsed time. -->
+          <!-- **Outside `#results-body`, deliberately.** Collapsing the pane
+               while a schema export or a migrate is running must not hide the
+               one line that says how far it has got. -->
           <div id="job-strip" class="mig-progress" hidden></div>
-          <!-- A finished job's report (Stage 23). In the strip's slot, because
-               a run ends by turning one into the other — but a *band* rather
-               than a replacement for the grid: `#flyway-pane` replaces it
-               because a migrations tab has no result set, and this is not that
-               case. Outside the tab system, so switching tabs and running
-               queries leave it alone, which is the whole point: today's export
-               report goes into `#grid` and `onActivate` repaints that. -->
-          <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
-          <div id="tabs" class="tabs"></div>
-          <div id="grid" class="grid-host" tabindex="0"></div>
-          <!-- L3. A migrations tab has no result set — its answers are
-               sentences and a report — so the pane that holds the SQL grid
-               holds Flyway's output instead. It replaces the grid rather than
-               sitting beside it: two scrolling regions in one tab, one of them
-               always empty, is worse than a swap. -->
-          <section id="flyway-pane" class="flyway-pane" hidden>
-            <div class="flyway-head">
-              <span class="flyway-title">Flyway output</span>
-              <span id="flyway-when" class="flyway-when"></span>
-              <button type="button" id="btn-flyway-toggle" class="mini"
-                      aria-expanded="true" aria-controls="flyway-body">Hide</button>
-            </div>
-            <div id="flyway-body" class="flyway-body" tabindex="0"></div>
-          </section>
-          <!-- Two rows. The note used to sit between the status chips and the
-               buttons, which left it a few characters wide: the chips wrapped
-               into a vertical stack to make room, and the sentence was
-               ellipsised after its first clause. A whole sentence needs a whole
-               row. -->
-          <div class="result-bar">
-            <div class="result-bar-row">
-              <div id="status" class="status"></div>
-              <div class="result-actions">
-                <button id="btn-copy" title="Copy the selection (Ctrl+C)">Copy</button>
-                <button id="btn-copy-head" title="Copy with the header row (Ctrl+Shift+C)">Copy with headers</button>
-                <button id="btn-export">Export…</button>
-                <button id="btn-close-results" title="Discard the results below">Close results</button>
+          <div id="results-body" class="results-body">
+            <!-- A finished job's report (Stage 23). In the strip's slot, because
+                 a run ends by turning one into the other — but a *band* rather
+                 than a replacement for the grid: `#flyway-pane` replaces it
+                 because a migrations tab has no result set, and this is not that
+                 case. Outside the tab system, so switching tabs and running
+                 queries leave it alone, which is the whole point: today's export
+                 report goes into `#grid` and `onActivate` repaints that. -->
+            <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
+            <div id="tabs" class="tabs"></div>
+            <div id="grid" class="grid-host" tabindex="0"></div>
+            <!-- L3. A migrations tab has no result set — its answers are
+                 sentences and a report — so the pane that holds the SQL grid
+                 holds Flyway's output instead. It replaces the grid rather than
+                 sitting beside it: two scrolling regions in one tab, one of them
+                 always empty, is worse than a swap. -->
+            <!-- No header of its own since Stage 26: the pane header above says
+                 "Flyway output" and carries the operation, and its own Hide
+                 button was a second way to do the same thing a few pixels
+                 lower. -->
+            <section id="flyway-pane" class="flyway-pane" hidden>
+              <div id="flyway-body" class="flyway-body" tabindex="0"></div>
+            </section>
+            <!-- Two rows. The note used to sit between the status chips and the
+                 buttons, which left it a few characters wide: the chips wrapped
+                 into a vertical stack to make room, and the sentence was
+                 ellipsised after its first clause. A whole sentence needs a whole
+                 row. -->
+            <div class="result-bar">
+              <div class="result-bar-row">
+                <div id="status" class="status"></div>
+                <div class="result-actions">
+                  <button id="btn-copy" title="Copy the selection (Ctrl+C)">Copy</button>
+                  <button id="btn-copy-head" title="Copy with the header row (Ctrl+Shift+C)">Copy with headers</button>
+                  <button id="btn-export">Export…</button>
+                  <button id="btn-close-results" title="Discard the results below">Close results</button>
+                </div>
               </div>
+              <p id="result-note" class="result-note" hidden></p>
             </div>
-            <p id="result-note" class="result-note" hidden></p>
           </div>
         </section>
       </main>

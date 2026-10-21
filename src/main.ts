@@ -180,8 +180,12 @@ const els = {
   expOmitDefiner: $<HTMLInputElement>("exp-omit-definer"),
   flywayPane: $<HTMLElement>("flyway-pane"),
   flywayBody: $<HTMLElement>("flyway-body"),
-  flywayWhen: $<HTMLElement>("flyway-when"),
-  btnFlywayToggle: $<HTMLButtonElement>("btn-flyway-toggle"),
+  resToggle: $<HTMLButtonElement>("res-toggle"),
+  resCaret: $("res-caret"),
+  resTitle: $("res-title"),
+  resSummary: $("res-summary"),
+  status: $("status"),
+  grid: $("grid"),
   resultTabs: $<HTMLElement>("tabs"),
   historyDialog: $<HTMLDialogElement>("history-dialog"),
   histSearch: $<HTMLInputElement>("hist-search"),
@@ -1506,6 +1510,10 @@ function refreshExportBar() {
   // an errored run has no selectable data and is still something to dismiss.
   const tab = tabs?.active();
   els.btnCloseResults.disabled = !tab || (!tab.result && !tab.error);
+
+  // One hook for "what the pane shows has changed", so the header cannot drift
+  // from the bar underneath it.
+  paintResultsHead();
 }
 
 async function copySelection(headers: boolean) {
@@ -1926,6 +1934,7 @@ async function run(sql: string, base = 0) {
     if (isFocused(tab)) {
       showResults(tab);
       syncConnLabel();
+      noteResultsLanded();
     }
   }
 }
@@ -2032,6 +2041,10 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
         const w = Math.min(Math.max(260, from), Math.max(260, window.innerWidth - 420));
         document.documentElement.style.setProperty("--chat-w-set", `${w}px`);
       } else {
+        // A seam dragged while the pane is shut opens it and sizes it in one
+        // gesture. The alternative is a handle that looks draggable and does
+        // nothing, which is the worst of the three states.
+        setResultsShut(false);
         const rect = els.main.getBoundingClientRect();
         const h = Math.min(Math.max(80, ev.clientY - rect.top), rect.height - 120);
         document.documentElement.style.setProperty("--editor-h", `${h}px`);
@@ -2050,6 +2063,102 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
 draggable(els.msplit, "x-end");
+
+// ------------------------------------------------- the result pane's header
+//
+// Stage 26. One header over both kinds of output — the SQL grid and Flyway's
+// report are the same pane in two costumes — and one place to collapse it.
+
+/** Shut, or not. Not persisted, like the splitter sizes beside it. */
+let resultsShut = false;
+
+/** A moment's highlight after something landed in a pane nobody can see. */
+let landedTimer: number | null = null;
+
+/**
+ * Open or shut the pane.
+ *
+ * **The height is not written anywhere.** Collapsing switches `#main` to a
+ * different row template and leaves `--editor-h` exactly as it was, so
+ * reopening restores the size that was dragged to rather than a remembered
+ * guess at it.
+ */
+function setResultsShut(shut: boolean) {
+  if (resultsShut === shut) return;
+  resultsShut = shut;
+  els.main.classList.toggle("results-shut", shut);
+  els.resCaret.classList.toggle("open", !shut);
+  els.resToggle.setAttribute("aria-expanded", String(!shut));
+  els.resToggle.title = shut
+    ? "Show the results (Ctrl+J)"
+    : "Collapse the results to a strip (Ctrl+J)";
+  if (!shut) clearLanded();
+  paintResultsHead();
+  // The grid paints only the rows its viewport can show, and the viewport just
+  // went from nothing to full height. `relayout` is what makes the rows appear.
+  results.relayout();
+}
+
+function clearLanded() {
+  if (landedTimer !== null) window.clearTimeout(landedTimer);
+  landedTimer = null;
+  els.resToggle.classList.remove("landed");
+}
+
+/**
+ * Something arrived in a pane that is shut.
+ *
+ * **It does not open the pane.** Collapsing it was an explicit act, and a run
+ * that reopened it would make the gesture useless to the one person who wants
+ * it most — somebody iterating on a long script. The header says what landed
+ * instead, which is an answer rather than a surprise.
+ */
+function noteResultsLanded() {
+  paintResultsHead();
+  if (!resultsShut) return;
+  clearLanded();
+  els.resToggle.classList.add("landed");
+  landedTimer = window.setTimeout(() => {
+    landedTimer = null;
+    els.resToggle.classList.remove("landed");
+  }, 1600);
+}
+
+/**
+ * The title, and what the pane says about itself while it is shut.
+ *
+ * The summary is **read back off the status chips** rather than composed here:
+ * one formatter, so the header and the result bar cannot disagree about how
+ * many rows arrived.
+ */
+function paintResultsHead() {
+  const tab = tabs?.active() ?? null;
+  const mig = tab?.kind === "migrations";
+  els.resTitle.textContent = mig ? "Flyway output" : "Results";
+  els.resSummary.textContent = mig ? flywaySummary(tab) : statusSummary();
+}
+
+function statusSummary(): string {
+  const chips = Array.from(els.status.children)
+    .map((c) => c.textContent?.trim() ?? "")
+    .filter((t) => t.length > 0);
+  if (chips.length) return chips.join(" \u00b7 ");
+  // No chips means a sentence rather than a result — "Not connected.", an
+  // error, "Running…" — and that sentence is exactly what a shut pane should
+  // be saying.
+  return els.grid.querySelector(".empty")?.textContent?.trim() ?? "";
+}
+
+function flywaySummary(tab: ScriptTab | null): string {
+  const ref = tab?.migrations ?? null;
+  if (!ref) return "";
+  const op = ref.lastReport?.op;
+  return op ? `\u00b7 ${op}` : "Nothing has run here yet";
+}
+
+els.resToggle.onclick = () => setResultsShut(!resultsShut);
+els.resCaret.append(icon("chevron"));
+els.resToggle.title = "Collapse the results to a strip (Ctrl+J)";
 
 /**
  * Lay the buffer out — the selection if there is one, otherwise the whole tab.
@@ -3549,6 +3658,11 @@ window.addEventListener("keydown", (e) => {
     // shortcut that opens it has to be the one that gives the width back.
     if (chatPanel.isOpen()) chatPanel.close();
     else void assistant.open();
+  } else if (e.key === "j" || e.key === "J") {
+    e.preventDefault();
+    // The conventional key for the panel at the bottom, and the one thing
+    // somebody reaching for vertical space in a hurry will try.
+    setResultsShut(!resultsShut);
   } else if (e.key === "h" || e.key === "H") {
     e.preventDefault();
     void history.open();
@@ -3866,9 +3980,6 @@ function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
 // not a second region, because a tab with two scrolling panes one of which is
 // always empty is worse than either.
 
-/** Whether the output body is open. Per session: a run is the reason to look. */
-let flywayOutputOpen = true;
-
 /** Show either the result grid or Flyway's output, never both. */
 function showResultsSurface(kind: TabKind) {
   const flyway = kind === "migrations";
@@ -3984,31 +4095,28 @@ function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRu
   }
 }
 
-/** Paint the output pane for whichever migrations tab is in front. */
+/**
+ * Paint the output pane for whichever migrations tab is in front.
+ *
+ * Collapsing it is the pane header's job since Stage 26, so there is nothing
+ * here about hiding: this fills the body, and the header decides whether the
+ * body is on screen.
+ */
 function showFlywayOutput() {
   const ref = tabs?.active()?.migrations ?? null;
   els.flywayBody.replaceChildren();
-  els.flywayBody.classList.toggle("hidden", !flywayOutputOpen);
-  els.btnFlywayToggle.textContent = flywayOutputOpen ? "Hide" : "Show";
-  els.btnFlywayToggle.setAttribute("aria-expanded", String(flywayOutputOpen));
+  paintResultsHead();
 
   if (!ref?.lastReport && !ref?.lastOutcome) {
-    els.flywayWhen.textContent = "";
     els.flywayBody.append(
       elem("div", "fw-note", "Nothing has run here yet. Apply or Repair will report in full."),
     );
     return;
   }
-  els.flywayWhen.textContent = ref.lastReport?.op ? `\u00b7 ${ref.lastReport.op}` : "";
   // Our sentence first — it is the answer — then Flyway's own account of it.
   if (ref.lastOutcome) els.flywayBody.append(elem("div", "fw-outcome", ref.lastOutcome));
   if (ref.lastReport) renderFlywayReport(els.flywayBody, ref.lastReport);
 }
-
-els.btnFlywayToggle.onclick = () => {
-  flywayOutputOpen = !flywayOutputOpen;
-  showFlywayOutput();
-};
 
 /**
  * Keep the report from the run that just finished.
