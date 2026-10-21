@@ -3577,8 +3577,6 @@ interface MigUi {
  * started it, which is where somebody is already looking.
  */
 function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
-  // Snapshotted, not read back afterwards: the caller may re-render between
-  // here and the undo, and restoring the nodes it had is unambiguous.
   const kept = Array.from(btn.childNodes);
   const wasDisabled = btn.disabled;
   const text = label ?? btn.textContent ?? "";
@@ -3592,9 +3590,31 @@ function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
   btn.setAttribute("aria-busy", "true");
 
   return () => {
+    // Always ours to clear: nobody else sets it.
+    btn.removeAttribute("aria-busy");
+
+    // **Put the old label back only if it is still the label.**
+    //
+    // This used to restore the snapshot unconditionally, on the reasoning
+    // that "the caller may re-render between here and the undo, and restoring
+    // the nodes it had is unambiguous". Unambiguous, and wrong: it is an undo
+    // of somebody else's newer answer.
+    //
+    // Reported in use after Stage 24 moved the refresh into the wait — the
+    // apply's `info` now arrives with the apply, so the button was re-synced
+    // *before* this ran, and this put "Apply 2 pending" back over it. The
+    // button then offered migrations that had just been applied until the
+    // person pressed Refresh. Its `title` said "Nothing is pending." the whole
+    // time, because an attribute is neither a child node nor `disabled`.
+    //
+    // Our spinner still being in there is the test: `replaceChildren` makes
+    // new nodes, so a repaint by anyone else drops it. A button somebody else
+    // has repainted has been given both its label and its `disabled` by
+    // whoever knows what it should say, and neither is this function's to
+    // overwrite.
+    if (!btn.contains(spinner)) return;
     btn.replaceChildren(...kept);
     btn.disabled = wasDisabled;
-    btn.removeAttribute("aria-busy");
   };
 }
 

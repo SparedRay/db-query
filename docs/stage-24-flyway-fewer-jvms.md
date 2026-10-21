@@ -296,3 +296,54 @@ with `Check first` off:
 ~48s of JVM start becomes ~24s, and the one check that was genuinely needed —
 after the files were edited — still runs. With `Check first` ticked it is 8
 instead of 10: the two batched refreshes are still free.
+
+---
+
+## 7. Reported in use — 2026-10-21
+
+> When we apply and it finish, after loading Apply button still shows as if
+> there's a pending migration (Until I manually refresh)
+
+**`buttonBusy` was undoing the refresh.** It snapshots a button's children and
+its `disabled` when the wait starts and puts them back when it ends, on the
+reasoning written in its own comment: *"the caller may re-render between here
+and the undo, and restoring the nodes it had is unambiguous"*. Unambiguous, and
+wrong — it is an undo of somebody else's newer answer.
+
+That reasoning held while nothing could repaint the button mid-wait. §2.1 broke
+it: the apply's `info` now arrives *with the apply*, so `syncApplyButton` had
+already set the right label inside the `try`, and the `finally` restored
+"Apply 2 pending" over it.
+
+The reproduction said exactly where to look:
+
+```html
+<button id="btn-mig-view-apply" title="Nothing is pending.">Apply 1 pending</button>
+```
+
+A `title` from the new state beside a label from the old one, and enabled —
+because an attribute is neither a child node nor `disabled`, so only the two
+things the undo restores were stale. The button offered migrations it had just
+applied, and hovering it said nothing was pending.
+
+### The fix
+
+The undo now puts the old label back **only if it is still the label**: the
+spinner it inserted is still in the button. `replaceChildren` makes new nodes,
+so any repaint by anyone else drops it — and a button somebody else has
+repainted has been given both its label and its `disabled` by whoever knows
+what it should say. `aria-busy` is still always cleared, since nothing else
+sets it.
+
+One mechanism, not one call site: every Flyway button goes through this, and so
+does anything that borrows it later.
+
+Falsified both ways. Restoring unconditionally fails the new test; never
+restoring fails three — the new one plus two that were already guarding the
+ordinary path (*"Repair shows a spinner on its own button until Flyway
+answers"*, *"a Flyway failure gives the button back"*), which is how the branch
+turned out to be covered already.
+
+Tests added: the reported case, and the no-repaint case that the fix must not
+break — reusing a reading repaints nothing, so a cancelled dialog must still
+leave the button as it found it.
