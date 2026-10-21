@@ -393,7 +393,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
 export const STARTER_DOC =
   "-- Ctrl+Enter runs the statement under the cursor (or the selection).\n" +
   "-- Ctrl+Shift+Enter runs the whole buffer.\n" +
-  "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next\n" +
+  "-- Ctrl+T new tab · Ctrl+W close · Ctrl+Tab next · Ctrl+J results\n" +
   "-- Ctrl+F find · Ctrl+Shift+F format · Ctrl+Z undo · Ctrl+Shift+Z redo\n" +
   "-- Tab accepts a suggestion · Esc dismisses it\n\n" +
   "SELECT 1;\n";

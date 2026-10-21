@@ -83,6 +83,9 @@ export class ResultView {
   private lastRow: number | null = null;
   /** True while a drag across row numbers is in progress. */
   private dragging = false;
+  /** Watches the viewport so a pane that grows paints the rows it can now
+   *  show. Absent only where `ResizeObserver` is (no browser we ship on). */
+  private sizeWatch: ResizeObserver | null = null;
   private onScroll = () => {
     this.paintRows();
     this.onScrolled(this.gridEl.scrollTop);
@@ -107,6 +110,25 @@ export class ResultView {
     this.gridEl = grid;
     this.statusEl = status;
     this.gridEl.addEventListener("scroll", this.onScroll, { passive: true });
+    // **Why an observer and not a call from whoever resizes.** Only the rows a
+    // viewport can show exist in the DOM, and `paintRows` ran on scroll alone —
+    // so a viewport that GREW painted nothing new. Measured: taking the pane
+    // from 347px to 585px left the painted count at 42 either way, and the
+    // overscan (12 rows above and below) is the only reason that was ever
+    // invisible. Collapsing the pane takes the viewport to zero and back, which
+    // the overscan cannot cover; a tall window dragged taller is the same bug
+    // with fewer witnesses. Asking the element itself answers all of them —
+    // the splitter, the collapse, the window, a future pane nobody has written.
+    if (typeof ResizeObserver !== "undefined") {
+      this.sizeWatch = new ResizeObserver(() => this.paintRows());
+      this.sizeWatch.observe(this.gridEl);
+    }
+  }
+
+  /** Repaint for the viewport as it is now. The observer calls it; so may
+   *  anyone who knows the height changed without the element resizing. */
+  relayout() {
+    this.paintRows();
   }
 
   /**

@@ -491,6 +491,14 @@ body {
   min-height: 0;
 }
 
+/* The result pane, shut (Stage 26): the editor takes the whole row and the
+   pane is as tall as its own header. `--editor-h` is deliberately NOT touched,
+   so reopening restores the height somebody dragged to — the alternative,
+   writing a new height on collapse, loses it. */
+#main.results-shut {
+  grid-template-rows: 1fr 7px auto;
+}
+
 #editor-pane, #results-pane {
   display: flex;
   flex-direction: column;
@@ -1646,22 +1654,50 @@ button .spinner {
 .job-report-file.failed .job-report-mark { color: var(--danger, #e5534b); }
 .job-report-file.not-run { opacity: .65; }
 
+/* --- Stage 26: the result pane's header -------------------------------- */
+
+/* Built from `.pane-head` and the sidebar's `.mig-side-toggle`, because this is
+   the third thing in the app that collapses and a third look would be a third
+   thing to learn. */
+.res-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 10px; min-height: 30px; flex: 0 0 auto;
+  border: none; border-bottom: 1px solid var(--border);
+  background: var(--bg-raised); cursor: pointer; text-align: left;
+}
+.res-head:hover { background: var(--bg-hover); }
+.res-head .twisty { display: flex; align-items: center; color: var(--fg-dim); }
+.res-head .twisty svg { width: 12px; height: 12px; transition: transform .12s ease; }
+.res-head .twisty.open svg { transform: rotate(90deg); }
+.res-title {
+  font: 600 10.5px/1.4 system-ui, sans-serif; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--fg-dim);
+}
+.res-head:hover .res-title { color: var(--fg); }
+.res-summary {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Only while it is shut. Open, the result bar says it a few pixels lower, and
+   a figure printed twice is a figure that can disagree with itself. */
+#main:not(.results-shut) .res-summary { display: none; }
+/* What landed while the pane was shut. Held for a moment rather than forever:
+   it answers "did that run do anything" and then gets out of the way. */
+.res-head.landed { background: var(--sel-header-bg); }
+.res-head.landed .res-title, .res-head.landed .res-summary { color: var(--fg-strong); }
+.res-key { margin-left: 0; flex: 0 0 auto; }
+
+/* Everything the header hides. The job strip is NOT in here — see index.html. */
+.results-body { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+#main.results-shut .results-body { display: none; }
+
 /* --- L3: Flyway's output, where the grid would be ----------------------- */
 .flyway-pane { display: flex; flex-direction: column; min-height: 0; flex-grow: 1; }
-.flyway-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 10px; border-bottom: 1px solid var(--border);
-}
-.flyway-title {
-  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-dim);
-}
-.flyway-when { flex-grow: 1; min-width: 0; font-size: 11px; color: var(--fg-dim); }
 .flyway-body {
   flex-grow: 1; overflow: auto; padding: 8px 12px;
   scrollbar-gutter: stable;
   font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--fg-dim);
 }
-.flyway-body.hidden { display: none; }
 /* The report, rendered rather than printed: with `-outputType=json` the raw
    text is a JSON document, which is not what anybody opened a pane to read. */
 .fw-line { white-space: pre-wrap; }
