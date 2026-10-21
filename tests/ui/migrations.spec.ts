@@ -1720,3 +1720,71 @@ test("the actions row fits its toggles and buttons on a narrow pane", async ({ p
   const clipped = await row.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
   expect(clipped, "the actions row is overflowing, so something is cut off").toBe(false);
 });
+
+/**
+ * Reported in use: *"When we apply and it finish, after loading Apply button
+ * still shows as if there's a pending migration (Until I manually refresh)"*.
+ *
+ * The list was right and only the button was wrong, which is the clue:
+ * `buttonBusy` snapshots the button's children and `disabled` when the wait
+ * starts and puts them back when it ends. Stage 24 moved the refresh *into*
+ * the wait — the batched `info` arrives with the apply — so the undo in the
+ * `finally` restored the pre-apply label over a button that had already been
+ * re-synced correctly.
+ */
+test("after an apply the Apply button stops offering what it just applied", async ({ page }) => {
+  await withProject(
+    page,
+    fingerprinted({
+      flyway_info: () => PENDING_ONLY,
+      flyway_migrate: () => ({
+        executed: 1,
+        target: "5",
+        // Nothing pending any more: it ran.
+        info: {
+          migrations: [MIGRATIONS[0]],
+          folders: ["/srv/app/migrations"],
+          fingerprint: "after-the-apply",
+        },
+      }),
+    }),
+  );
+
+  const apply = page.locator("#btn-mig-view-apply");
+  await expect(apply).toHaveText("Apply 1 pending");
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply")').last().click();
+  await expect(page.locator("#flyway-body")).toContainText("applied 1 migration");
+
+  // The list came back with the run and says nothing is pending, so the button
+  // has to say so too — without a manual Refresh.
+  await expect(apply).toHaveText("Apply");
+  await expect(apply).toBeDisabled();
+  await expect(apply).toHaveAttribute("title", "Nothing is pending.");
+  await expect(apply).not.toHaveAttribute("aria-busy", "true");
+});
+
+/**
+ * The other half of the same fix: when nothing *has* repainted the button, the
+ * old label must still come back.
+ *
+ * Reusing a reading is the case with no repaint at all — the check is a
+ * fingerprint, the list does not change, and nothing calls `syncApplyButton`.
+ * So the spinner and "Checking…" are this function's to take away, and a
+ * cancelled dialog must not leave the button spinning.
+ */
+test("a reused reading leaves the button as it found it", async ({ page }) => {
+  await withProject(page, fingerprinted());
+  const repair = page.locator("#btn-mig-view-repair");
+  const before = await repair.textContent();
+
+  await page.click("#btn-mig-view-repair");
+  await expect(page.locator("dialog.ask")).toBeVisible();
+  await page.locator('dialog.ask button:has-text("Cancel")').click();
+
+  await expect(repair).toHaveText(before ?? "");
+  await expect(repair).toBeEnabled();
+  await expect(repair).not.toHaveAttribute("aria-busy", "true");
+  await expect(repair.locator(".spinner")).toHaveCount(0);
+});
