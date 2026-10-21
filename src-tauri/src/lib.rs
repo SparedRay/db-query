@@ -459,6 +459,10 @@ async fn assistant_system(
     // Schema, when there is a live connection to take it from. Names and types
     // only — `render_schema` cannot see row data, by construction.
     let mut caps: Option<crate::engine::Capabilities> = None;
+    // Whether the schema block below carries the user's own notes. Decides one
+    // paragraph of the prompt, which is what tells the model whose the `--`
+    // comments are and that they outrank a guess at a name.
+    let mut has_dictionary = false;
     let (server_version, schema_text) = match connection_id {
         Some(id) => match session::server(state, id).await {
             Ok(server) => {
@@ -485,12 +489,39 @@ async fn assistant_system(
                     .await
                     .unwrap_or_default();
 
+                // The user's dictionary, when this connection has one.
+                //
+                // **Never fatal.** A dictionary that cannot be read is a
+                // thinner prompt, exactly as an unreachable server is — and
+                // the chat header is where the person is told, rather than
+                // having a question refused because of a typo in a file.
+                let dictionary = server
+                    .profile
+                    .dictionary
+                    .as_deref()
+                    .filter(|p| !p.trim().is_empty())
+                    .and_then(|path| {
+                        crate::dictionary::load_cached(std::path::Path::new(path))
+                            .map_err(|e| logbook::warn("dictionary", e))
+                            .ok()
+                    })
+                    .map(|loaded| loaded.dictionary)
+                    .filter(|d| !d.is_empty());
+                has_dictionary = dictionary.is_some();
+
                 let text = server
                     .schema_cache
                     .lock()
                     .await
                     .get(ns)
-                    .map(|s| assistant::render_schema(ns, s, schema::TABLE_DETAIL_BUDGET))
+                    .map(|s| {
+                        assistant::render_schema(
+                            ns,
+                            s,
+                            schema::TABLE_DETAIL_BUDGET,
+                            dictionary.as_ref(),
+                        )
+                    })
                     .map(|rendered| {
                         // Say so when the warm-up could not describe every
                         // table. Silently truncating is how a model ends up
@@ -512,7 +543,12 @@ async fn assistant_system(
         None => ("unknown".to_string(), None),
     };
 
-    assistant::system_prompt(&server_version, schema_text.as_deref(), caps.as_ref())
+    assistant::system_prompt(
+        &server_version,
+        schema_text.as_deref(),
+        caps.as_ref(),
+        has_dictionary,
+    )
 }
 
 /// Stream one reply.

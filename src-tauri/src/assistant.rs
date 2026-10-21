@@ -141,18 +141,47 @@ pub enum StreamEvent {
 
 // ------------------------------------------------------------- schema context
 
+/// How many characters of dictionary prose may be added to one prompt.
+///
+/// **Measured, not chosen to look reasonable** (Stage 25 §2): the schema block
+/// for 60 tables of 10 columns is ~24,600 characters, a sentence per table adds
+/// ~21%, and a phrase on *every* column adds ~131% — doubling the prompt in
+/// every request. Real annotation is sparse, so the budget is generous for the
+/// shape people actually write and protective against a dictionary that
+/// annotates everything: 8,000 characters is 60 table notes at ~90 characters
+/// plus ~30 column notes. Past that a prompt is paying more for prose than for
+/// the schema it describes.
+pub const DICTIONARY_BUDGET_CHARS: usize = 8_000;
+
 /// Render a database's cached schema as compact text for the system prompt.
 ///
-/// Only names and types — the shape, never the contents. Tables whose columns
-/// have not been expanded yet appear by name alone, which is honest: it tells
-/// the model the table exists without inventing columns for it.
+/// Only names and types — the shape, never the contents — plus whatever the
+/// user's own dictionary says about them. Tables whose columns have not been
+/// expanded yet appear by name alone, which is honest: it tells the model the
+/// table exists without inventing columns for it.
 ///
 /// **At most `detail_limit` tables are rendered with their columns.** The
 /// cache can now hold every column of a large database, and 385 tables of them
 /// is tens of thousands of tokens in every request. Past the limit a table is
 /// named alone and the prompt says why, so the model asks rather than assumes
 /// the table has no columns.
-pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String {
+///
+/// # Where a note goes
+///
+/// **Beside the thing it describes**, as a `--` comment, never as a glossary
+/// section after the schema (Stage 25 §3.2): a note printed next to its own
+/// column cannot be misattributed, where a separate list of definitions asks
+/// the model to join two lists by name — and costs the same tokens.
+///
+/// A table nobody wrote about renders **exactly as it did before this
+/// existed**, on one line. The multi-line form is what paying for notes buys,
+/// so the cost stays proportional to what was written.
+pub fn render_schema(
+    db: &str,
+    schema: &DbSchema,
+    detail_limit: usize,
+    dictionary: Option<&crate::dictionary::Dictionary>,
+) -> String {
     let mut out = String::new();
     // An engine without namespaces — a local Elasticsearch cluster has no
     // catalogs — describes itself under the empty one, and "Database ``" reads
@@ -171,12 +200,36 @@ pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String
 
     let mut detailed = 0;
     let mut elided = 0;
+    // Spent on notes, against `DICTIONARY_BUDGET_CHARS`. Tables are walked in
+    // the order they are rendered, and each one's own note is paid for before
+    // its columns' — so a dictionary that runs out of budget loses the detail
+    // first and keeps the sentence that says what the table *is*.
+    let mut spent = 0usize;
+    let mut dropped = 0usize;
     for t in tables {
         let kind = if t.kind.to_ascii_uppercase().contains("VIEW") {
             "VIEW"
         } else {
             "TABLE"
         };
+        // What the dictionary says about this one, if anything.
+        let said = dictionary.and_then(|d| d.table(db, &t.name));
+        // **Charged before anything is rendered**, because the budget decides
+        // the *shape* of the entry and not merely its text: a table whose note
+        // the budget dropped must fall back to the one-line form, or losing
+        // the note would still cost the newlines and the indentation that
+        // having one buys. Its own test caught that.
+        let mut afford = |text: Option<&str>| -> Option<String> {
+            let text = text.map(str::trim).filter(|t| !t.is_empty())?;
+            let want = text.chars().count();
+            if spent + want > DICTIONARY_BUDGET_CHARS {
+                dropped += 1;
+                return None;
+            }
+            spent += want;
+            Some(text.to_string())
+        };
+
         match schema.columns.get(&t.name) {
             Some(cols) if !cols.is_empty() && detailed >= detail_limit => {
                 elided += 1;
@@ -184,7 +237,27 @@ pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String
             }
             Some(cols) if !cols.is_empty() => {
                 detailed += 1;
-                out.push_str(&format!("{kind} `{}` (", t.name));
+
+                // Charged in the order they matter: what the table *is*,
+                // then how it joins, then its columns. A dictionary that runs
+                // out of budget therefore loses detail before it loses the
+                // sentence that explains the table.
+                let table_note = afford(said.as_ref().and_then(|s| s.note.as_deref()));
+                let join = afford(said.as_ref().and_then(|s| s.join.as_deref()));
+                let notes: Vec<Option<String>> = cols
+                    .iter()
+                    .map(|c| {
+                        let said = said
+                            .as_ref()
+                            .and_then(|s| s.columns.get(&c.name.to_lowercase()))
+                            .map(String::as_str);
+                        afford(said)
+                    })
+                    .collect();
+
+                let annotated =
+                    table_note.is_some() || join.is_some() || notes.iter().any(Option::is_some);
+
                 let rendered: Vec<String> = cols
                     .iter()
                     .map(|c| {
@@ -201,12 +274,45 @@ pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String
                         s
                     })
                     .collect();
-                out.push_str(&rendered.join(", "));
-                out.push_str(")\n");
+
+                if !annotated {
+                    // **Byte for byte what this printed before the dictionary
+                    // existed.** Nobody without one pays anything for it.
+                    out.push_str(&format!("{kind} `{}` (", t.name));
+                    out.push_str(&rendered.join(", "));
+                    out.push_str(")\n");
+                    continue;
+                }
+
+                out.push_str(&format!("{kind} `{}`", t.name));
+                if let Some(note) = &table_note {
+                    out.push_str(&format!(" -- {note}"));
+                }
+                out.push('\n');
+                if let Some(join) = &join {
+                    out.push_str(&format!("  -- joins: {join}\n"));
+                }
+                for (i, col) in rendered.iter().enumerate() {
+                    let open = if i == 0 { "  (" } else { "   " };
+                    let close = if i + 1 == rendered.len() { ")" } else { "," };
+                    match &notes[i] {
+                        Some(note) => out.push_str(&format!("{open}{col}{close} -- {note}\n")),
+                        None => out.push_str(&format!("{open}{col}{close}\n")),
+                    }
+                }
             }
             // Columns are loaded lazily by expanding the tree. Saying "not
             // loaded" beats listing nothing, which reads as "no columns".
-            _ => out.push_str(&format!("{kind} `{}` (columns not loaded)\n", t.name)),
+            _ => {
+                let note = afford(said.as_ref().and_then(|s| s.note.as_deref()));
+                match note {
+                    Some(note) => out.push_str(&format!(
+                        "{kind} `{}` (columns not loaded) -- {note}\n",
+                        t.name
+                    )),
+                    None => out.push_str(&format!("{kind} `{}` (columns not loaded)\n", t.name)),
+                }
+            }
         }
     }
     if elided > 0 {
@@ -214,6 +320,14 @@ pub fn render_schema(db: &str, schema: &DbSchema, detail_limit: usize) -> String
             "(Columns are listed for the first {detailed} tables only, to keep this short; \
              the {elided} tables named without them do have columns. Ask the user for a \
              table's columns rather than guessing them.)\n"
+        ));
+    }
+    if dropped > 0 {
+        // Said rather than silently truncated, for the same reason the elision
+        // above is said: a model told nothing assumes nothing was there.
+        out.push_str(&format!(
+            "({dropped} of the user's notes were left out to keep this short. Ask them \
+             about a table rather than assuming it has no note.)\n"
         ));
     }
 
@@ -244,6 +358,9 @@ pub fn system_prompt(
     server_version: &str,
     schema: Option<&str>,
     caps: Option<&crate::engine::Capabilities>,
+    // Whether the schema block carries the user's own notes, which changes
+    // what the `--` comments in it *are*.
+    dictionary: bool,
 ) -> String {
     let engine = caps.map(|c| c.engine.as_str()).unwrap_or("MySQL");
     let mut s = format!(
@@ -301,6 +418,19 @@ pub fn system_prompt(
         Some(schema) if !schema.trim().is_empty() => {
             s.push_str("Schema (names and types only; no row data is shared):\n");
             s.push_str(schema);
+            if dictionary {
+                // **Said after the schema, not before it.** The model has just
+                // read the comments; this is what tells it whose they are and
+                // that they outrank a guess from a column's name — which is
+                // the whole point of somebody writing them down.
+                s.push_str(
+                    "\nThe `--` comments above are the user's own notes on this database, \
+                     from a dictionary they maintain alongside it. Treat them as \
+                     authoritative: where a note and a name disagree, the note is right. \
+                     A table or column with no note is not described anywhere — ask \
+                     rather than inferring meaning from its name.\n",
+                );
+            }
         }
         // Better to say so than to let the model invent a plausible schema.
         _ => s.push_str(
@@ -562,7 +692,7 @@ mod tests {
             columns: Default::default(),
             routines: None,
         };
-        let out = render_schema("", &schema, 60);
+        let out = render_schema("", &schema, 60, None);
         assert!(!out.contains("``"), "{out}");
         assert!(out.starts_with("Schema"), "{out}");
     }
@@ -713,7 +843,7 @@ mod tests {
 
     #[test]
     fn the_schema_renders_names_types_and_keys() {
-        let rendered = render_schema("poc", &schema_fixture(), 60);
+        let rendered = render_schema("poc", &schema_fixture(), 60, None);
         assert!(rendered.contains("TABLE `users`"), "{rendered}");
         assert!(rendered.contains("id int NOT NULL PK"), "{rendered}");
         assert!(
@@ -727,7 +857,7 @@ mod tests {
     /// rather than appear to have none, which would invite invented column names.
     #[test]
     fn a_table_with_no_cached_columns_says_so() {
-        let rendered = render_schema("poc", &schema_fixture(), 60);
+        let rendered = render_schema("poc", &schema_fixture(), 60, None);
         assert!(
             rendered.contains("`user_totals` (columns not loaded)"),
             "{rendered}"
@@ -737,19 +867,19 @@ mod tests {
     /// The cache can hold every column of a large database; the prompt must not.
     #[test]
     fn past_the_limit_tables_are_named_and_the_prompt_says_why() {
-        let rendered = render_schema("poc", &schema_fixture(), 0);
+        let rendered = render_schema("poc", &schema_fixture(), 0, None);
         assert!(!rendered.contains("id int"), "{rendered}");
         assert!(rendered.contains("TABLE `users`\n"), "{rendered}");
         assert!(rendered.contains("do have columns"), "{rendered}");
 
-        let full = render_schema("poc", &schema_fixture(), 60);
+        let full = render_schema("poc", &schema_fixture(), 60, None);
         assert!(!full.contains("do have columns"), "{full}");
     }
 
     /// The whole feature rests on this instruction.
     #[test]
     fn the_prompt_forbids_claiming_to_have_run_anything() {
-        let p = system_prompt("8.4.0", Some("TABLE `users` (id int)"), None);
+        let p = system_prompt("8.4.0", Some("TABLE `users` (id int)"), None, false);
         assert!(p.contains("CANNOT run"));
         assert!(p.contains("no tools"));
         assert!(p.contains("```sql"));
@@ -758,7 +888,7 @@ mod tests {
 
     #[test]
     fn with_no_schema_the_prompt_says_to_ask_rather_than_guess() {
-        let p = system_prompt("8.4.0", None, None);
+        let p = system_prompt("8.4.0", None, None, false);
         assert!(p.contains("Ask the user"), "{p}");
         assert!(
             !p.contains("Schema ("),
@@ -770,7 +900,7 @@ mod tests {
     /// because this is the promise the UI makes on the feature's behalf.
     #[test]
     fn the_prompt_carries_no_row_data() {
-        let rendered = render_schema("poc", &schema_fixture(), 60);
+        let rendered = render_schema("poc", &schema_fixture(), 60, None);
         assert!(
             !rendered.contains("@"),
             "an email address reached the prompt"
@@ -979,7 +1109,12 @@ mod tests {
     #[test]
     fn a_read_only_engine_is_declared_to_the_model() {
         let caps = crate::elastic::capabilities();
-        let p = system_prompt("8.15.0", Some("TABLE `orders` (total double)"), Some(&caps));
+        let p = system_prompt(
+            "8.15.0",
+            Some("TABLE `orders` (total double)"),
+            Some(&caps),
+            false,
+        );
         assert!(p.contains("read-only"), "{p}");
         assert!(p.contains("no INSERT, UPDATE, DELETE"), "{p}");
         assert!(p.contains("elasticsearch client"), "{p}");
@@ -1008,7 +1143,7 @@ mod tests {
             dictionary: None,
         };
         let caps = crate::engine::Capabilities::mysql().for_profile(&profile);
-        let p = system_prompt("8.4.0", None, Some(&caps));
+        let p = system_prompt("8.4.0", None, Some(&caps), false);
         assert!(p.contains("connection is marked read-only"), "{p}");
         assert!(!p.contains("This engine is read-only"), "{p}");
         // MySQL keeps its transactions; only the engine's own limit removes
@@ -1020,15 +1155,222 @@ mod tests {
             "8.4.0",
             None,
             Some(&crate::engine::Capabilities::mysql().for_profile(&profile)),
+            false,
         );
         assert!(!plain.contains("read-only"), "{plain}");
+    }
+
+    // ------------------------------------------ Stage 25: the dictionary
+
+    fn dict(toml: &str) -> crate::dictionary::Dictionary {
+        crate::dictionary::parse(toml)
+            .expect("the fixture dictionary parses")
+            .dictionary
+    }
+
+    /// **The promise that nobody pays for a feature they do not use.**
+    ///
+    /// A schema with no dictionary, an empty dictionary, and a dictionary about
+    /// some other database's tables must all render the same bytes — the ones
+    /// this function produced before any of this existed.
+    #[test]
+    fn a_table_nobody_described_renders_exactly_as_before() {
+        let before = render_schema("poc", &schema_fixture(), 60, None);
+
+        let empty = dict("version = 1");
+        assert_eq!(
+            render_schema("poc", &schema_fixture(), 60, Some(&empty)),
+            before
+        );
+
+        let elsewhere = dict(
+            r#"
+            [tables.orders]
+            note = "nothing to do with this schema"
+            columns.status = "also nothing"
+            "#,
+        );
+        assert_eq!(
+            render_schema("poc", &schema_fixture(), 60, Some(&elsewhere)),
+            before,
+            "a dictionary about other tables must not change this one's bytes"
+        );
+    }
+
+    /// §3.2: beside the thing it describes. The note on a column is on that
+    /// column's own line, and the table's is on the table's.
+    #[test]
+    fn a_note_is_rendered_beside_what_it_describes() {
+        let d = dict(
+            r#"
+            [tables.users]
+            note = "One row per sign-in identity."
+            join = "users.id = user_totals.user_id"
+            columns.email = "Lower-cased by the app, never by the database."
+            "#,
+        );
+        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+
+        assert!(
+            out.contains("TABLE `users` -- One row per sign-in identity.\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  -- joins: users.id = user_totals.user_id\n"),
+            "{out}"
+        );
+        // On the column's line, and only that column's.
+        assert!(
+            out.contains(
+                "   email varchar(190) NOT NULL UNIQUE) -- Lower-cased by the app, never by the database.\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("  (id int NOT NULL PK,\n"),
+            "no note, no comment: {out}"
+        );
+        // The view nobody described keeps its one-line form.
+        assert!(
+            out.contains("VIEW `user_totals` (columns not loaded)\n"),
+            "{out}"
+        );
+    }
+
+    /// A table whose columns have not been loaded still gets its own note —
+    /// that is the one the model needs most, having no columns to reason from.
+    #[test]
+    fn an_unloaded_table_still_carries_its_note() {
+        let d = dict(
+            r#"
+            [tables.user_totals]
+            note = "Per-user rollup, rebuilt nightly."
+            "#,
+        );
+        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+        assert!(
+            out.contains(
+                "VIEW `user_totals` (columns not loaded) -- Per-user rollup, rebuilt nightly.\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// §3.5 again, at the other end: a dictionary is keyed lower-case and the
+    /// server may report `Users`.
+    #[test]
+    fn the_case_the_server_reports_does_not_hide_a_note() {
+        let mut schema = schema_fixture();
+        schema.tables = Some(vec![TableRef {
+            name: "Users".into(),
+            kind: "BASE TABLE".into(),
+        }]);
+        schema.columns = HashMap::from([(
+            "Users".to_string(),
+            vec![ColumnInfo {
+                name: "Email".into(),
+                data_type: "varchar(190)".into(),
+                nullable: false,
+                key: None,
+            }],
+        )]);
+
+        let d = dict(
+            r#"
+            [tables.users]
+            note = "found anyway"
+            columns.email = "and so is this"
+            "#,
+        );
+        let out = render_schema("poc", &schema, 60, Some(&d));
+        assert!(out.contains("TABLE `Users` -- found anyway"), "{out}");
+        assert!(out.contains("-- and so is this"), "{out}");
+    }
+
+    /// The budget bites, and **says that it bit**. A model told nothing
+    /// assumes nothing was there — the same reason the column elision above
+    /// announces itself.
+    #[test]
+    fn the_note_budget_is_spent_and_what_it_cost_is_said() {
+        // One note per table, each a twentieth of the budget, over enough
+        // tables to exhaust it twice.
+        let long = "x".repeat(DICTIONARY_BUDGET_CHARS / 20);
+        let mut toml = String::from("version = 1\n");
+        let mut tables = Vec::new();
+        let mut columns = HashMap::new();
+        for i in 0..40 {
+            let name = format!("t{i}");
+            toml.push_str(&format!("\n[tables.{name}]\nnote = \"{long}\"\n"));
+            tables.push(TableRef {
+                name: name.clone(),
+                kind: "BASE TABLE".into(),
+            });
+            columns.insert(
+                name,
+                vec![ColumnInfo {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    key: None,
+                }],
+            );
+        }
+        let schema = DbSchema {
+            tables: Some(tables),
+            columns,
+            routines: None,
+        };
+
+        let out = render_schema("poc", &schema, 60, Some(&dict(&toml)));
+        let spent: usize = out.matches(&long).count();
+        assert_eq!(spent, 20, "exactly the budget, not one note more: {spent}");
+        assert!(
+            out.contains("20 of the user's notes were left out"),
+            "and it must say so: {out}"
+        );
+        // The tables past the budget are still listed, with their columns —
+        // losing the note must not lose the schema.
+        assert!(out.contains("TABLE `t39` (id int NOT NULL)"), "{out}");
+    }
+
+    /// Nothing is said about notes when there were none to leave out.
+    #[test]
+    fn a_dictionary_within_budget_says_nothing_about_budgets() {
+        let d = dict("[tables.users]\nnote = \"short\"");
+        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+        assert!(!out.contains("left out"), "{out}");
+    }
+
+    /// D4's other half: the model is told **whose** the comments are, and only
+    /// when there are some. Without this the `--` text is just more schema.
+    #[test]
+    fn the_prompt_says_whose_the_notes_are_only_when_there_are_notes() {
+        let with = system_prompt(
+            "8.4.0",
+            Some("TABLE `users` (id int) -- people"),
+            None,
+            true,
+        );
+        assert!(with.contains("the user's own notes"), "{with}");
+        assert!(with.contains("authoritative"), "{with}");
+        assert!(
+            with.contains("ask rather than inferring"),
+            "and that a silent table is not a described one: {with}"
+        );
+
+        let without = system_prompt("8.4.0", Some("TABLE `users` (id int)"), None, false);
+        assert!(!without.contains("the user's own notes"), "{without}");
+
+        // And never when there is no schema at all to comment on.
+        let nothing = system_prompt("8.4.0", None, None, true);
+        assert!(!nothing.contains("the user's own notes"), "{nothing}");
     }
 
     /// MySQL gains no restrictions it did not have.
     #[test]
     fn an_engine_with_writes_gets_no_refusal_text() {
         let caps = crate::engine::Capabilities::mysql();
-        let p = system_prompt("8.4.0", None, Some(&caps));
+        let p = system_prompt("8.4.0", None, Some(&caps), false);
         assert!(!p.contains("read-only"), "{p}");
         assert!(p.contains("mysql client"), "{p}");
     }

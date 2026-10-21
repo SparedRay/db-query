@@ -205,6 +205,60 @@ test("with no key the chat says so and cannot be used", async ({ page }) => {
 test("the chat states what is sent and what is not", async ({ page }) => {
   await openChat(page);
   await expect(page.locator("#chat-note")).toContainText("row data never is");
+  // No dictionary on this connection, so the sentence does not claim one.
+  await expect(page.locator("#chat-note")).not.toContainText("dictionary");
+});
+
+/**
+ * Stage 25 §3.8. A dictionary is prose the user wrote and can carry an example
+ * value, so "table and column names are sent, row data never is" stopped being
+ * the whole truth the moment one could be attached. The header says it.
+ */
+test("the chat says when a dictionary is sent too", async ({ page }) => {
+  await installBackend(page, {
+    ...schemaBackend,
+    assistant_status: () => ({ hasKey: true, ready: true, local: false }),
+    connect_saved: () => ({
+      id: "p1",
+      serverVersion: "8.4.0",
+      databases: ["poc"],
+      currentDatabase: "poc",
+      capabilities: { engine: "mysql", namespaceLabel: "database", writes: true },
+    }),
+    list_profiles: () => ({
+      profiles: [
+        {
+          id: "p1",
+          name: "prod-eu",
+          colour: "#3b82f6",
+          host: "db.example.com",
+          port: 3306,
+          user: "reporting",
+          database: "poc",
+          allowInvalidCerts: false,
+          kind: "mysql",
+          url: "",
+          auth: { type: "none" },
+          noPassword: false,
+          rememberPassword: true,
+          needsSecret: false,
+          dictionary: "/work/warehouse/db/dictionary.toml",
+        },
+      ],
+      warning: null,
+    }),
+  });
+  await visit(page);
+  await page.locator(".rail-item").click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-pane")).toBeVisible();
+
+  const note = page.locator("#chat-note");
+  await expect(note).toContainText("the dictionary you attached");
+  // And the rest of the promise is still there, not replaced by it.
+  await expect(note).toContainText("row data never is");
 });
 
 // ------------------------------------------------------------- the key itself
