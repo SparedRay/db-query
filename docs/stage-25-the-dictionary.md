@@ -257,8 +257,28 @@ promise was written out **twice**, once per provider branch, and the edit that
 added "and the dictionary" was applied to one of them. It is one `whatIsSent()`
 now — two copies of a promise is one copy that gets updated.
 
-### Slice 3 — MCP
-- [ ] `note` on the `Tables` and `Columns` results
+### Slice 3 — MCP · built 2026-10-21
+- [x] `note` on the `Tables` and `Columns` results, and `join` beside them
+- [x] the advertised instructions say whose the notes are
+- [x] 4 unit tests · D5 met, **still four tools**
+
+`list_tables` answers a note per table; `describe_table` answers the table's
+note, its join, and a note per column. No fifth tool, and no new advertised
+capability — the server still builds `ServerCapabilities::builder()
+.enable_tools()`, and `advertises_exactly_the_four_tools` is untouched.
+
+**Their own shapes, not `schema::TableRef` plus a field.** `TableRef` is what
+the introspection cache holds, and a note is not introspection: it comes from a
+file the user edits and goes stale for entirely different reasons. Keeping them
+apart is what stops a dictionary edit from having to invalidate a schema cache.
+
+An absent note is an **absent key**, never `null`, and `dictionary: true`
+appears only when the connection has one — so a client can tell "nobody has
+described these" from "this app has no notes to give".
+
+A dictionary that fails to load does **not** fail the call. The client asked
+about the schema and the schema is still there; the app's own surfaces are
+where a broken file complains.
 
 ### Slice 4 — the tab and the tree
 - [ ] a third `TabKind`, its header band, no SQL controls

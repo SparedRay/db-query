@@ -284,11 +284,46 @@ struct Databases {
     default_database: Option<String>,
 }
 
+/// One table, as this server reports it.
+///
+/// **Its own shape rather than `schema::TableRef` plus a field.** `TableRef`
+/// is what the introspection cache holds, and a note is not introspection: it
+/// comes from a file the user edits and goes stale for entirely different
+/// reasons. Keeping them apart is what stops a dictionary edit from having to
+/// invalidate a schema cache.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TableOut {
+    name: String,
+    /// "BASE TABLE" | "VIEW"
+    kind: String,
+    /// What the user's dictionary says this table is, when they have said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Tables {
     database: String,
-    tables: Vec<crate::schema::TableRef>,
+    tables: Vec<TableOut>,
+    /// Set when this connection has a dictionary attached, so a client can
+    /// tell "nobody has described these" from "this app has no notes to give".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dictionary: bool,
+}
+
+/// One column, with whatever the dictionary says about it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColumnOut {
+    name: String,
+    data_type: String,
+    nullable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,7 +331,13 @@ struct Tables {
 struct Columns {
     database: String,
     table: String,
-    columns: Vec<crate::schema::ColumnInfo>,
+    columns: Vec<ColumnOut>,
+    /// The table's own note, and how the user says it joins. Beside the
+    /// columns rather than inside them, because that is what they describe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    join: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,6 +417,27 @@ impl<R: Runtime> Tools<R> {
         })
     }
 
+    /// The dictionary attached to a connection, if any and if it loads.
+    ///
+    /// **Never an error.** A dictionary with a typo in it must not turn
+    /// `list_tables` into a failure — the client asked about the schema, and
+    /// the schema is still there. The app's own warning surface is the place
+    /// that complains about the file.
+    async fn dictionary(&self, id: &str) -> Option<crate::dictionary::Dictionary> {
+        let state = self.app.state::<AppState>();
+        let server = crate::session::server(&state, id).await.ok()?;
+        let path = server
+            .profile
+            .dictionary
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())?;
+        crate::dictionary::load_cached(std::path::Path::new(path))
+            .ok()
+            .map(|l| l.dictionary)
+            .filter(|d| !d.is_empty())
+    }
+
     /// Resolve `database`, falling back to the connection's own default.
     async fn database(&self, given: Option<String>, id: &str) -> Result<String, ErrorData> {
         if let Some(db) = given
@@ -431,7 +493,8 @@ impl<R: Runtime> Tools<R> {
     /// Tables and views in one database. Read-only.
     #[tool(
         description = "List the tables and views in one database on the db-query connection \
-                       the user currently has open. Read-only."
+                       the user currently has open. Each may carry a `note`: what the user's \
+                       own dictionary says that table is. Read-only."
     )]
     async fn list_tables(
         &self,
@@ -439,13 +502,17 @@ impl<R: Runtime> Tools<R> {
     ) -> Result<CallToolResult, ErrorData> {
         let id = self.connection().await?;
         let db = self.database(args.database, &id).await?;
-        let state = self.app.state::<AppState>();
-        let tables = crate::schema::list_tables(&state, &id, &db)
-            .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let tables = {
+            let state = self.app.state::<AppState>();
+            crate::schema::list_tables(&state, &id, &db)
+                .await
+                .map_err(|e| ErrorData::internal_error(e, None))?
+        };
+        let dictionary = self.dictionary(&id).await;
         structured(&Tables {
+            tables: tables_with_notes(&db, tables, dictionary.as_ref()),
             database: db,
-            tables,
+            dictionary: dictionary.is_some(),
         })
     }
 
@@ -453,8 +520,10 @@ impl<R: Runtime> Tools<R> {
     /// **no rows** — row data is a larger privacy question than schema names
     /// and is deliberately not offered here.
     #[tool(
-        description = "Describe one table or view: its columns, types, nullability and keys. \
-                       Returns no row data. Read-only."
+        description = "Describe one table or view: its columns, types, nullability and keys, \
+                       plus any `note` the user's own dictionary holds for the table, for how \
+                       it joins, or for a column. Those notes are the user's and outrank a \
+                       guess at what a name means. Returns no row data. Read-only."
     )]
     async fn describe_table(
         &self,
@@ -468,10 +537,16 @@ impl<R: Runtime> Tools<R> {
                 .await
                 .map_err(|e| ErrorData::internal_error(e, None))?
         };
+        let said = self
+            .dictionary(&id)
+            .await
+            .and_then(|d| d.table(&db, &args.table));
         structured(&Columns {
+            columns: columns_with_notes(columns, said.as_ref()),
+            note: said.as_ref().and_then(|e| e.note.clone()),
+            join: said.as_ref().and_then(|e| e.join.clone()),
             database: db,
             table: args.table,
-            columns,
         })
     }
 
@@ -516,6 +591,52 @@ impl<R: Runtime> Tools<R> {
     }
 }
 
+/// Attach the user's notes to a table list.
+///
+/// **A free function, for the reason the two below are**: everything else in
+/// this module needs an app handle and a live connection, and the thing most
+/// worth pinning here is the shape a client receives.
+fn tables_with_notes(
+    database: &str,
+    tables: Vec<crate::schema::TableRef>,
+    dictionary: Option<&crate::dictionary::Dictionary>,
+) -> Vec<TableOut> {
+    tables
+        .into_iter()
+        .map(|t| TableOut {
+            note: dictionary
+                .and_then(|d| d.table(database, &t.name))
+                .and_then(|e| e.note),
+            name: t.name,
+            kind: t.kind,
+        })
+        .collect()
+}
+
+/// Attach the user's notes to one table's columns.
+///
+/// `said` is that table's whole entry; the column keys in it are folded to
+/// lower case by the dictionary, and a server may report a column in any case
+/// at all — which is why the lookup folds rather than compares.
+fn columns_with_notes(
+    columns: Vec<crate::schema::ColumnInfo>,
+    said: Option<&crate::dictionary::TableNote>,
+) -> Vec<ColumnOut> {
+    columns
+        .into_iter()
+        .map(|c| ColumnOut {
+            note: said
+                .and_then(|e| e.columns.get(&c.name.to_lowercase()))
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty()),
+            name: c.name,
+            data_type: c.data_type,
+            nullable: c.nullable,
+            key: c.key,
+        })
+        .collect()
+}
+
 /// What to say when the caller named no namespace and the connection has no
 /// default one.
 ///
@@ -549,7 +670,11 @@ impl<R: Runtime> ServerHandler for Tools<R> {
             "Read-only access to the schema of the database connection the user has open \
              in db-query, plus put_query, which places SQL in a new editor tab without \
              running it. There is no way to execute a statement or read rows through this \
-             server: propose the query and let the user run it."
+             server: propose the query and let the user run it.\n\n\
+             Where a table or column carries a `note`, that is the user's own description \
+             of it, from a dictionary they maintain beside the schema. Prefer it over what \
+             a name appears to mean; a table with no note is not described anywhere, so ask \
+             rather than inferring."
                 .into(),
         );
         info
@@ -807,6 +932,132 @@ mod tests {
     ///
     /// The whole point of the stage: the advertised list is these four and
     /// nothing else. A `run_query` added in a hurry stops the build here.
+    // --------------------------------------- Stage 25: the user's own notes
+
+    fn dict() -> crate::dictionary::Dictionary {
+        crate::dictionary::parse(
+            r#"
+            [tables.orders]
+            note = "One row per order."
+            join = "orders.user_id = users.id"
+            columns.total = "Cents. Divide by 100 only for a person."
+            columns.blank = "   "
+            "#,
+        )
+        .unwrap()
+        .dictionary
+    }
+
+    fn table(name: &str) -> crate::schema::TableRef {
+        crate::schema::TableRef {
+            name: name.into(),
+            kind: "BASE TABLE".into(),
+        }
+    }
+
+    fn column(name: &str) -> crate::schema::ColumnInfo {
+        crate::schema::ColumnInfo {
+            name: name.into(),
+            data_type: "int".into(),
+            nullable: false,
+            key: None,
+        }
+    }
+
+    /// A described table carries its note; one nobody wrote about carries
+    /// **no key at all**, rather than `null` — a client should see the absence,
+    /// not a field it has to interpret.
+    #[test]
+    fn a_table_list_carries_the_notes_and_omits_the_rest() {
+        let d = dict();
+        let out = tables_with_notes("poc", vec![table("orders"), table("big")], Some(&d));
+        let json = serde_json::to_value(&out).unwrap();
+
+        assert_eq!(json[0]["name"], "orders");
+        assert_eq!(json[0]["note"], "One row per order.");
+        assert_eq!(json[1]["name"], "big");
+        assert!(
+            json[1].get("note").is_none(),
+            "an undescribed table must carry no note key: {json}"
+        );
+    }
+
+    /// With no dictionary at all, the list is what it always was.
+    #[test]
+    fn with_no_dictionary_the_list_is_unchanged() {
+        let out = tables_with_notes("poc", vec![table("orders")], None);
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json[0]["name"], "orders");
+        assert_eq!(json[0]["kind"], "BASE TABLE");
+        assert!(json[0].get("note").is_none(), "{json}");
+    }
+
+    /// Columns the same way, and the case the server reports does not hide a
+    /// note — the dictionary is keyed lower-case and MySQL is not.
+    #[test]
+    fn a_column_note_survives_the_case_the_server_reports() {
+        let d = dict();
+        let said = d.table("poc", "orders");
+        let out = columns_with_notes(
+            vec![column("id"), column("TOTAL"), column("blank")],
+            said.as_ref(),
+        );
+        let json = serde_json::to_value(&out).unwrap();
+
+        assert!(json[0].get("note").is_none(), "id has none: {json}");
+        assert_eq!(json[1]["note"], "Cents. Divide by 100 only for a person.");
+        assert!(
+            json[2].get("note").is_none(),
+            "a note of only spaces is not a note: {json}"
+        );
+    }
+
+    /// The table's own note and its join travel **beside** the columns, which
+    /// is what they describe — and `dictionary` says whether this connection
+    /// has one at all, so a client can tell "nobody described these" from
+    /// "this app has nothing to give".
+    #[test]
+    fn the_described_shapes_serialise_as_a_client_reads_them() {
+        let d = dict();
+        let said = d.table("poc", "orders");
+        let columns = Columns {
+            database: "poc".into(),
+            table: "orders".into(),
+            columns: columns_with_notes(vec![column("total")], said.as_ref()),
+            note: said.as_ref().and_then(|e| e.note.clone()),
+            join: said.as_ref().and_then(|e| e.join.clone()),
+        };
+        let json = serde_json::to_value(&columns).unwrap();
+        assert_eq!(json["note"], "One row per order.");
+        assert_eq!(json["join"], "orders.user_id = users.id");
+        assert_eq!(
+            json["columns"][0]["note"],
+            "Cents. Divide by 100 only for a person."
+        );
+
+        let bare = Columns {
+            database: "poc".into(),
+            table: "big".into(),
+            columns: columns_with_notes(vec![column("id")], None),
+            note: None,
+            join: None,
+        };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("note").is_none(), "{json}");
+        assert!(json.get("join").is_none(), "{json}");
+
+        let listed = Tables {
+            database: "poc".into(),
+            tables: tables_with_notes("poc", vec![table("big")], None),
+            dictionary: false,
+        };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert!(
+            json.get("dictionary").is_none(),
+            "absent rather than false, like every other optional here: {json}"
+        );
+    }
+
     #[test]
     fn advertises_exactly_the_four_tools() {
         let names: Vec<String> = Tools::<tauri::Wry>::tool_router()
