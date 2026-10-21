@@ -154,18 +154,36 @@ tags. For bringing a tree back in line with a release CI stamped on its own.
 
 An **MCP server**, off by default, in *Settings → Integrations*. Turn it on and
 another tool — Claude Code, Claude Desktop, any MCP client — can read the schema
-of the connection you have open and drop a query into your editor.
+of the connection you have open, drop a query into your editor, and write notes
+into its AI dictionary.
 
 **It cannot run one.** There is no execute tool, no way to read rows, and a test
 asserts the advertised tool list is exactly `list_databases`, `list_tables`,
-`describe_table` and `put_query`. A query that arrives opens in a new tab,
-marked as external, and waits for you.
+`describe_table`, `put_query` and `put_notes`. Everything a client sends arrives
+as text you review: a query opens in a new tab, marked as external, and notes
+land in the dictionary tab **unsaved**. Nothing it sends is written to a file or
+to a database.
 
 It listens on `127.0.0.1` only, validates `Origin`, and needs a bearer token
 that lives in your system keychain. Settings shows the exact command or JSON to
 paste into a client. See
 [the Stage 13 tracker](docs/stage-13-mcp-server.md) for the design and the
 reasoning.
+
+### The dictionary it writes
+
+A connection can point at a TOML file saying what its tables and columns
+*mean* — what one row is, how a table joins, what a `status` of `X` stands for.
+The assistant and the MCP server read it beside the names and types they already
+see, so neither has to guess from a name. Right-click a connection → *AI
+dictionary…* to attach or create one; it opens as a tab, and the schema tree
+marks every table and column the file describes.
+
+It is a **path**, not a copy: point dev, UAT and production at one file and a
+single edit reaches all three. `put_notes` is how an agent that has your
+application's code in front of it fills that file in — as a proposal in the
+editor, which you read and save. See
+[the Stage 25 tracker](docs/stage-25-the-dictionary.md).
 
 ## Targets
 
