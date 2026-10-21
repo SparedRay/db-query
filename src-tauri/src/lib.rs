@@ -1264,6 +1264,22 @@ async fn dictionary_check(
     })
 }
 
+/// Merge notes into a dictionary's text, **as typed**.
+///
+/// Slice 5. Stateless on purpose: the text comes from the open buffer, which
+/// is the only version worth merging into — notes that arrive while somebody
+/// is halfway through a sentence have to land in front of that sentence, not
+/// behind it. Nothing here writes a file; the person presses Ctrl+S.
+#[tauri::command]
+fn dictionary_merge(
+    text: String,
+    database: String,
+    edits: Vec<dictionary::NoteEdit>,
+    replace: bool,
+) -> Result<dictionary::Merged, String> {
+    dictionary::merge(&text, &database, &edits, replace)
+}
+
 /// Pick the folder of scripts, or the folder the CSVs go in.
 ///
 /// Two separate picks by §3.2's decision: the scripts may live somewhere
@@ -2691,6 +2707,21 @@ async fn mcp_set_focus(
     Ok(())
 }
 
+/// What the editor did with a `put_notes`.
+///
+/// The other half of the one tool that writes: the merge happens against the
+/// open buffer, so only the window knows the answer, and the waiting call
+/// cannot be answered from anywhere else.
+#[tauri::command]
+async fn mcp_notes_landed(
+    state: State<'_, mcp::McpState>,
+    request: String,
+    outcome: mcp::NotesOutcome,
+) -> Result<(), String> {
+    state.notes_landed(request, outcome).await;
+    Ok(())
+}
+
 /// The bearer token, minted on first read. Returned so Settings can show it
 /// and copy it into a client's config — it is a credential for this machine's
 /// own loopback port, and the user is the only one who can put it anywhere.
@@ -2745,6 +2776,7 @@ pub fn run() {
             dictionary_pick,
             dictionary_check,
             dictionary_marks,
+            dictionary_merge,
             flyway_info,
             flyway_fingerprint,
             flyway_migrate,
@@ -2808,6 +2840,7 @@ pub fn run() {
             mcp_stop,
             mcp_status,
             mcp_set_focus,
+            mcp_notes_landed,
             mcp_token,
             mcp_regenerate_token,
             log_notes,

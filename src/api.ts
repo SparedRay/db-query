@@ -489,6 +489,36 @@ export interface DictionaryCheck {
   warning: string | null;
 }
 
+/** One table's notes, as something outside the app proposes them. Mirrors
+ *  `dictionary::NoteEdit`. */
+export interface DictionaryNoteEdit {
+  table: string;
+  note?: string | null;
+  join?: string | null;
+  columns: Record<string, string>;
+}
+
+/** What one table's merge did: field labels written, and labels left alone
+ *  because the user had already written them. Mirrors `dictionary::Applied`. */
+export interface DictionaryApplied {
+  table: string;
+  wrote: string[];
+  kept: string[];
+}
+
+/** A table whose notes were not written, and why. */
+export interface DictionarySkipped {
+  table: string;
+  why: string;
+}
+
+/** The merged text, and what became of each table. */
+export interface DictionaryMerged {
+  text: string;
+  applied: DictionaryApplied[];
+  skipped: DictionarySkipped[];
+}
+
 /**
  * What the dictionary describes in one database, keyed lower-case so the tree
  * can compare against whatever case the server reported.
@@ -834,6 +864,39 @@ export interface McpPutQuery {
 /** Mirrors `mcp::PUT_QUERY_EVENT`. */
 export const MCP_PUT_QUERY_EVENT = "mcp://put-query";
 
+/**
+ * What `put_notes` sends: notes for one or more tables, **structured**, to be
+ * merged into whatever the dictionary buffer says right now.
+ *
+ * Mirrors `mcp::PutNotes`. The TOML is composed in Rust against the buffer's
+ * text, not here and not by the client — the file's grammar lives in one
+ * place.
+ */
+export interface McpPutNotes {
+  /** Which call this answers. It goes back with the outcome. */
+  request: string;
+  connectionId: string;
+  database: string;
+  replace: boolean;
+  tables: DictionaryNoteEdit[];
+}
+
+/** Mirrors `mcp::PUT_NOTES_EVENT`. */
+export const MCP_PUT_NOTES_EVENT = "mcp://put-notes";
+
+/**
+ * What the editor did with them. Mirrors `mcp::NotesOutcome`.
+ *
+ * `problem` is for "could not take them at all" — a connection that closed, a
+ * dictionary that no longer parses. The client is told, because a note nobody
+ * notices is missing is the failure this whole stage exists to prevent.
+ */
+export interface McpNotesOutcome {
+  applied: DictionaryApplied[];
+  skipped: DictionarySkipped[];
+  problem: string | null;
+}
+
 export interface SessionLoad {
   session: SessionStore;
   /** Set when the file was unreadable and moved aside. */
@@ -1119,6 +1182,14 @@ export const api = {
    *  does it say about things that are not in the schema? */
   dictionaryCheck: (connectionId: string, database: string, text: string) =>
     invoke<DictionaryCheck>("dictionary_check", { connectionId, database, text }),
+  /** Merge notes into the buffer's text. Writes no file: the answer is text
+   *  for the editor, and the person presses Ctrl+S. */
+  dictionaryMerge: (
+    text: string,
+    database: string,
+    edits: DictionaryNoteEdit[],
+    replace: boolean,
+  ) => invoke<DictionaryMerged>("dictionary_merge", { text, database, edits, replace }),
 
   /** Has anything in these folders changed? The cheap half of Stage 24: ~4ms
    *  for a thousand files, against ~4.8s for a `flyway info`. Compare the
@@ -1511,6 +1582,10 @@ export const api = {
   /** Which connection an MCP client sees. Only the UI knows this. */
   mcpSetFocus: (connectionId: string | null) =>
     invoke<void>("mcp_set_focus", { connectionId }),
+  /** What the editor did with a `put_notes`. The call is waiting on it, so a
+   *  refusal has to travel too — see `McpNotesOutcome.problem`. */
+  mcpNotesLanded: (request: string, outcome: McpNotesOutcome) =>
+    invoke<void>("mcp_notes_landed", { request, outcome }),
   /** Minted on first read and kept in the OS keychain. */
   mcpToken: () => invoke<string>("mcp_token"),
   mcpRegenerateToken: () => invoke<string>("mcp_regenerate_token"),

@@ -172,7 +172,7 @@ async fn a_wrong_path_says_where_the_server_is() {
 /// A real handshake, and then the tool list a client would see. The unit test
 /// asserts what the router holds; this asserts what comes back over the wire.
 #[tokio::test]
-async fn a_client_handshake_lists_exactly_the_four_tools() {
+async fn a_client_handshake_lists_exactly_the_five_tools() {
     let (_app, state, url, token) = serve().await;
     let http = client();
 

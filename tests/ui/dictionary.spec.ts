@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, commandNames, installBackend, openDatabase, schemaBackend, visit } from "./harness";
+import {
+  calls,
+  commandNames,
+  fireEvent,
+  installBackend,
+  openDatabase,
+  schemaBackend,
+  visit,
+} from "./harness";
 
 /**
  * Stage 25 slice 4: the AI dictionary as a tab, and the tree's dots.
@@ -266,4 +274,190 @@ test("a connection with no dictionary is offered one, and remembers it", async (
   await expect.poll(async () => commandNames(page)).toContain("save_profile");
   const saved = (await calls(page)).find((c) => c.cmd === "save_profile");
   expect((saved?.args.profile as { dictionary?: string })?.dictionary).toBe(DICT_PATH);
+});
+
+// -------------------------------------------- slice 5: notes from a client
+
+/**
+ * `put_notes`. The one MCP tool that writes anything, and what it writes to is
+ * **the buffer**: the merge happens in Rust against the text as it stands, the
+ * result lands in the tab dirty, and the person saves it. Everything asserted
+ * here is the restraint — the merge itself is `dictionary.rs`'s, with 13 tests
+ * of its own.
+ */
+const NOTES_EVENT = "mcp://put-notes";
+
+const SENT = {
+  request: "r1",
+  connectionId: "p1",
+  database: "poc",
+  replace: false,
+  tables: [{ table: "users", note: "One row per person who can sign in.", columns: {} }],
+};
+
+const MERGED = `${FILE}
+[tables.users]
+note = "One row per person who can sign in."
+`;
+
+/** The merge, as Rust answers it: new text, and what became of each table. */
+function mergeBackend(over: Record<string, unknown> = {}) {
+  return {
+    dictionary_merge: () => ({
+      text: MERGED,
+      applied: [{ table: "users", wrote: ["note"], kept: [] }],
+      skipped: [],
+      ...over,
+    }),
+    mcp_notes_landed: () => null,
+  };
+}
+
+/** What the window told the waiting call. */
+async function landed(page: Page) {
+  const call = (await calls(page)).find((c) => c.cmd === "mcp_notes_landed");
+  return call?.args as
+    | { request: string; outcome: { applied: unknown[]; skipped: unknown[]; problem: string | null } }
+    | undefined;
+}
+
+test("notes from a client land in the buffer, unsaved, and the client is told", async ({
+  page,
+}) => {
+  await live(page, mergeBackend());
+  await openDict(page);
+
+  await fireEvent(page, NOTES_EVENT, SENT);
+
+  await expect(page.locator(".cm-content")).toContainText("[tables.users]");
+  // The whole promise: it is a proposal, so the tab is dirty and nothing was
+  // written to disk.
+  await expect(page.locator(".stab.active")).toHaveClass(/dirty/);
+  expect(await commandNames(page)).not.toContain("save_file");
+  // And the person is told, in the words that matter: it is theirs to save.
+  await expect(page.locator("#grid .empty")).toContainText("users");
+  await expect(page.locator("#grid .empty")).toContainText("Nothing is saved");
+
+  // And the call waiting on the other end hears what happened — by its own
+  // request id, because two calls must not answer each other.
+  await expect.poll(async () => commandNames(page)).toContain("mcp_notes_landed");
+  const answer = await landed(page);
+  expect(answer?.request).toBe("r1");
+  expect(answer?.outcome.applied).toEqual([{ table: "users", wrote: ["note"], kept: [] }]);
+  expect(answer?.outcome.problem).toBeNull();
+});
+
+/**
+ * **The reason the merge happens here and not on disk.** Notes that arrive
+ * while somebody is halfway through a sentence have to land in front of that
+ * sentence — so what is merged into is the buffer, including the part that has
+ * never been saved.
+ */
+test("the merge is given the buffer, not the file", async ({ page }) => {
+  await live(page, mergeBackend());
+  await openDict(page);
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("# halfway through a thought\n");
+
+  await fireEvent(page, NOTES_EVENT, SENT);
+
+  await expect.poll(async () => commandNames(page)).toContain("dictionary_merge");
+  const merge = (await calls(page)).find((c) => c.cmd === "dictionary_merge");
+  expect(merge?.args.text).toContain("halfway through a thought");
+  expect(merge?.args.database).toBe("poc");
+  expect(merge?.args.replace).toBe(false);
+});
+
+/**
+ * One undo puts it back, and takes nothing of yours with it. CodeMirror groups
+ * edits by time, so an arrival landing a moment after a keystroke would
+ * otherwise merge into that typing.
+ */
+test("one undo puts an arrival back without eating what was being typed", async ({ page }) => {
+  await live(page, mergeBackend());
+  await openDict(page);
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("# mine\n");
+  await fireEvent(page, NOTES_EVENT, SENT);
+  await expect(page.locator(".cm-content")).toContainText("[tables.users]");
+
+  await page.keyboard.press("Control+z");
+  await expect(page.locator(".cm-content")).not.toContainText("[tables.users]");
+  await expect(page.locator(".cm-content")).toContainText("# mine");
+});
+
+/** With nothing to open yet, the arrival opens the file itself. */
+test("notes arriving with no dictionary tab open one", async ({ page }) => {
+  await live(page, mergeBackend());
+
+  await fireEvent(page, NOTES_EVENT, SENT);
+
+  await expect(page.locator("#dict-band")).toBeVisible();
+  await expect(page.locator(".stab.active")).toContainText("dictionary.toml");
+  await expect(page.locator(".cm-content")).toContainText("[tables.users]");
+});
+
+/**
+ * A note the user had already written is **kept**, so there is nothing to put
+ * in the buffer — and the client still hears, because silence would read as
+ * success.
+ */
+test("notes that changed nothing leave the buffer alone and are still answered", async ({
+  page,
+}) => {
+  await live(
+    page,
+    mergeBackend({
+      text: FILE,
+      applied: [{ table: "orders", wrote: [], kept: ["note"] }],
+    }),
+  );
+  await openDict(page);
+
+  await fireEvent(page, NOTES_EVENT, SENT);
+
+  await expect.poll(async () => commandNames(page)).toContain("mcp_notes_landed");
+  await expect(page.locator(".stab.active")).not.toHaveClass(/dirty/);
+  const answer = await landed(page);
+  expect(answer?.outcome.applied).toEqual([{ table: "orders", wrote: [], kept: ["note"] }]);
+  expect(answer?.outcome.problem).toBeNull();
+});
+
+/**
+ * **Every path out answers the call.** A client that is told nothing waits ten
+ * seconds and then cannot tell "lost" from "slow" — so a connection that has
+ * gone is reported as a problem, not left to time out.
+ */
+test("notes for a connection that is gone are refused, not dropped", async ({ page }) => {
+  await live(page, mergeBackend());
+  await openDict(page);
+
+  await fireEvent(page, NOTES_EVENT, { ...SENT, connectionId: "closed-long-ago" });
+
+  await expect.poll(async () => commandNames(page)).toContain("mcp_notes_landed");
+  const answer = await landed(page);
+  expect(answer?.outcome.problem).toContain("no longer open");
+  expect(answer?.outcome.applied).toEqual([]);
+  // Nothing was merged, because there was nothing to merge into.
+  expect(await commandNames(page)).not.toContain("dictionary_merge");
+});
+
+/** A merge that fails is the client's problem too, not just a message here. */
+test("a merge that fails is reported to the client", async ({ page }) => {
+  await live(page, {
+    ...mergeBackend(),
+    dictionary_merge: () => {
+      throw new Error("The dictionary as it stands cannot be read, so nothing was written.");
+    },
+  });
+  await openDict(page);
+
+  await fireEvent(page, NOTES_EVENT, SENT);
+
+  await expect.poll(async () => commandNames(page)).toContain("mcp_notes_landed");
+  const answer = await landed(page);
+  expect(answer?.outcome.problem).toContain("cannot be read");
+  await expect(page.locator("#grid .empty")).toContainText("cannot be read");
 });

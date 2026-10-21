@@ -1,13 +1,22 @@
-//! An MCP server, so another tool can read the schema you are connected to and
-//! put a query in your editor.
+//! An MCP server, so another tool can read the schema you are connected to,
+//! put a query in your editor, and write down what a table means.
 //!
 //! # There is no execute tool, and that is the design
 //!
 //! A database MCP server that runs SQL is a dangerous thing to leave listening
 //! on a laptop: an agent that misreads a request can drop a table. This one can
 //! only *propose*, which gives it the blast radius of a stranger showing you
-//! some text. `advertises_exactly_the_four_tools` in the tests below asserts the
-//! advertised list, so a fifth tool cannot arrive by accident.
+//! some text. `advertises_exactly_the_five_tools` in the tests below asserts the
+//! advertised list, so a sixth tool cannot arrive by accident.
+//!
+//! # The one tool that writes, and what it writes to
+//!
+//! `put_notes` (Stage 25 slice 5) is how an agent with the code in front of it
+//! writes the dictionary nobody has time to write by hand. It is still a
+//! proposal: it runs no SQL, touches no database, and **does not write the
+//! file** — the notes land in the dictionary tab as text the person reads and
+//! saves. Nothing here grows a fifth risk class; it grows a second kind of
+//! text put in front of somebody.
 //!
 //! # Why Streamable HTTP and not stdio
 //!
@@ -46,7 +55,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::secrets::{self, Secret};
@@ -69,6 +78,25 @@ pub const DEFAULT_PORT: u16 = 49731;
 /// The event `put_query` emits. Namespaced so the frontend listener cannot be
 /// confused with anything the user's own tabs do.
 pub const PUT_QUERY_EVENT: &str = "mcp://put-query";
+
+/// The event `put_notes` emits.
+pub const PUT_NOTES_EVENT: &str = "mcp://put-notes";
+
+/// How long `put_notes` waits for the editor to say what it did.
+///
+/// **Why it waits at all**, where `put_query` does not: a tab that failed to
+/// arrive is visible the moment somebody looks at the window, and a note that
+/// failed to merge is not. The failure this stage exists to prevent is a note
+/// nobody notices is missing, so the tool reports what actually happened —
+/// including "the window never answered".
+const EDITOR_REPLY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The most tables one `put_notes` may carry.
+///
+/// Not a safety limit — nothing here can damage anything — but a proposal of
+/// four hundred tables is one nobody will read, which defeats the point of
+/// proposing.
+const MAX_TABLES: usize = 60;
 
 /// The protocol revision this server negotiates as its preferred version.
 ///
@@ -266,6 +294,55 @@ pub struct TableArgs {
     pub table: String,
 }
 
+/// What `put_notes` takes: one entry per table, each saying as much or as
+/// little as the caller knows.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NotesArgs {
+    /// Which database (or catalog) these tables are in. Omit to use the
+    /// connection's own default.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// One entry per table. Entries for tables the dictionary has never
+    /// mentioned are added; entries for tables it already describes fill in
+    /// what is missing.
+    pub tables: Vec<TableNotesArg>,
+    /// Overwrite notes the user has already written. Off by default: their
+    /// sentence outranks a generated one, and anything already written is
+    /// reported back as `kept` rather than replaced.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// What to say about one table.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TableNotesArg {
+    /// The table or view name.
+    pub table: String,
+    /// What the table is, in a sentence or two — what one row means, and what
+    /// it is *not*. Shorter than a paragraph; this is read beside the column
+    /// list, not instead of it.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// How it joins, as an expression: `orders.customer_id = customers.id`.
+    #[serde(default)]
+    pub join: Option<String>,
+    /// Column name → what that column means. Only the ones whose name does
+    /// not already say it: a note per column doubles what a prompt costs.
+    #[serde(default)]
+    pub columns: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl From<TableNotesArg> for crate::dictionary::NoteEdit {
+    fn from(arg: TableNotesArg) -> Self {
+        Self {
+            table: arg.table,
+            note: arg.note,
+            join: arg.join,
+            columns: arg.columns.unwrap_or_default().into_iter().collect(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryArgs {
     /// The SQL to place in a new editor tab. It is **not executed**.
@@ -350,11 +427,12 @@ struct Placed {
 }
 
 /// What the tools are called, in the order they are advertised.
-pub const TOOL_NAMES: [&str; 4] = [
+pub const TOOL_NAMES: [&str; 5] = [
     "list_databases",
     "list_tables",
     "describe_table",
     "put_query",
+    "put_notes",
 ];
 
 /// The handler. Cloned per request by the transport, so everything in it is
@@ -366,6 +444,9 @@ pub const TOOL_NAMES: [&str; 4] = [
 pub struct Tools<R: Runtime> {
     app: AppHandle<R>,
     focus: Focus,
+    /// Shared with [`McpState`], because the reply comes back through a Tauri
+    /// command rather than through this handler.
+    pending: Pending,
     /// Built once per handler rather than per call. `#[tool_handler]` reaches
     /// it by the `router` expression below.
     tool_router: ToolRouter<Self>,
@@ -379,6 +460,7 @@ impl<R: Runtime> Clone for Tools<R> {
         Self {
             app: self.app.clone(),
             focus: self.focus.clone(),
+            pending: self.pending.clone(),
             tool_router: self.tool_router.clone(),
         }
     }
@@ -394,12 +476,62 @@ pub struct PutQuery {
     pub connection_id: String,
 }
 
+/// The payload of [`PUT_NOTES_EVENT`].
+///
+/// The notes travel **structured**, not as TOML: the text is composed where
+/// the file's own grammar lives (`dictionary::merge`), against the buffer as
+/// it stands this instant, which is the only version that can be merged into
+/// without losing whatever somebody is in the middle of typing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutNotes {
+    /// Which call this is the answer to. The editor sends it back.
+    pub request: String,
+    pub connection_id: String,
+    pub database: String,
+    pub replace: bool,
+    pub tables: Vec<crate::dictionary::NoteEdit>,
+}
+
+/// What the editor did with a [`PutNotes`].
+///
+/// Comes **from** the frontend, which is why it deserializes: the merge
+/// happens against the open buffer, so only the window knows the answer.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotesOutcome {
+    #[serde(default)]
+    pub applied: Vec<crate::dictionary::Applied>,
+    #[serde(default)]
+    pub skipped: Vec<crate::dictionary::Skipped>,
+    /// Set when the editor could not take them at all — a connection that has
+    /// closed, a dictionary that no longer parses.
+    #[serde(default)]
+    pub problem: Option<String>,
+}
+
+/// What `put_notes` answers.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesPlaced {
+    /// True when something changed in the editor. False with an empty
+    /// `skipped` means the file already said everything that was sent.
+    placed: bool,
+    applied: Vec<crate::dictionary::Applied>,
+    skipped: Vec<crate::dictionary::Skipped>,
+    note: String,
+}
+
+/// `put_notes` calls waiting for the window to answer, by request id.
+type Pending = Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<NotesOutcome>>>>;
+
 #[tool_router]
 impl<R: Runtime> Tools<R> {
-    pub fn new(app: AppHandle<R>, focus: Focus) -> Self {
+    pub fn new(app: AppHandle<R>, focus: Focus, pending: Pending) -> Self {
         Self {
             app,
             focus,
+            pending,
             tool_router: Self::tool_router(),
         }
     }
@@ -589,6 +721,172 @@ impl<R: Runtime> Tools<R> {
                 .to_string(),
         })
     }
+
+    /// Write what tables mean into the user's dictionary — **into the editor**,
+    /// never into the file.
+    ///
+    /// The tool this stage was asked for: an agent that has the code in front
+    /// of it knows what `status` means, and nobody has time to write three
+    /// hundred notes by hand. What makes it acceptable is that it ends where
+    /// `put_query` ends — as text in a tab, waiting for somebody to read it
+    /// and press save.
+    #[tool(
+        description = "Write notes into the user's AI dictionary for the db-query connection \
+                       they have open: what a table is, how it joins, and what its confusing \
+                       columns mean. The notes are merged into the dictionary file IN THE \
+                       EDITOR and are NOT saved to disk — the user reviews them and saves. \
+                       Notes the user has already written are kept, not overwritten, unless \
+                       `replace` is true; the result says which were written and which were \
+                       kept. Writes nothing to the database and runs no SQL."
+    )]
+    async fn put_notes(
+        &self,
+        Parameters(args): Parameters<NotesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = self.connection().await?;
+        let database = self.database(args.database, &id).await?;
+
+        // Where somebody's dictionary lives is their decision, and this server
+        // does not get to make it: an unbound connection is told how, not
+        // given a file it did not ask for.
+        let name = {
+            let state = self.app.state::<AppState>();
+            let server = crate::session::server(&state, &id)
+                .await
+                .map_err(|e| ErrorData::invalid_request(e, None))?;
+            let bound = server
+                .profile
+                .dictionary
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|p| !p.is_empty());
+            if !bound {
+                return Err(ErrorData::invalid_request(
+                    format!(
+                        "“{}” has no AI dictionary attached, so there is nowhere to write \
+                         these notes. In db-query: right-click the connection in the rail \
+                         and choose “Add an AI dictionary…”.",
+                        server.profile.name
+                    ),
+                    None,
+                ));
+            }
+            server.profile.name.clone()
+        };
+
+        if args.tables.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "No tables were given.".to_string(),
+                None,
+            ));
+        }
+        if args.tables.len() > MAX_TABLES {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "{} tables in one call; {MAX_TABLES} is the limit. These are a proposal \
+                     somebody has to read before it is saved, so send them in batches.",
+                    args.tables.len()
+                ),
+                None,
+            ));
+        }
+
+        let tables: Vec<crate::dictionary::NoteEdit> =
+            args.tables.into_iter().map(Into::into).collect();
+
+        let request = request_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(request.clone(), tx);
+
+        let emitted = self.app.emit(
+            PUT_NOTES_EVENT,
+            PutNotes {
+                request: request.clone(),
+                connection_id: id,
+                database,
+                replace: args.replace,
+                tables,
+            },
+        );
+        if let Err(e) = emitted {
+            self.pending.lock().await.remove(&request);
+            return Err(ErrorData::internal_error(
+                format!("Could not reach the editor: {e}"),
+                None,
+            ));
+        }
+
+        let outcome = match tokio::time::timeout(EDITOR_REPLY, rx).await {
+            Ok(Ok(outcome)) => outcome,
+            // Either the window never answered, or it answered and went away
+            // mid-sentence. Both mean the same thing to a client: nothing is
+            // known to have landed, so do not say it did.
+            _ => {
+                self.pending.lock().await.remove(&request);
+                return Err(ErrorData::internal_error(
+                    "db-query did not take the notes within ten seconds. The window may be \
+                     busy or closed; nothing was written."
+                        .to_string(),
+                    None,
+                ));
+            }
+        };
+
+        if let Some(problem) = outcome.problem {
+            return Err(ErrorData::invalid_request(problem, None));
+        }
+
+        let changed = outcome
+            .applied
+            .iter()
+            .filter(|a| !a.wrote.is_empty())
+            .count();
+        let kept = outcome.applied.iter().any(|a| !a.kept.is_empty());
+
+        structured(&NotesPlaced {
+            placed: changed > 0,
+            note: placed_note(&name, changed, kept),
+            applied: outcome.applied,
+            skipped: outcome.skipped,
+        })
+    }
+}
+
+/// What `put_notes` says it did.
+///
+/// A free function for the reason the three above are: the sentence a client
+/// is told is the part worth pinning, and it must never read as "saved". A
+/// model that believes the file is written stops telling the user to look at
+/// it.
+fn placed_note(connection: &str, changed: usize, kept: bool) -> String {
+    let mut note = if changed == 0 {
+        format!(
+            "Nothing changed: the dictionary for “{connection}” already said everything \
+             that was sent."
+        )
+    } else {
+        format!(
+            "{changed} table{} written into the dictionary tab in db-query. It is NOT saved \
+             — the user reviews it and saves, and this server cannot save it for them.",
+            if changed == 1 { "" } else { "s" }
+        )
+    };
+    if kept {
+        note.push_str(
+            " Some notes the user had already written were kept; send `replace: true` only \
+             if you mean to overwrite their own words.",
+        );
+    }
+    note
+}
+
+/// An id for one `put_notes`, so the window's answer finds the call that is
+/// waiting for it. Random rather than a counter: two windows of a future
+/// multi-window build would both count from one.
+fn request_id() -> String {
+    let mut bytes = [0u8; 12];
+    rand::fill(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Attach the user's notes to a table list.
@@ -674,7 +972,12 @@ impl<R: Runtime> ServerHandler for Tools<R> {
              Where a table or column carries a `note`, that is the user's own description \
              of it, from a dictionary they maintain beside the schema. Prefer it over what \
              a name appears to mean; a table with no note is not described anywhere, so ask \
-             rather than inferring."
+             rather than inferring.\n\n\
+             put_notes writes that dictionary. When you have the application's code or its \
+             migrations in front of you and know what a table means, say so with put_notes \
+             rather than leaving it in this conversation: it lands in the user's editor for \
+             them to review and save, and every later session reads it. It saves nothing \
+             itself, and it keeps whatever the user has already written."
                 .into(),
         );
         info
@@ -688,6 +991,7 @@ impl<R: Runtime> ServerHandler for Tools<R> {
 pub struct McpState {
     running: Mutex<Option<Running>>,
     focus: Focus,
+    pending: Pending,
 }
 
 struct Running {
@@ -718,6 +1022,17 @@ impl McpState {
     /// the user switches; `None` when nothing is open.
     pub async fn set_focus(&self, id: Option<String>) {
         *self.focus.lock().await = id;
+    }
+
+    /// The editor's answer to a [`PUT_NOTES_EVENT`].
+    ///
+    /// An answer to a request nobody is waiting for is **dropped silently**:
+    /// the tool has already given up and told the client so, and a second
+    /// opinion arriving late has nowhere to go.
+    pub async fn notes_landed(&self, request: String, outcome: NotesOutcome) {
+        if let Some(tx) = self.pending.lock().await.remove(&request) {
+            let _ = tx.send(outcome);
+        }
     }
 
     pub async fn status(&self) -> McpStatus {
@@ -779,7 +1094,7 @@ pub async fn start_with_token<R: Runtime>(
     let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
 
     let stop_token = CancellationToken::new();
-    let tools = Tools::new(app.clone(), state.focus.clone());
+    let tools = Tools::new(app.clone(), state.focus.clone(), state.pending.clone());
 
     // Belt and braces: `gate` refuses a foreign Origin before rmcp sees the
     // request, and rmcp refuses it again. rmcp's default here is an **empty
@@ -926,12 +1241,6 @@ mod tests {
         h
     }
 
-    /// The runtime is irrelevant to the tool list — `Wry` is named only
-    /// because `Tools` is generic. See `tests/mcp_http.rs` for the same
-    /// assertion against a mock app over a real socket.
-    ///
-    /// The whole point of the stage: the advertised list is these four and
-    /// nothing else. A `run_query` added in a hurry stops the build here.
     // --------------------------------------- Stage 25: the user's own notes
 
     fn dict() -> crate::dictionary::Dictionary {
@@ -1058,8 +1367,107 @@ mod tests {
         );
     }
 
+    // ------------------------------------- Stage 25 slice 5: put_notes
+
+    /// **The sentence that matters.** A client told "saved" stops telling the
+    /// user to look at their editor, and the file is never saved here.
     #[test]
-    fn advertises_exactly_the_four_tools() {
+    fn the_report_never_reads_as_saved() {
+        let one = placed_note("prod-eu", 1, false);
+        assert!(one.contains("1 table written"), "{one}");
+        assert!(one.contains("NOT saved"), "{one}");
+        assert!(one.contains("the user reviews it and saves"), "{one}");
+
+        let many = placed_note("prod-eu", 4, false);
+        assert!(many.contains("4 tables written"), "{many}");
+
+        let none = placed_note("prod-eu", 0, false);
+        assert!(none.contains("Nothing changed"), "{none}");
+        assert!(!none.contains("written into"), "{none}");
+
+        let kept = placed_note("prod-eu", 2, true);
+        assert!(kept.contains("were kept"), "{kept}");
+        assert!(kept.contains("replace: true"), "{kept}");
+        assert!(
+            !placed_note("prod-eu", 2, false).contains("were kept"),
+            "nothing kept, nothing said about keeping"
+        );
+    }
+
+    /// What an agent sends becomes one edit per table, and an omitted
+    /// `columns` is an empty map rather than a failure to deserialize.
+    #[test]
+    fn an_agents_table_becomes_one_edit() {
+        let arg: TableNotesArg = serde_json::from_value(serde_json::json!({
+            "table": "Orders",
+            "note": "One row per order.",
+            "columns": { "status": "P, S or X." }
+        }))
+        .expect("the shape a client sends");
+        let edit: crate::dictionary::NoteEdit = arg.into();
+        assert_eq!(edit.table, "Orders", "the case is kept; the merge folds it");
+        assert_eq!(edit.note.as_deref(), Some("One row per order."));
+        assert_eq!(edit.join, None);
+        assert_eq!(
+            edit.columns.get("status").map(String::as_str),
+            Some("P, S or X.")
+        );
+
+        let bare: TableNotesArg =
+            serde_json::from_value(serde_json::json!({ "table": "audit_log" })).unwrap();
+        let edit: crate::dictionary::NoteEdit = bare.into();
+        assert!(edit.columns.is_empty());
+        assert!(edit.note.is_none() && edit.join.is_none());
+    }
+
+    /// The reply crosses a process boundary — the frontend sends it as JSON —
+    /// so the one thing worth pinning is that **its shape is the shape the
+    /// window sends**, camelCase and all, with every field optional.
+    #[test]
+    fn the_editors_reply_deserializes_as_the_window_sends_it() {
+        let outcome: NotesOutcome = serde_json::from_value(serde_json::json!({
+            "applied": [{ "table": "orders", "wrote": ["note"], "kept": ["join"] }],
+            "skipped": [{ "table": "oders", "why": "Nothing to write." }]
+        }))
+        .expect("what main.ts sends");
+        assert_eq!(outcome.applied[0].table, "orders");
+        assert_eq!(outcome.applied[0].wrote, vec!["note"]);
+        assert_eq!(outcome.applied[0].kept, vec!["join"]);
+        assert_eq!(outcome.skipped[0].table, "oders");
+        assert!(outcome.problem.is_none());
+
+        // The failure case, which is the only one that sets `problem`.
+        let outcome: NotesOutcome =
+            serde_json::from_value(serde_json::json!({ "problem": "That connection is closed." }))
+                .expect("a refusal is a reply too");
+        assert_eq!(
+            outcome.problem.as_deref(),
+            Some("That connection is closed.")
+        );
+        assert!(outcome.applied.is_empty() && outcome.skipped.is_empty());
+    }
+
+    /// Two calls in flight must not answer each other.
+    #[test]
+    fn two_requests_do_not_share_an_id() {
+        let ids: std::collections::BTreeSet<String> = (0..64).map(|_| request_id()).collect();
+        assert_eq!(ids.len(), 64);
+    }
+
+    /// The runtime is irrelevant to the tool list — `Wry` is named only
+    /// because `Tools` is generic. See `tests/mcp_http.rs` for the same
+    /// assertion against a mock app over a real socket.
+    ///
+    /// The whole point of the module: the advertised list is these five and
+    /// nothing else. A `run_query` added in a hurry stops the build here.
+    ///
+    /// Slice 5 added the fifth on purpose, and this is the test that had to be
+    /// renamed and extended by hand to let it through — which is why the list
+    /// is asserted rather than the length. (It had drifted away from its test
+    /// when slice 3 inserted a block beneath it; clippy noticed, which is more
+    /// than the compiler did.)
+    #[test]
+    fn advertises_exactly_the_five_tools() {
         let names: Vec<String> = Tools::<tauri::Wry>::tool_router()
             .list_all()
             .into_iter()

@@ -726,6 +726,33 @@ export class TabManager {
   }
 
   /**
+   * Replace a tab's content with a **proposal**: the baseline does not move,
+   * so the tab goes dirty and the person decides whether it is saved.
+   *
+   * The twin of `replaceDoc`, and the difference is the whole point. That one
+   * writes what the file already says, so it resets the baseline; this one
+   * writes what something else suggests — an MCP client's notes — and a
+   * proposal that arrived looking saved would be a proposal nobody reviews.
+   *
+   * One transaction, so one Ctrl+Z puts it back — and **no**
+   * `isolateHistory`, which `replaceRange` needs and this does not: measured,
+   * an arrival landing 50ms after a keystroke is already its own undo step,
+   * because a change spanning the whole document is never grouped with the
+   * typing inside it. The annotation would have been a line claiming to
+   * prevent something that cannot happen.
+   */
+  proposeDoc(tab: ScriptTab, text: string) {
+    if (tab.id === this.activeId) {
+      this.view.dispatch({
+        changes: { from: 0, to: this.view.state.doc.length, insert: text },
+      });
+    } else {
+      tab.state = createEditorState(text);
+    }
+    this.render();
+  }
+
+  /**
    * After a save, the buffer becomes the new clean baseline.
    *
    * `baseline` is the document as it was when the save STARTED, not now:
