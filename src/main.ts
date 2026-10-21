@@ -27,6 +27,8 @@ import {
   type FlywayEnvironment,
   type FlywayMatch,
   type FlywayProjectView,
+  type DictionaryCheck,
+  type OpenedFile,
   type FlywayMigration,
   type FlywayReading,
   type Recipe,
@@ -63,7 +65,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, replaceRange,
   selectedText,
-  selectRange, setDialect, setEditorTheme, setLinting, setSchema,
+  selectRange, setDialect, setEditorTheme, setLinting, setPlainToml, setSchema,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -119,6 +121,7 @@ const els = {
   lintOn: $<HTMLInputElement>("chk-lint"),
   timeout: $<HTMLInputElement>("num-timeout"),
   fileNote: $<HTMLSpanElement>("file-note"),
+  dictBand: $<HTMLSpanElement>("dict-band"),
   rail: $("rail"),
   connTitle: $<HTMLHeadingElement>("conn-title"),
   connColours: $("conn-colours"),
@@ -427,6 +430,19 @@ function refreshFileNote() {
   const tab = tabs?.active();
   if (!tab) {
     els.fileNote.hidden = true;
+    return;
+  }
+  if (tab.kind === "dictionary") {
+    // A dictionary that has just been saved is a different dictionary: the
+    // tree's dots describe the **file**, and nothing else would notice. The
+    // backend's own copy invalidates itself — it is keyed on the file's size
+    // and modification time, both of which a save moves.
+    els.fileNote.hidden = false;
+    els.fileNote.className = "chip";
+    els.fileNote.textContent = tabs.isDirty(tab) ? "AI dictionary · unsaved" : "AI dictionary";
+    els.fileNote.title = tab.filePath ?? "";
+    void refreshDictMarks();
+    void refreshDictBand();
     return;
   }
   if (tab.encoding === "utf-8-lossy") {
@@ -1062,12 +1078,18 @@ async function loadDbChildren(
 ) {
   dbNode.classList.add("loading");
   try {
+    // The dictionary's marks come with the table list rather than after it:
+    // the nodes are built synchronously below and read the marks from memory.
+    // A failure here costs the dots, never the tree.
     const [tables, routines] = await Promise.all([
       api.listTables(connId, db),
       // A server that will not report routines (no privilege, an old version)
       // must not stop the tables from appearing.
       api.listRoutines(connId, db).catch(() => [] as RoutineRef[]),
     ]);
+
+    const marks = await api.dictionaryMarks(connId, db).catch(() => null);
+    if (marks) dictMarks = { key: `${connId}\u0000${db}`, tables: marks.tables };
 
     const baseTables = tables.filter((t) => !t.kind.toUpperCase().includes("VIEW"));
     const views = tables.filter((t) => t.kind.toUpperCase().includes("VIEW"));
@@ -1155,10 +1177,89 @@ function allowsWrites(connId: string): boolean {
   return capsFor(connId)?.writes ?? true;
 }
 
+/**
+ * What the dictionary describes, for the database the tree is showing.
+ *
+ * **One lookup for the whole tree.** Nodes are built synchronously and there
+ * are hundreds of them, so this is fetched when a database is opened and read
+ * from memory per row — not asked per node.
+ *
+ * Keyed lower-case on both sides: MySQL folds table names on some platforms
+ * and people type them however they like (Stage 25 §3.5).
+ */
+let dictMarks: { key: string; tables: Record<string, string[]> } = { key: "", tables: {} };
+
+/**
+ * Re-read the marks and repaint the tree.
+ *
+ * Called after a dictionary is saved: the dots say what the *file* describes,
+ * so they are stale the moment it changes and nothing else would notice.
+ */
+async function refreshDictMarks() {
+  const [connId, db] = dictMarks.key.split("\u0000");
+  if (!connId || !db) return;
+  const marks = await api.dictionaryMarks(connId, db).catch(() => null);
+  if (!marks) return;
+  dictMarks = { key: dictMarks.key, tables: marks.tables };
+
+  // In place, node by node: the tree's expanded state is the user's and a
+  // rebuild would throw it away.
+  for (const dot of els.tree.querySelectorAll<HTMLElement>(".dict-dot[data-dict-key]")) {
+    const key = dot.dataset.dictKey ?? "";
+    const dotIdx = key.indexOf(".");
+    const described =
+      dotIdx === -1
+        ? key in marks.tables
+        : (marks.tables[key.slice(0, dotIdx)] ?? []).includes(key.slice(dotIdx + 1));
+    paintDictDot(dot, described);
+  }
+}
+
+/**
+ * The dot that says "the dictionary has something to say about this".
+ *
+ * **Presence and absence, not two colours.** An empty slot of the same width
+ * keeps the names in one column, so a glance down the tree reads as a list of
+ * what the assistant knows rather than as decoration — and it works for
+ * anybody who cannot tell the colours apart.
+ */
+function dictDot(described: boolean, what: string, key: string): HTMLElement {
+  const dot = document.createElement("span");
+  // The key is what lets a save repaint the dots **in place**. Rebuilding the
+  // tree would collapse everything the user had expanded, which is a high
+  // price for a dot.
+  dot.dataset.dictKey = key.toLowerCase();
+  dot.dataset.dictWhat = what;
+  paintDictDot(dot, described);
+  return dot;
+}
+
+function paintDictDot(dot: HTMLElement, described: boolean) {
+  dot.className = described ? "dict-dot on" : "dict-dot";
+  dot.title = described
+    ? `The AI dictionary describes this ${dot.dataset.dictWhat}`
+    : "";
+}
+
+/** Does the dictionary describe this table, in the database on screen? */
+function describesTable(connId: string, db: string, table: string): boolean {
+  if (dictMarks.key !== `${connId}\u0000${db}`) return false;
+  return table.toLowerCase() in dictMarks.tables;
+}
+
+function describesColumn(connId: string, db: string, table: string, column: string): boolean {
+  if (dictMarks.key !== `${connId}\u0000${db}`) return false;
+  return (dictMarks.tables[table.toLowerCase()] ?? []).includes(column.toLowerCase());
+}
+
 function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const wrap = document.createElement("div");
   const isView = t.kind.toUpperCase().includes("VIEW");
   const { n, twisty, label } = node("table", t.name, "\u25b8", isView ? "view" : "table");
+  // Before the label, after the icon: the dots then line up into a column.
+  label.before(
+    dictDot(describesTable(connId, db, t.name), isView ? "view" : "table", t.name),
+  );
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -1207,6 +1308,12 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
       { label: `Select first ${browseLimit} rows`, run: browse },
       { label: "Insert name at cursor", run: () => insertAtCursor(view, t.name) },
       {
+        label: describesTable(connId, db, t.name)
+          ? "Edit the dictionary note…"
+          : "Describe for the assistant…",
+        run: () => void describeInDictionary(connId, t.name, null),
+      },
+      {
         // A view's definition is the only place its query lives, so this is
         // what "what does this actually select?" costs. Tables get the same
         // entry: it is the same command, and `SHOW CREATE TABLE` is the exact
@@ -1244,7 +1351,10 @@ function buildColumnNode(
   // which of these is a number, which is text, which is a document. The key
   // moved to the meta side rather than losing to it: a primary key is also a
   // column of some type, and only one of the two can be the icon.
-  const { n: cn } = node("column", c.name, "", columnIcon(c.dataType));
+  const { n: cn, label: cl } = node("column", c.name, "", columnIcon(c.dataType));
+  cl.before(
+    dictDot(describesColumn(connId, db, table, c.name), "column", `${table}.${c.name}`),
+  );
   const meta = document.createElement("span");
   meta.className = "meta";
   if (c.key === "PRI") {
@@ -1265,6 +1375,12 @@ function buildColumnNode(
     contextMenu(e, [
       { label: `Column ${table}.${c.name}`, run: () => {}, heading: true },
       { label: "Insert name at cursor", run: () => insertAtCursor(view, c.name) },
+      {
+        label: describesColumn(connId, db, table, c.name)
+          ? "Edit the dictionary note…"
+          : "Describe for the assistant…",
+        run: () => void describeInDictionary(connId, table, c.name),
+      },
       ...(allowsWrites(connId)
         ? [
             {
@@ -1941,7 +2057,12 @@ draggable(els.msplit, "x-end");
  * **Nothing is run.** Formatting is a text edit, and one undo puts it back.
  */
 async function formatBuffer() {
-  if (migrationsViewActive()) return;
+  // **"Is this SQL", not "is the migrations view up".** The old question was
+  // the right answer to one other kind of tab and the wrong shape: a
+  // dictionary tab is an editor, so it passed — and Ctrl+Shift+F would have
+  // sent somebody's TOML to the SQL formatter and replaced the buffer with
+  // whatever came back. `run()` had already generalised the same guard.
+  if (tabs?.active()?.kind !== "sql") return;
   const sel = view.state.selection.main;
   const whole = sel.empty;
   const source = whole ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to);
@@ -2008,13 +2129,21 @@ els.btnFormat.onclick = () => void formatBuffer();
 // ------------------------------------------------------------------- boot
 
 view = createEditor($("editor"), {
+  // No kind check here: `run` and `formatBuffer` each ask whether this is a
+  // SQL buffer, which is where the question belongs — a guard in the key
+  // binding would be a second place to forget it.
   onRunStatement: () => void runStatementUnderCursor(),
   onRunAll: () => void run(docText(view)),
   onFormat: () => void formatBuffer(),
   // Keeps the dirty dot honest without polling.
   onDocChanged: () => {
     tabs?.render();
-    applyLintSetting();
+    if (dictionaryTab()) {
+      // The band counts what the buffer says, so it moves while you type.
+      void refreshDictBand();
+    } else {
+      applyLintSetting();
+    }
     session.schedule();
   },
 });
@@ -2118,6 +2247,7 @@ conns = new ConnectionManager($("rail"), {
     if (conns.active()?.profile.id === entry.profile.id) setMcpFocus(null);
   },
   exportSchema: (connectionId) => openSchemaExport(connectionId, null),
+  dictionary: (entry) => void openDictionary(entry),
   notify: (m) => results.setMessage(m),
 }, openConnectionEditor);
 
@@ -2180,6 +2310,24 @@ tabs = new TabManager($("script-tabs"), view, {
     }
     // Compartment contents live in the EditorState, so a swapped-in state has
     // whatever config it was born with. Re-apply both after every switch.
+    //
+    // **A dictionary tab is an editor tab that runs nothing** (Stage 25): it
+    // keeps CodeMirror and the file chip, loses the SQL controls, and holds
+    // TOML rather than SQL — so the two branches differ in language, lint and
+    // which buttons exist, and in nothing else.
+    showDictionaryTab(tab.kind === "dictionary");
+    if (tab.kind === "dictionary") {
+      setPlainToml(view);
+      applyDictionaryLint();
+      showResultsSurface("sql");
+      showResults(tab);
+      syncBusy();
+      refreshFileNote();
+      void refreshDictBand();
+      view.focus();
+      session.schedule();
+      return;
+    }
     setDialect(view, tab.dialect);
     setSchema(view, schemaMap);
     applyLintSetting(true);
@@ -4416,6 +4564,301 @@ function migUi(): MigUi {
     apply: els.btnMigViewApply,
     repair: els.btnMigViewRepair,
   };
+}
+
+// --------------------------------------------------- Stage 25: the dictionary
+
+/**
+ * Turn a SQL buffer's controls off, or back on.
+ *
+ * **Marked in the markup, not listed here.** `sql-only` is on each control in
+ * `index.html`, so a control added later is either marked or it is not — where
+ * a list in this function would silently miss it and leave a Run button over a
+ * TOML file.
+ */
+function showDictionaryTab(on: boolean) {
+  for (const el of els.editorHead.querySelectorAll<HTMLElement>(".sql-only")) {
+    el.hidden = on;
+  }
+  els.dictBand.hidden = !on;
+}
+
+/** The dictionary tab in front, if that is what is in front. */
+function dictionaryTab(): ScriptTab | null {
+  const tab = tabs?.active();
+  return tab && tab.kind === "dictionary" ? tab : null;
+}
+
+/**
+ * The lint for a dictionary tab: **TOML, not SQL**.
+ *
+ * The one lint that is right for this buffer. Without it a malformed file
+ * silently stops feeding the assistant — the dictionary simply fails to load
+ * and everything carries on looking fine.
+ */
+function applyDictionaryLint() {
+  setLinting(view, dictionaryLintSource, 300);
+}
+
+async function dictionaryLintSource(v: EditorView) {
+  const tab = dictionaryTab();
+  const connectionId = tab?.connectionId ?? conns.active()?.profile.id ?? null;
+  if (!tab || !connectionId) return [];
+  const text = v.state.doc.toString();
+  let check: DictionaryCheck | null;
+  try {
+    check = await api.dictionaryCheck(connectionId, tab.activeDb ?? "", text);
+  } catch {
+    // A failed check must never surface as an error to dismiss — same rule as
+    // the SQL linter.
+    return [];
+  }
+  if (!check || !Array.isArray(check.diagnostics)) return [];
+  const toChar = makeByteToChar(text);
+  const len = v.state.doc.length;
+  return check.diagnostics.map((d) => {
+    const from = Math.min(toChar(d.start), len);
+    return {
+      from,
+      to: Math.min(Math.max(toChar(d.end), from + 1), len),
+      severity: d.severity,
+      message: d.message,
+    };
+  });
+}
+
+/**
+ * The band above the buffer: which connections read this file, how much it
+ * says, and what in it matches nothing.
+ *
+ * **Who else reads it is the point.** A dictionary is meant to be shared by
+ * dev, UAT and production, and somebody about to rewrite a sentence should
+ * know it is three environments' description, not one's.
+ */
+async function refreshDictBand() {
+  const tab = dictionaryTab();
+  if (!tab) return;
+  const connectionId = tab.connectionId;
+  const users = conns
+    .all()
+    .filter((c) => c.profile.dictionary && c.profile.dictionary === tab.filePath)
+    .map((c) => c.profile.name);
+
+  const parts: HTMLElement[] = [];
+  const say = (cls: string, text: string) => {
+    const el = elem("span", cls, text);
+    parts.push(el);
+    return el;
+  };
+  const sep = () => parts.push(elem("span", "sep", "·"));
+
+  if (users.length) {
+    const used = document.createElement("span");
+    used.append(document.createTextNode("Used by "));
+    users.forEach((name, i) => {
+      if (i) used.append(document.createTextNode(", "));
+      const b = document.createElement("b");
+      b.textContent = name;
+      used.append(b);
+    });
+    parts.push(used);
+  } else {
+    say("", "Not attached to any connection");
+  }
+
+  const check = connectionId
+    ? await api
+        .dictionaryCheck(connectionId, tab.activeDb ?? "", tabs.textOf(tab))
+        .catch(() => null)
+    : null;
+
+  if (check) {
+    sep();
+    const { tables, columns } = check.counts;
+    say(
+      "",
+      `${tables} table${tables === 1 ? "" : "s"}, ` +
+        `${columns} column${columns === 1 ? "" : "s"}`,
+    );
+    if (check.unmatched.length) {
+      sep();
+      const label = check.unmatched
+        .slice(0, 3)
+        .map((u) => (u.column ? `${u.table}.${u.column}` : u.table))
+        .join(", ");
+      const more =
+        check.unmatched.length > 3 ? ` and ${check.unmatched.length - 3} more` : "";
+      const el = say("stale", `${check.unmatched.length} match nothing`);
+      el.title = `These notes describe something this database does not have:\n${label}${more}`;
+    }
+    if (check.warning) {
+      sep();
+      say("stale", check.warning);
+    }
+  }
+
+  // The tab in front may have changed while the check was in flight.
+  if (dictionaryTab()?.id === tab.id) els.dictBand.replaceChildren(...parts);
+}
+
+/**
+ * Describe a table or a column: open the dictionary and put the cursor where
+ * the sentence goes.
+ *
+ * **It writes into the buffer, never into the file.** A tree action that saved
+ * behind an open editor would fight whatever was being typed, and one that
+ * refused while the tab was dirty would be a dead menu item. Inserting a stub
+ * is the same answer `put_query` gives: the app proposes, the person saves.
+ */
+async function describeInDictionary(connId: string, table: string, column: string | null) {
+  const entry = conns.get(connId);
+  if (!entry) return;
+  await openDictionary(entry);
+  const tab = dictionaryTab();
+  if (!tab) return;
+
+  const text = tabs.textOf(tab);
+  const header = `[tables.${table}]`;
+  const at = text.indexOf(header);
+
+  if (at === -1) {
+    // No section yet: append a whole one, with the column's line in it when
+    // that is what was asked for.
+    const needsBlank = text.length > 0 && !text.endsWith("\n\n");
+    const insert =
+      (needsBlank ? (text.endsWith("\n") ? "\n" : "\n\n") : "") +
+      `${header}\nnote = ""\n` +
+      (column ? `columns.${column} = ""\n` : "");
+    const cursor = text.length + insert.lastIndexOf('""') + 1;
+    view.dispatch({
+      changes: { from: text.length, insert },
+      selection: { anchor: cursor },
+      scrollIntoView: true,
+    });
+    view.focus();
+    return;
+  }
+
+  // The section exists. For a column, add its line if it is not there; for the
+  // table, put the cursor in the note it already has.
+  const needle = column ? `columns.${column} = ` : "note = ";
+  const from = text.indexOf(needle, at);
+  // Only within this section, not in the next one.
+  const nextSection = text.indexOf("\n[", at + 1);
+  const inside = from !== -1 && (nextSection === -1 || from < nextSection);
+
+  if (inside) {
+    const quote = text.indexOf('"', from);
+    const anchor = quote === -1 ? from + needle.length : quote + 1;
+    view.dispatch({ selection: { anchor }, scrollIntoView: true });
+    view.focus();
+    return;
+  }
+
+  const lineEnd = text.indexOf("\n", at);
+  const insertAt = lineEnd === -1 ? text.length : lineEnd + 1;
+  const insert = `${needle}""\n`;
+  view.dispatch({
+    changes: { from: insertAt, insert },
+    selection: { anchor: insertAt + insert.length - 2 },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+/**
+ * Open a connection's dictionary, attaching or creating one first if it has
+ * none.
+ *
+ * **One tab per file, never two.** Two tabs on one dictionary would race each
+ * other's saves and the last writer would win silently — the same rule
+ * `files.ts` applies to any opened file.
+ */
+async function openDictionary(entry: ConnectionEntry) {
+  const id = entry.profile.id;
+  if (!entry.profile.dictionary) {
+    if (!(await attachDictionary(entry))) return;
+  }
+
+  let opened: OpenedFile;
+  try {
+    opened = await api.dictionaryOpen(id);
+  } catch (err) {
+    results.setMessage(String(err));
+    return;
+  }
+
+  const existing = tabs.all().find((t) => t.filePath === opened.path);
+  if (existing) {
+    tabs.activate(existing.id);
+    return;
+  }
+  tabs.create({
+    connectionId: id,
+    kind: "dictionary",
+    contents: opened.contents,
+    title: opened.name,
+    filePath: opened.path,
+    encoding: opened.encoding,
+    lineEnding: opened.lineEnding,
+    bom: opened.bom ?? false,
+    mtimeMs: opened.mtimeMs,
+    activeDb: entry.currentDatabase,
+  });
+}
+
+/**
+ * Choose or create the file, then remember it on the profile.
+ *
+ * Two routes on purpose. **Choose** is how a second connection joins a
+ * dictionary somebody already wrote — the whole reason this is a path rather
+ * than a copy. **Create** writes a starter with every real table in it as a
+ * commented-out stub, because a blank file is a feature nobody uses.
+ */
+async function attachDictionary(entry: ConnectionEntry): Promise<boolean> {
+  const db = entry.currentDatabase ?? "";
+  const pick = await choose(
+    `An AI dictionary for “${entry.profile.name}”`,
+    "A TOML file saying what this database's tables and columns mean. The assistant " +
+      "and the MCP server read it beside the names and types they already see.\n\n" +
+      "It is a **path**, not a copy: point another connection at the same file and one " +
+      "edit reaches both — which is how dev, UAT and production share one description.",
+    [
+      { value: "cancel", label: "Cancel", primary: true },
+      { value: "choose", label: "Choose an existing file…" },
+      { value: "create", label: db ? `Create one for ${db}…` : "Create one…", danger: false },
+    ],
+  );
+  if (pick !== "choose" && pick !== "create") return false;
+
+  const path = await api.dictionaryPick(pick === "create").catch(() => null);
+  if (!path) return false;
+
+  if (pick === "create") {
+    if (!db) {
+      results.setMessage("Choose a database in the tree first — the starter is built from it.");
+      return false;
+    }
+    try {
+      await api.dictionaryCreate(entry.profile.id, path, db);
+    } catch (err) {
+      results.setMessage(String(err));
+      return false;
+    }
+  }
+
+  // Remembered on the profile, which is what makes it survive a restart. The
+  // editor dialog carries this field rather than rebuilding it, so editing the
+  // connection later cannot drop it.
+  try {
+    const saved = await api.saveProfile({ ...entry.profile, dictionary: path }, null);
+    entry.profile = saved.profile;
+    conns.upsert(entry);
+  } catch (err) {
+    results.setMessage(String(err));
+    return false;
+  }
+  return true;
 }
 
 /**

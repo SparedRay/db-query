@@ -69,20 +69,28 @@
             <button id="stab-right" class="stab-scroll" type="button"
                     title="Scroll tabs right" aria-label="Scroll tabs right" hidden>&rsaquo;</button>
           </div>
+          <!-- `sql-only` marks what belongs to a SQL buffer. A dictionary tab
+               (Stage 25) is an editor tab that runs nothing, so these come
+               off it — the same thing the migrations tab achieves by
+               replacing the editor entirely, which this one cannot do
+               because it *is* an editor. -->
           <div class="pane-head" id="editor-head">
-            <button id="btn-run" class="mini" disabled>Run <kbd>Ctrl+Enter</kbd></button>
-            <button id="btn-run-all" class="mini" disabled>Run all <kbd>Ctrl+Shift+Enter</kbd></button>
-            <button id="btn-cancel" class="mini danger" hidden>Cancel</button>
-            <button id="btn-format" class="mini"
+            <button id="btn-run" class="mini sql-only" disabled>Run <kbd>Ctrl+Enter</kbd></button>
+            <button id="btn-run-all" class="mini sql-only" disabled>Run all <kbd>Ctrl+Shift+Enter</kbd></button>
+            <button id="btn-cancel" class="mini danger sql-only" hidden>Cancel</button>
+            <button id="btn-format" class="mini sql-only"
                     title="Lay out the selection, or the whole tab">Format <kbd>Ctrl+Shift+F</kbd></button>
             <span id="file-note" class="chip" hidden></span>
-            <label class="toggle" title="Append LIMIT 5000 to unbounded SELECTs">
+            <!-- A dictionary tab's own band: which connections read this file,
+                 how much it says, and what in it matches nothing. -->
+            <span id="dict-band" class="dict-band" hidden></span>
+            <label class="toggle sql-only" title="Append LIMIT 5000 to unbounded SELECTs">
               <input type="checkbox" id="chk-autolimit" checked /> Auto-LIMIT
             </label>
-            <label class="toggle" title="Advisory squiggles only — never blocks Run">
+            <label class="toggle sql-only" title="Advisory squiggles only — never blocks Run">
               <input type="checkbox" id="chk-lint" checked /> Lint
             </label>
-            <label class="toggle" title="Safety net: KILL the query after N seconds. 0 = off">
+            <label class="toggle sql-only" title="Safety net: KILL the query after N seconds. 0 = off">
               Timeout
               <input type="number" id="num-timeout" class="num" value="0" min="0" max="3600" />s
             </label>

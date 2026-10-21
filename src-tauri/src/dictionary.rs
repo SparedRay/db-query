@@ -178,6 +178,26 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     })
 }
 
+/// Where in the text `toml` says the parse broke, as byte offsets.
+///
+/// **Verified from source**, not guessed: `toml` 1.1.5,
+/// `src/de/error.rs:69` — `pub fn span(&self) -> Option<Range<usize>>`
+/// (read 2026-10-21). `None` when the error carries no span, and the caller
+/// then squiggles the whole buffer rather than line 1, which would point at
+/// text that is probably fine.
+pub fn error_span(text: &str) -> Option<(usize, usize)> {
+    let err = toml::from_str::<toml::Value>(text).err()?;
+    let span = err.span()?;
+    // A zero-width span cannot be drawn, and an editor given one shows
+    // nothing at all — which reads as "no error".
+    let end = if span.end > span.start {
+        span.end
+    } else {
+        (span.start + 1).min(text.len())
+    };
+    Some((span.start, end))
+}
+
 /// Read and parse one file.
 pub fn load(path: &Path) -> Result<Loaded, String> {
     let text = crate::files::read_file(path).map_err(|e| {
@@ -588,6 +608,30 @@ mod tests {
             .unwrap()
             .warning
             .is_none());
+    }
+
+    /// The squiggle lands on the line that broke, not on line 1.
+    ///
+    /// `toml` carries a span; this asserts it points *inside* the offending
+    /// text rather than at the top of the file, because a diagnostic on a
+    /// line that is fine is worse than none.
+    #[test]
+    fn a_parse_error_points_at_the_text_that_broke() {
+        let text = "version = 1\n\n[tables.orders]\nnote = \"fine\"\n\n[tables.oops\n";
+        let (start, end) = error_span(text).expect("toml gives a span");
+        assert!(end > start, "a zero-width span cannot be drawn");
+        let broke = text.find("[tables.oops").unwrap();
+        assert!(
+            start >= broke,
+            "the span starts at {start}, before the broken line at {broke}"
+        );
+        assert!(end <= text.len());
+    }
+
+    /// Text that parses has no span to report.
+    #[test]
+    fn good_toml_has_no_error_span() {
+        assert_eq!(error_span("version = 1\n"), None);
     }
 
     /// Broken TOML is an error with Flyway-style wording — the file is named by
