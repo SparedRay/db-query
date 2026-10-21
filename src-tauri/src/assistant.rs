@@ -1005,6 +1005,7 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only: true,
+            dictionary: None,
         };
         let caps = crate::engine::Capabilities::mysql().for_profile(&profile);
         let p = system_prompt("8.4.0", None, Some(&caps));

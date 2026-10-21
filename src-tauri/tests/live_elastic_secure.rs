@@ -35,6 +35,7 @@ fn profile(id: &str, user: &str) -> ConnProfile {
         auth: Auth::Basic { user: user.into() },
         no_password: false,
         read_only: false,
+        dictionary: None,
     }
 }
 

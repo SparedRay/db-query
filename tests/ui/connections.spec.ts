@@ -266,3 +266,41 @@ test("disconnecting stops the rail drawing the selection bar", async ({ page }) 
   // The selection itself is untouched — it is what Connect acts on next.
   expect(after?.classes).toContain("active");
 });
+
+// ------------------------------------------- Stage 25: the AI dictionary
+
+/**
+ * This dialog builds the profile from its own form fields, so **every field
+ * without a control is dropped on save**. The dictionary path has no control
+ * here — it is set elsewhere — so editing a connection's port would otherwise
+ * silently unbind its dictionary, which is a loss nobody could explain
+ * afterwards.
+ */
+test("editing a connection keeps the dictionary it was bound to", async ({ page }) => {
+  const bound = { ...MYSQL, dictionary: "/work/warehouse/db/dictionary.toml" };
+  await railOf(page, [bound]);
+
+  await page.locator(".rail-item").click({ button: "right" });
+  await page.click('.ctx-menu button:has-text("Edit")');
+  await expect(page.locator("#conn-dialog")).toBeVisible();
+  // Change something unrelated, exactly as somebody would.
+  await page.fill('#conn-dialog input[name="port"]', "3307");
+  await page.click("#conn-ok");
+
+  const saved = (await calls(page)).find((c) => c.cmd === "save_profile");
+  const profile = saved?.args.profile as { port?: number; dictionary?: string | null };
+  expect(profile?.port).toBe(3307);
+  expect(profile?.dictionary).toBe("/work/warehouse/db/dictionary.toml");
+});
+
+/** And a connection that never had one saves `null`, not `undefined`. */
+test("a connection with no dictionary saves without one", async ({ page }) => {
+  await installBackend(page, schemaBackend);
+  await visit(page);
+
+  await page.click("#btn-connect");
+  await page.click("#conn-ok");
+
+  const saved = (await calls(page)).find((c) => c.cmd === "save_profile");
+  expect((saved?.args.profile as { dictionary?: string | null })?.dictionary).toBe(null);
+});

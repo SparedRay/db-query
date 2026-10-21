@@ -112,6 +112,25 @@ pub struct ConnProfile {
     /// restricted", which is what it meant when it was written.
     #[serde(default)]
     pub read_only: bool,
+
+    /// The **path** to this connection's AI dictionary, if it has one.
+    ///
+    /// What its tables and columns mean, for the assistant and the MCP server
+    /// to read beside the names and types they already see — see
+    /// [`crate::dictionary`]. A path and never a copy, exactly as a Flyway
+    /// project is: the file lives with the schema it describes, in a
+    /// repository, and is re-read every time it is used.
+    ///
+    /// **Safe to write to disk** (`PROFILE_KEYS`' question): it is a file name
+    /// somebody chose, in the same file that already holds hostnames and
+    /// usernames. The file's *contents* are never stored here.
+    ///
+    /// Several connections may hold the same path, which is the point: dev,
+    /// UAT and production share one dictionary and one edit reaches all three.
+    /// `#[serde(default)]` so every file written before this means "none",
+    /// which is what it meant when it was written.
+    #[serde(default)]
+    pub dictionary: Option<String>,
 }
 
 /// Every key a serialised [`ConnProfile`] has, in sorted order.
@@ -129,11 +148,12 @@ pub struct ConnProfile {
 ///
 /// One list rather than two, because two would eventually disagree and the
 /// weaker one would be the one still passing.
-pub const PROFILE_KEYS: [&str; 13] = [
+pub const PROFILE_KEYS: [&str; 14] = [
     "allowInvalidCerts",
     "auth",
     "colour",
     "database",
+    "dictionary",
     "host",
     "id",
     "kind",
@@ -1006,6 +1026,7 @@ pub(crate) mod tests {
             auth: Default::default(),
             no_password: false,
             read_only: false,
+            dictionary: None,
         }
     }
 
