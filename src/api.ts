@@ -156,6 +156,17 @@ export interface ConnProfile {
    *  it. Applied in Rust by narrowing the connection's capabilities at
    *  connect, so the whole app keeps asking `capabilities.writes`. */
   readOnly?: boolean;
+  /**
+   * Path to this connection's **AI dictionary** — what its tables and columns
+   * mean, for the assistant and the MCP server to read beside the names and
+   * types they already see.
+   *
+   * A path, never a copy: the file lives with the schema it describes, in a
+   * repository, and is re-read every time it is used. Several connections may
+   * hold the same path, which is the point — one edit reaches dev, UAT and
+   * production. Optional in the type as it is in the file.
+   */
+  dictionary?: string | null;
 }
 
 export type EngineKind = "mysql" | "elasticsearch";

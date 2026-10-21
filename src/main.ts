@@ -675,6 +675,12 @@ els.form.addEventListener("submit", async (e) => {
     kind,
     url,
     auth,
+    // **Carried, not re-read from a field.** This dialog builds the profile
+    // from its form, so anything the form has no control for is dropped on
+    // every edit — and a connection whose dictionary vanished because
+    // somebody changed its port would be a silent loss nobody could explain.
+    // Stage 25 §3.3; the control for it lives elsewhere.
+    dictionary: editing?.profile.dictionary ?? null,
   };
   // Kept out of the profile on purpose — see ConnProfile's doc comment.
   const typed = String(fd.get("password") ?? "");

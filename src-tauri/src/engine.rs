@@ -432,6 +432,7 @@ mod tests {
             auth: Default::default(),
             no_password: false,
             read_only,
+            dictionary: None,
         }
     }
 
