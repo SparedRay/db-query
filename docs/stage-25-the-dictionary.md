@@ -211,10 +211,51 @@ connection whose dictionary vanished because somebody changed its port would be
 a loss nobody could explain, so the path is carried from the profile being
 edited and there is a test that fails if that line goes.
 
-### Slice 2 — the assistant
-- [ ] notes inline in `render_schema`, with their own budget
-- [ ] the prompt's own sentence about where they came from
-- [ ] the chat header (D9)
+### Slice 2 — the assistant · built 2026-10-21
+- [x] notes inline in `render_schema`, with their own budget
+- [x] the prompt's own sentence about where they came from
+- [x] the chat header (D9)
+- [x] 7 unit tests, 2 UI tests · D4 and D9 met
+
+**The real before and after**, against the fixture's `poc` (6 tables, 4 of them
+described, one note deliberately typo'd):
+
+```
+TABLE `orders` -- One row per order. There is no order_lines table in this schema.
+  -- joins: orders.user_id = users.id
+  (id int NOT NULL PK,
+   user_id int NOT NULL INDEX,
+   total decimal(12,2) NOT NULL) -- Cents. Divide by 100 only when showing it to a person.
+```
+
+1,208 characters before, 1,664 after: **+37%** for four annotated tables out of
+six, and the two nobody described are byte-for-byte what they were. The stale
+check reported exactly one note, `oders`.
+
+Three things the build decided:
+
+**The budget decides the shape, not just the text.** A table renders on one
+line unless something was *afforded* for it. The first version asked whether
+the dictionary *had* anything — so a table whose note the budget dropped still
+paid for the multi-line form and the indentation, which is the opposite of
+proportional. Its own test caught it.
+
+**Order of spending: what the table is, then how it joins, then its columns.**
+A dictionary that runs out of budget therefore loses detail and keeps the
+sentence that explains the table.
+
+**`unmatched` asks one question at a time.** It took a list of column names
+first — and the app's cache holds `ColumnInfo`, not `String`, so every caller
+had to build a throwaway `Vec`. The first caller written (a probe, minutes
+later) passed an empty slice, and every column note in a good dictionary came
+back stale. A signature whose easiest wrong answer is "none of them" is the
+wrong signature; it is `Fn(&str, &str) -> Option<bool>` now, where the wrong
+answer has to be typed on purpose.
+
+And one slip worth recording because it cost twenty minutes: the chat header's
+promise was written out **twice**, once per provider branch, and the edit that
+added "and the dictionary" was applied to one of them. It is one `whatIsSent()`
+now — two copies of a promise is one copy that gets updated.
 
 ### Slice 3 — MCP
 - [ ] `note` on the `Tables` and `Columns` results

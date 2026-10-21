@@ -2775,6 +2775,10 @@ const assistant = createAssistant({
     connectionId: conns.active()?.profile.id ?? null,
     db: tabs.active()?.activeDb ?? null,
   }),
+  // Asked of the profile rather than of the backend: the question is "is one
+  // attached", which the rail already knows, and a round trip to answer it
+  // would make the header wait on the thing it is describing.
+  hasDictionary: () => !!conns.active()?.profile.dictionary?.trim(),
   // None of these close the panel any more. Closing it was how a modal
   // apologised for being in the way; a dock is not, and shutting it after one
   // insert would throw away the conversation that produced the statement.

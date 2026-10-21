@@ -51,6 +51,16 @@ export interface AssistantDeps {
   config: () => AssistantConfig;
   /** Which connection and database to describe to the model. */
   context: () => { connectionId: string | null; db: string | null };
+  /**
+   * Whether the connection being described has an **AI dictionary** attached.
+   *
+   * This exists because it changes what leaves the machine. The header's
+   * standing promise is "table and column names are sent, row data never is",
+   * and a dictionary is prose the user wrote — which can carry an example
+   * value. Saying so is the honest version of the same sentence; Stage 25
+   * §3.8.
+   */
+  hasDictionary: () => boolean;
   /** Put SQL where the cursor is. */
   insert: (sql: string) => void;
   /** Open it as a new tab instead. */
@@ -198,6 +208,22 @@ export function splitAnswer(text: string): Part[] {
   const tail = text.slice(at);
   if (tail.trim()) parts.push({ kind: inSql ? "sql" : "text", body: tail.replace(/\s+$/, "") });
   return parts;
+}
+
+/**
+ * What leaves the machine, in one sentence — **one place, because it is a
+ * promise**.
+ *
+ * It was written twice, identically, for the CLI branch and the API branch.
+ * Stage 25 added a third thing that gets sent, and two copies of a promise is
+ * one copy that gets updated.
+ */
+function whatIsSent(deps: AssistantDeps): string {
+  const base = "your schema's table and column names are sent with each question";
+  const dict = deps.hasDictionary()
+    ? ", along with the dictionary you attached to this connection"
+    : "";
+  return `${base}${dict}; row data never is.`;
 }
 
 export function createAssistant(deps: AssistantDeps) {
@@ -477,8 +503,7 @@ export function createAssistant(deps: AssistantDeps) {
         const status = await api.assistantCliProbe(config.recipe).catch(() => null);
         ready = (status?.installed ?? false) && (status?.signedIn ?? false);
         note = ready
-          ? `${cliLabel(config.recipe)} · signed in on this machine; ` +
-            "your schema's table and column names are sent with each question, row data never is."
+          ? `${cliLabel(config.recipe)} · signed in on this machine; ${whatIsSent(deps)}`
           : (status?.detail ?? `Could not ask ${cliLabel(config.recipe)} whether it is ready.`);
       } else {
         const status = await api
@@ -493,7 +518,7 @@ export function createAssistant(deps: AssistantDeps) {
           : `${config.model} · ` +
             (status?.local
               ? "this model runs on your machine — nothing leaves it."
-              : "your schema's table and column names are sent with each question; row data never is.");
+              : whatIsSent(deps));
       }
 
       checking.stop();

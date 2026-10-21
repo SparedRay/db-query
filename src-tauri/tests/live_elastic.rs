@@ -349,6 +349,7 @@ async fn the_assistant_prompt_is_warmed_for_a_cluster_too() {
         "",
         cache.get("").unwrap(),
         db_query_lib::schema::TABLE_DETAIL_BUDGET,
+        None,
     );
     assert!(!rendered.contains("columns not loaded"), "{rendered}");
     assert!(rendered.contains("orders"), "{rendered}");

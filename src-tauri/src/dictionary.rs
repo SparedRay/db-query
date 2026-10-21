@@ -267,13 +267,23 @@ impl Dictionary {
     /// **The thing that keeps a dictionary trustworthy a year later.** A typo'd
     /// `[tables.oders]` is otherwise a note about nothing, silently, forever.
     ///
-    /// `tables` is every table name in the database; `columns` answers which
-    /// columns a table has, and returns `None` for a table whose columns have
-    /// not been loaded — in which case its column notes are **not** reported,
-    /// because "not loaded yet" is not "not there".
-    pub fn unmatched<'a, F>(&self, database: &str, tables: &[String], columns: F) -> Vec<Unmatched>
+    /// `tables` is every table name in the database. `has_column` answers
+    /// whether one table has one column, and `None` means **its columns have
+    /// not been loaded** — in which case that table's column notes are not
+    /// reported, because "not loaded yet" is not "not there".
+    ///
+    /// # Why `has_column` and not a list of names
+    ///
+    /// It was a list first — `Fn(&str) -> Option<&[String]>` — and the app's
+    /// schema cache holds `ColumnInfo`, not `String`, so every caller had to
+    /// build a throwaway `Vec` to ask the question. The first one written
+    /// (a throwaway probe, minutes later) passed an **empty** slice, and every
+    /// column note in a perfectly good dictionary came back as stale. A
+    /// signature whose easiest wrong answer is "none of them" is the wrong
+    /// signature; this one's easiest wrong answer has to be typed on purpose.
+    pub fn unmatched<F>(&self, database: &str, tables: &[String], has_column: F) -> Vec<Unmatched>
     where
-        F: Fn(&str) -> Option<&'a [String]>,
+        F: Fn(&str, &str) -> Option<bool>,
     {
         let known: std::collections::BTreeSet<String> = tables.iter().map(|t| fold(t)).collect();
 
@@ -298,14 +308,16 @@ impl Dictionary {
             }
             // The table is there, so its columns can be checked — when they
             // have been loaded.
-            let Some(have) = columns(name) else { continue };
-            let have: std::collections::BTreeSet<String> = have.iter().map(|c| fold(c)).collect();
             for col in entry.columns.keys() {
-                if !have.contains(col) {
-                    out.push(Unmatched {
+                match has_column(name, col) {
+                    // Loaded, and this column is not among them.
+                    Some(false) => out.push(Unmatched {
                         table: name.clone(),
                         column: Some(col.clone()),
-                    });
+                    }),
+                    Some(true) => {}
+                    // Not loaded: nothing is known to be missing yet.
+                    None => break,
                 }
             }
         }
@@ -643,14 +655,10 @@ mod tests {
     fn notes_that_match_nothing_are_reported_and_nothing_else_is() {
         let d = dict();
         let tables = vec!["orders".to_string(), "customers".to_string()];
-        let orders_cols = [
-            "id".to_string(),
-            "customer_id".to_string(),
-            "status".to_string(),
-        ];
+        let orders_cols = ["id", "customer_id", "status"];
 
-        let found = d.unmatched("warehouse", &tables, |t| match t {
-            "orders" => Some(&orders_cols),
+        let found = d.unmatched("warehouse", &tables, |t, c| match t {
+            "orders" => Some(orders_cols.contains(&c)),
             // `customers` is in the database but its columns are not loaded.
             _ => None,
         });
@@ -677,7 +685,7 @@ mod tests {
     fn unloaded_columns_are_not_reported_as_missing() {
         let d = dict();
         let tables = vec!["orders".to_string(), "order_lines".to_string()];
-        let found = d.unmatched("warehouse", &tables, |_| None);
+        let found = d.unmatched("warehouse", &tables, |_, _| None);
         assert!(
             found.is_empty(),
             "nothing is known to be missing yet: {found:?}"
@@ -698,14 +706,14 @@ mod tests {
 
         let tables = vec!["orders".to_string()];
         assert_eq!(
-            d.unmatched("archive", &tables, |_| None)
+            d.unmatched("archive", &tables, |_, _| None)
                 .iter()
                 .map(Unmatched::label)
                 .collect::<Vec<_>>(),
             ["oders"]
         );
         // And it is not reported against a database it does not apply to.
-        assert!(d.unmatched("live", &tables, |_| None).is_empty());
+        assert!(d.unmatched("live", &tables, |_, _| None).is_empty());
     }
 
     /// The starter file names every real table, commented out, and is itself a

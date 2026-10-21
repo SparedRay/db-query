@@ -2275,6 +2275,7 @@ async fn the_assistant_prompt_carries_columns_nobody_expanded() {
         "poc",
         cache.get("poc").unwrap(),
         schema::TABLE_DETAIL_BUDGET,
+        None,
     );
 
     assert!(
