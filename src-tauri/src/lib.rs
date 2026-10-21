@@ -996,6 +996,274 @@ async fn sqlfiles_run_cancel(state: State<'_, AppState>, request_id: String) -> 
     Ok(())
 }
 
+// ----------------------------------------------------------- the dictionary
+//
+// Stage 25 slice 4. The file opens as an ordinary file-backed tab — same
+// `OpenedFile`, so Ctrl+S, the modification-time guard, the line endings and
+// the BOM are the ones `files.rs` already has — and everything specific to a
+// dictionary is in the three commands below.
+
+/// What a dictionary says, and what is wrong with it.
+///
+/// Answered for the **buffer**, not the file, so the tab's lint and its header
+/// band describe what is on screen rather than what was last saved.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryCheck {
+    /// Parse errors, as the editor's own diagnostics: byte offsets, exactly
+    /// like `lint_sql`'s, so the frontend converts them the one way it knows.
+    pub diagnostics: Vec<lint::Diagnostic>,
+    pub counts: dictionary::Counts,
+    /// Notes with nothing to attach to. Empty while the schema is unknown —
+    /// "not loaded" is not "not there".
+    pub unmatched: Vec<dictionary::Unmatched>,
+    /// Said when the file announces a version this build does not know.
+    pub warning: Option<String>,
+}
+
+/// Open the dictionary this connection is bound to.
+#[tauri::command]
+async fn dictionary_open(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<OpenedFile, String> {
+    let server = session::server(&state, &connection_id).await?;
+    let path = server
+        .profile
+        .dictionary
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "“{}” has no dictionary yet. Choose a file, or create one from this database.",
+                server.profile.name
+            )
+        })?;
+    files::read_file(std::path::Path::new(path))
+}
+
+/// Write a starter dictionary for one database, then open it.
+///
+/// **Generated, not blank.** Every real table arrives as a commented-out
+/// section with its name spelled correctly, so the work is filling blanks
+/// rather than typing three hundred headers — and a typo'd table name cannot
+/// be the first thing that happens. Stage 25 §4.
+///
+/// Refuses to overwrite: a dictionary is somebody's writing, and "create"
+/// landing on an existing one would be the worst possible moment to be
+/// casual.
+#[tauri::command]
+async fn dictionary_create(
+    state: State<'_, AppState>,
+    connection_id: String,
+    path: String,
+    database: String,
+) -> Result<OpenedFile, String> {
+    let target = std::path::PathBuf::from(&path);
+    if target.exists() {
+        return Err(format!(
+            "{} already exists. Choose it instead of creating it.",
+            target.display()
+        ));
+    }
+    let tables: Vec<String> = schema::list_tables(&state, &connection_id, &database)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+
+    files::write_atomic(&target, dictionary::starter(&database, &tables).as_bytes())
+        .map_err(|e| format!("Could not write {}: {e}", target.display()))?;
+    dictionary::forget();
+    files::read_file(&target)
+}
+
+/// Which tables and columns this connection's dictionary describes.
+///
+/// **For the tree's dots.** Answered from the file on disk rather than from an
+/// open buffer: the dots say what the assistant will actually be told, and an
+/// unsaved edit is not that yet.
+///
+/// One call for a whole database, not one per row — the tree builds hundreds
+/// of nodes and a round trip each would be hundreds.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryMarks {
+    /// Lower-cased table name → the lower-cased columns it describes. Folded
+    /// here because the tree compares against whatever case the server
+    /// reported (Stage 25 §3.5).
+    pub tables: std::collections::BTreeMap<String, Vec<String>>,
+    /// Notes with nothing to attach to, for the one warning worth showing in
+    /// the tree.
+    pub unmatched: Vec<dictionary::Unmatched>,
+}
+
+#[tauri::command]
+async fn dictionary_marks(
+    state: State<'_, AppState>,
+    connection_id: String,
+    database: String,
+) -> Result<DictionaryMarks, String> {
+    let server = session::server(&state, &connection_id).await?;
+    let Some(path) = server
+        .profile
+        .dictionary
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    else {
+        return Ok(DictionaryMarks {
+            tables: Default::default(),
+            unmatched: Vec::new(),
+        });
+    };
+    // A broken file marks nothing rather than failing the tree. The tab is
+    // where a parse error is reported, with a squiggle on the line.
+    let Ok(loaded) = dictionary::load_cached(std::path::Path::new(path)) else {
+        return Ok(DictionaryMarks {
+            tables: Default::default(),
+            unmatched: Vec::new(),
+        });
+    };
+
+    let cache = server.schema_cache.lock().await;
+    let known = cache.get(&database);
+    let names: Vec<String> = known
+        .and_then(|s| s.tables.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+
+    let mut tables = std::collections::BTreeMap::new();
+    for name in &names {
+        if let Some(entry) = loaded.dictionary.table(&database, name) {
+            tables.insert(
+                name.to_lowercase(),
+                entry
+                    .columns
+                    .iter()
+                    .filter(|(_, v)| !v.trim().is_empty())
+                    .map(|(k, _)| k.clone())
+                    .collect(),
+            );
+        }
+    }
+
+    let unmatched = if names.is_empty() {
+        Vec::new()
+    } else {
+        loaded.dictionary.unmatched(&database, &names, |t, c| {
+            known.and_then(|s| {
+                s.columns
+                    .get(t)
+                    .map(|cols| cols.iter().any(|x| x.name.eq_ignore_ascii_case(c)))
+            })
+        })
+    };
+
+    Ok(DictionaryMarks { tables, unmatched })
+}
+
+/// Pick a `.toml` to attach, or a name to create one under.
+#[tauri::command]
+async fn dictionary_pick(app: tauri::AppHandle, create: bool) -> Result<Option<String>, String> {
+    let mut builder = app
+        .dialog()
+        .file()
+        .add_filter("Dictionary (TOML)", &["toml"]);
+    if create {
+        builder = builder.set_file_name("dictionary.toml");
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if create {
+        builder.save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    } else {
+        builder.pick_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    }
+    let picked = rx
+        .await
+        .map_err(|_| "The file dialog closed unexpectedly.".to_string())?;
+    let Some(f) = picked else { return Ok(None) };
+    f.into_path()
+        .map(|p| Some(p.to_string_lossy().into_owned()))
+        .map_err(|e| format!("Unsupported file path: {e}"))
+}
+
+/// Check a dictionary **as typed**: does it parse, what does it say, and what
+/// does it say about things that are not there?
+///
+/// The schema it is checked against is whatever is already cached. This runs on
+/// every keystroke's lint pass, and a command that introspected a server to
+/// answer it would turn typing into queries.
+#[tauri::command]
+async fn dictionary_check(
+    state: State<'_, AppState>,
+    connection_id: String,
+    database: String,
+    text: String,
+) -> Result<DictionaryCheck, String> {
+    let loaded = match dictionary::parse(&text) {
+        Ok(loaded) => loaded,
+        Err(message) => {
+            // The whole file failed, so there is nothing to count or match.
+            // The span, when `toml` gives one, puts the squiggle on the line
+            // that broke rather than at the top of the file (verified in
+            // toml 1.1.5, `src/de/error.rs:69`, 2026-10-21).
+            let (start, end) = dictionary::error_span(&text).unwrap_or((0, text.len()));
+            return Ok(DictionaryCheck {
+                diagnostics: vec![lint::Diagnostic {
+                    start,
+                    end,
+                    severity: lint::Severity::Error,
+                    message,
+                }],
+                counts: dictionary::Counts::default(),
+                unmatched: Vec::new(),
+                warning: None,
+            });
+        }
+    };
+
+    let server = session::server(&state, &connection_id).await?;
+    let cache = server.schema_cache.lock().await;
+    let known = cache.get(&database);
+    let tables: Vec<String> = known
+        .and_then(|s| s.tables.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+
+    // Only when the schema is known at all: against an unknown database every
+    // note would read as unmatched, which is the opposite of useful.
+    let unmatched = if tables.is_empty() {
+        Vec::new()
+    } else {
+        loaded.dictionary.unmatched(&database, &tables, |t, c| {
+            known.and_then(|s| {
+                s.columns
+                    .get(t)
+                    .map(|cols| cols.iter().any(|x| x.name.eq_ignore_ascii_case(c)))
+            })
+        })
+    };
+
+    Ok(DictionaryCheck {
+        diagnostics: Vec::new(),
+        counts: loaded.dictionary.counts(&database),
+        unmatched,
+        warning: loaded.warning,
+    })
+}
+
 /// Pick the folder of scripts, or the folder the CSVs go in.
 ///
 /// Two separate picks by §3.2's decision: the scripts may live somewhere
@@ -2472,6 +2740,11 @@ pub fn run() {
             flyway_add_project,
             flyway_remove_project,
             flyway_select_environment,
+            dictionary_open,
+            dictionary_create,
+            dictionary_pick,
+            dictionary_check,
+            dictionary_marks,
             flyway_info,
             flyway_fingerprint,
             flyway_migrate,

@@ -24,6 +24,8 @@ import {
   forceLinting, linter, lintGutter, type Diagnostic as CmDiagnostic,
 } from "@codemirror/lint";
 import { Compartment } from "@codemirror/state";
+import { StreamLanguage } from "@codemirror/language";
+import { toml } from "@codemirror/legacy-modes/mode/toml";
 
 const schemaCompartment = new Compartment();
 
@@ -424,6 +426,25 @@ export function refreshLint(view: EditorView) {
 }
 
 /** Feed the schema cache into autocomplete as tables load in the sidebar. */
+/**
+ * Put the editor into TOML, for a dictionary tab — **not SQL**.
+ *
+ * The same compartment the SQL language lives in, because a buffer has one
+ * language: leaving `sql()` in place and adding TOML would highlight a
+ * dictionary's `[tables.orders]` as a SQL expression and offer it table names
+ * for completion.
+ *
+ * `StreamLanguage` over `@codemirror/legacy-modes`, which is CodeMirror's own
+ * package for exactly this — TOML needs a tokenizer, not a parser, and there
+ * is no Lezer grammar for it in the family.
+ */
+export function setPlainToml(view: EditorView) {
+  tableColumns = new Map();
+  view.dispatch({
+    effects: schemaCompartment.reconfigure(StreamLanguage.define(toml)),
+  });
+}
+
 export function setSchema(view: EditorView, schema: SQLNamespace, defaultTable?: string) {
   sqlConfig = { ...sqlConfig, schema, defaultTable };
   // The same names in the shape `columnsInScope` needs. Tables whose columns

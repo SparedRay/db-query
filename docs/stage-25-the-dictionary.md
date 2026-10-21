@@ -280,8 +280,52 @@ A dictionary that fails to load does **not** fail the call. The client asked
 about the schema and the schema is still there; the app's own surfaces are
 where a broken file complains.
 
-### Slice 4 — the tab and the tree
-- [ ] a third `TabKind`, its header band, no SQL controls
-- [ ] TOML highlighting (`@codemirror/legacy-modes`) and attribution
-- [ ] TOML parse errors as this tab's lint
-- [ ] dots in the tree, the amber warning, the context-menu stub
+### Slice 4 — the tab and the tree · built 2026-10-21
+- [x] a third `TabKind`, its header band, no SQL controls
+- [x] TOML highlighting (`@codemirror/legacy-modes`) and attribution
+- [x] TOML parse errors as this tab's lint, with the squiggle on the line
+- [x] dots on tables **and columns**, the stale count, the context-menu stub
+- [x] choose-or-create, remembered on the profile
+- [x] 10 UI tests, 3 more Rust ones · D6, D7, D8 met
+
+The tab is an **editor** tab that runs nothing: it keeps CodeMirror and the
+file chip, loses Run, Run all, Format, Auto-LIMIT, Lint and Timeout, and holds
+TOML in place of SQL. `sql-only` marks those controls in `index.html` rather
+than a list in a function, so a control added later is either marked or it is
+not — where a list would silently miss it and leave a Run button over a TOML
+file.
+
+**One dot per table and per column**, filled when the dictionary describes it
+and an empty slot of the same width when not, so the names stay in one column
+and a glance down the tree reads as a list of what the assistant knows. The
+marks arrive with the table list — one call per database, not one per node —
+and a save repaints them **in place**: rebuilding the tree would collapse
+everything the user had expanded, which is a high price for a dot.
+
+Three things the build decided:
+
+**The format key was guarded against the wrong thing.** `run()` has asked "is
+this a SQL tab" since the migrations view arrived, so Ctrl+Enter was already
+safe on a dictionary tab. `formatBuffer` asked whether the *migrations view*
+was up — which a dictionary tab is not — so Ctrl+Shift+F would have sent
+somebody's TOML to the SQL formatter and replaced the buffer with the answer.
+Found by a falsification that **passed**: the first version of the test asserted
+that Ctrl+Enter sends no `run_script`, which was true either way. The guard is
+now the same question `run` asks, and the test presses the key that
+distinguishes.
+
+**The dots describe the file, not the buffer.** An unsaved edit is not yet what
+the assistant will be told, so the marks come from disk and the tab's own band
+is what tracks the buffer. Two surfaces, two truths, each honest about which.
+
+**Two `StringStream`s.** `@codemirror/legacy-modes` 6.5.5 types its parsers
+against `@codemirror/streamparser`, and `@codemirror/language` 6.12.4 had its
+own copy — structurally identical, nominally different, so `StreamLanguage
+.define(toml)` would not typecheck. Upgrading `@codemirror/language` to 6.13.1,
+which sources `StringStream` from that same package, aligned them. **No cast**:
+a cast here would have been two packages' types papered over rather than
+reconciled.
+
+Both new packages are MIT and recorded in `THIRD-PARTY-LICENSES.txt`, which is
+generated from the bundle's own sourcemap — so they appeared there only after
+the bundle was rebuilt, which is the point of generating it that way.

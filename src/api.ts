@@ -463,6 +463,42 @@ export interface FlywayApplyFailed {
  * describes what an apply would do. Matching costs milliseconds where asking
  * Flyway costs seconds.
  */
+/** How much a dictionary says about one database. */
+export interface DictionaryCounts {
+  tables: number;
+  columns: number;
+}
+
+/** A note with nothing to attach to. `column` is null when the table is gone. */
+export interface DictionaryUnmatched {
+  table: string;
+  column: string | null;
+}
+
+/**
+ * What a dictionary says, and what is wrong with it — answered for the
+ * **buffer**, so the tab's squiggles and its header describe what is on screen
+ * rather than what was last saved.
+ */
+export interface DictionaryCheck {
+  /** Parse errors, as byte offsets, exactly like `lintSql`'s. */
+  diagnostics: Diagnostic[];
+  counts: DictionaryCounts;
+  /** Empty while the schema is unknown — "not loaded" is not "not there". */
+  unmatched: DictionaryUnmatched[];
+  warning: string | null;
+}
+
+/**
+ * What the dictionary describes in one database, keyed lower-case so the tree
+ * can compare against whatever case the server reported.
+ */
+export interface DictionaryMarks {
+  /** table → the columns it describes. */
+  tables: Record<string, string[]>;
+  unmatched: DictionaryUnmatched[];
+}
+
 export interface FlywayReading {
   migrations: FlywayMigration[];
   folders: string[];
@@ -1062,6 +1098,27 @@ export const api = {
    *  use, so what is reported as pending is what Flyway would actually run. */
   flywayInfo: (projectId: string, environment: string, program: string, outOfOrder: boolean) =>
     invoke<FlywayReading>("flyway_info", { projectId, environment, program, outOfOrder }),
+
+  // --- the AI dictionary (Stage 25). The file opens as an ordinary file-backed
+  // tab, so `dictionaryOpen` answers the same `OpenedFile` the Open dialog
+  // does — Ctrl+S, the mtime guard, the line endings and the BOM come free.
+  /** Open the file this connection is bound to. Fails when it has none. */
+  dictionaryOpen: (connectionId: string) =>
+    invoke<OpenedFile>("dictionary_open", { connectionId }),
+  /** Write a starter dictionary for this database — every real table as a
+   *  commented-out stub — and open it. Refuses to overwrite. */
+  dictionaryCreate: (connectionId: string, path: string, database: string) =>
+    invoke<OpenedFile>("dictionary_create", { connectionId, path, database }),
+  /** Which tables and columns the dictionary describes, for the tree's dots.
+   *  One call per database — the tree builds hundreds of nodes. */
+  dictionaryMarks: (connectionId: string, database: string) =>
+    invoke<DictionaryMarks>("dictionary_marks", { connectionId, database }),
+  /** Pick a `.toml`: an existing one to attach, or a name to create. */
+  dictionaryPick: (create: boolean) => invoke<string | null>("dictionary_pick", { create }),
+  /** Check the buffer **as typed**: does it parse, what does it say, and what
+   *  does it say about things that are not in the schema? */
+  dictionaryCheck: (connectionId: string, database: string, text: string) =>
+    invoke<DictionaryCheck>("dictionary_check", { connectionId, database, text }),
 
   /** Has anything in these folders changed? The cheap half of Stage 24: ~4ms
    *  for a thousand files, against ~4.8s for a `flyway info`. Compare the

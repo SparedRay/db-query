@@ -55,6 +55,8 @@ export interface ConnectionHooks {
   onRemoved: (entry: ConnectionEntry) => void;
   /** Offered only where the engine has a schema to write out. */
   exportSchema?: (connectionId: string) => void;
+  /** Open, attach or create this connection's AI dictionary (Stage 25). */
+  dictionary?: (entry: ConnectionEntry) => void;
   notify: (message: string) => void;
 }
 
@@ -384,6 +386,17 @@ export class ConnectionManager {
       // engine's name — see `engine.rs`.
       ...(entry.connected && entry.capabilities?.schemaExport
         ? [{ label: "Export schema…", run: () => this.hooks.exportSchema?.(entry.profile.id) }]
+        : []),
+      // Offered connected or not? Connected: the starter file is generated
+      // from the real table list, and the stale-note check needs a schema to
+      // check against. Both want a server.
+      ...(entry.connected && this.hooks.dictionary
+        ? [
+            {
+              label: entry.profile.dictionary ? "AI dictionary…" : "Add an AI dictionary…",
+              run: () => this.hooks.dictionary?.(entry),
+            },
+          ]
         : []),
       { label: "Edit…", run: () => this.openEditor(entry) },
       { label: "Duplicate", run: () => this.duplicate(entry) },

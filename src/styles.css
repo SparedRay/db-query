@@ -350,6 +350,20 @@ body {
    list is a table, and in the pane it had to drop the date and the state. */
 .mig-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .mig-view .mig-env { border-bottom: none; padding-bottom: 0; }
+/* The tree's "the dictionary describes this" mark (Stage 25).
+   An empty slot of the same width when there is no note, so the names stay in
+   one column and the dots read as a list down the tree. Presence and absence
+   rather than two colours, which also means it works without colour. */
+.dict-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.dict-dot.on { background: var(--accent); }
+
+/* A dictionary tab's header band (Stage 25). Reads as one sentence of facts,
+   so the parts are separated rather than boxed. */
+.dict-band { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--fg-dim); flex-wrap: wrap; }
+.dict-band b { color: var(--fg); font-weight: 600; }
+.dict-band .stale { color: var(--warn-fg); }
+.dict-band .sep { color: var(--border); }
+
 .mig-view-actions {
   /* Wraps since Stage 24: there are two toggles beside the buttons now
      (`Out of order` and `Check first`), and a row that cannot wrap squashes

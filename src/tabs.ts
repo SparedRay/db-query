@@ -16,7 +16,13 @@ import { emptySelection, type GridSelection } from "./grid";
  * results. `migrations` is a view onto one Flyway project environment
  * (Stage 18) — no buffer, no results of its own, and no connection.
  */
-export type TabKind = "sql" | "migrations";
+/**
+ * `dictionary` is an **editor** tab that runs nothing: it holds the TOML file
+ * saying what a database's tables and columns mean (Stage 25). Unlike
+ * `migrations`, which replaces the editor with a view, this one *is* the
+ * editor — with the SQL controls off and TOML in place of SQL.
+ */
+export type TabKind = "sql" | "migrations" | "dictionary";
 
 /** Which project environment a `migrations` tab is looking at. */
 export interface MigrationsRef {
@@ -476,6 +482,8 @@ export class TabManager {
     mtimeMs?: number | null;
     /** Opened by something other than the person at the keyboard. */
     origin?: TabOrigin;
+    /** What sort of buffer this is. `sql` unless something says otherwise. */
+    kind?: TabKind;
     /** The database to start on, when the caller knows it and `onCreated`
      *  cannot — see `close`. Otherwise left to that hook. */
     activeDb?: string | null;
@@ -493,7 +501,7 @@ export class TabManager {
     const tab: ScriptTab = {
       id: `t${++idSeq}`,
       connectionId,
-      kind: "sql",
+      kind: opts?.kind ?? "sql",
       migrations: null,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
