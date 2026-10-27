@@ -34,6 +34,7 @@ import {
   type FlywayProjectView,
   type DictionaryCheck,
   type OpenedFile,
+  type FlywayLastRun,
   type FlywayMigration,
   type FlywayReading,
   type Recipe,
@@ -55,7 +56,7 @@ import { icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
-import { TabManager, clearResult, type ScriptTab, type TabKind } from "./tabs";
+import { TabManager, clearResult, type ScriptTab } from "./tabs";
 import {
   ConnectionManager, COLOURS, newConnectionId, serverLabel, type ConnectionEntry,
 } from "./connections";
@@ -107,14 +108,21 @@ const els = {
   sfCrlf: $<HTMLInputElement>("sf-crlf"),
   sfBom: $<HTMLInputElement>("sf-bom"),
   sfGuard: $<HTMLInputElement>("sf-guard"),
-  migSide: $("mig-side"),
-  migSideBody: $("mig-side-body"),
-  migSideToggle: $<HTMLButtonElement>("mig-side-toggle"),
-  migSideCaret: $("mig-side-caret"),
-  btnMigSideAdd: $<HTMLButtonElement>("btn-mig-side-add"),
-  migView: $("mig-view"),
+  migPane: $<HTMLElement>("mig-pane"),
+  migsplit: $<HTMLElement>("migsplit"),
+  btnMigrations: $<HTMLButtonElement>("btn-migrations"),
+  migClose: $<HTMLButtonElement>("mig-close"),
+  migPending: $("mig-pending"),
+  migPicker: $<HTMLButtonElement>("mig-picker"),
+  migPickerLabel: $("mig-picker-label"),
+  migPickerCaret: $("mig-picker-caret"),
+  migPickerPop: $("mig-picker-pop"),
+  btnMigAdd: $<HTMLButtonElement>("btn-mig-add"),
+  migReport: $("mig-report"),
+  migReportToggle: $<HTMLButtonElement>("mig-report-toggle"),
+  migReportCaret: $("mig-report-caret"),
+  migReportOp: $("mig-report-op"),
   editorHead: $("editor-head"),
-  editorHost: $("editor"),
   migViewEnv: $("mig-view-env"),
   migViewList: $("mig-view-list"),
   migViewActions: $("mig-view-actions"),
@@ -178,7 +186,6 @@ const els = {
   expCreateDb: $<HTMLInputElement>("exp-create-db"),
   expCreateDbNote: $<HTMLElement>("exp-create-db-note"),
   expOmitDefiner: $<HTMLInputElement>("exp-omit-definer"),
-  flywayPane: $<HTMLElement>("flyway-pane"),
   flywayBody: $<HTMLElement>("flyway-body"),
   resToggle: $<HTMLButtonElement>("res-toggle"),
   resCaret: $("res-caret"),
@@ -1010,6 +1017,7 @@ function refilterTree() {
 // would put the same paths in two places and let them drift.
 for (const [el, name] of [
   [els.btnAssistant, "assistant"],
+  [els.btnMigrations, "migrations"],
   [els.btnHistory, "history"],
   [els.btnSchema, "sidebar"],
   [els.btnSqlfiles, "run-files"],
@@ -1832,14 +1840,7 @@ function showResultsInner(tab: ScriptTab) {
   }
   if (!tab.result) {
     results.setMessage(
-      tab.kind === "migrations"
-        ? // Unreachable in practice: a migrations tab shows the Flyway pane
-          // rather than the grid. Kept correct rather than removed, because
-          // `showResults` is reachable from the export bar.
-          "Flyway's output is below."
-        : connected
-          ? "No results yet. Ctrl+Enter to run."
-          : "Not connected.",
+      connected ? "No results yet. Ctrl+Enter to run." : "Not connected.",
     );
     return;
   }
@@ -2191,7 +2192,7 @@ els.btnCancel.onclick = async () => {
  * origin. Measuring it the same way as the schema would make the panel shrink
  * as you dragged it wider.
  */
-function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
+function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "y") {
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     handle.classList.add("dragging");
@@ -2206,6 +2207,13 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
         const from = window.innerWidth - ev.clientX;
         const w = Math.min(Math.max(260, from), Math.max(260, window.innerWidth - 420));
         document.documentElement.style.setProperty("--chat-w-set", `${w}px`);
+      } else if (axis === "x-mig") {
+        // Measured from the panel's own right edge, not the window's: the
+        // assistant may be open beyond it. The floor keeps Apply, Repair and
+        // Refresh on one line; the ceiling leaves the editor usable.
+        const right = els.migPane.getBoundingClientRect().right;
+        const w = Math.min(Math.max(300, right - ev.clientX), Math.max(300, right - 560));
+        document.documentElement.style.setProperty("--mig-w-set", `${w}px`);
       } else {
         // A seam dragged while the pane is shut opens it and sizes it in one
         // gesture. The alternative is a handle that looks draggable and does
@@ -2229,6 +2237,7 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "y") {
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
 draggable(els.msplit, "x-end");
+draggable(els.migsplit, "x-mig");
 
 // ------------------------------------------------- the result pane's header
 //
@@ -2298,10 +2307,9 @@ function noteResultsLanded() {
  * many rows arrived.
  */
 function paintResultsHead() {
-  const tab = tabs?.active() ?? null;
-  const mig = tab?.kind === "migrations";
-  els.resTitle.textContent = mig ? "Flyway output" : "Results";
-  els.resSummary.textContent = mig ? flywaySummary(tab) : statusSummary();
+  // Results only, since Stage 28: Flyway's report is the migrations panel's.
+  els.resTitle.textContent = "Results";
+  els.resSummary.textContent = statusSummary();
 }
 
 function statusSummary(): string {
@@ -2313,13 +2321,6 @@ function statusSummary(): string {
   // error, "Running…" — and that sentence is exactly what a shut pane should
   // be saying.
   return els.grid.querySelector(".empty")?.textContent?.trim() ?? "";
-}
-
-function flywaySummary(tab: ScriptTab | null): string {
-  const ref = tab?.migrations ?? null;
-  if (!ref) return "";
-  const op = ref.lastReport?.op;
-  return op ? `\u00b7 ${op}` : "Nothing has run here yet";
 }
 
 els.resToggle.onclick = () => setResultsShut(!resultsShut);
@@ -2538,8 +2539,9 @@ tabs = new TabManager($("script-tabs"), view, {
   // unconditionally.
   dialectForActiveConnection: () => conns.active()?.capabilities?.engine ?? null,
   onCreated: (tab) => {
-    // Only buffers get here: `openMigrations` deliberately skips this hook,
-    // because a view will never run a statement and needs no backend session.
+    // A tab belonging to no connection has no session to register. Stage 18's
+    // migrations view was the only one there has ever been, and it is a panel
+    // now (Stage 28) — but `create` still allows the case, so the guard stays.
     if (tab.connectionId === null) return;
     // Register with the backend so it can hold a session for this tab. Harmless
     // before a connection exists; connect() registers everything again.
@@ -2568,26 +2570,6 @@ tabs = new TabManager($("script-tabs"), view, {
     session.schedule();
   },
   onActivate: (tab) => {
-    // A view, not a buffer: the main area shows the migrations list instead of
-    // the editor, and the editor keeps whatever state it had for when you come
-    // back. Everything below is about an editor tab.
-    showMigrationsView(tab.kind === "migrations");
-    if (tab.kind === "migrations" && tab.migrations) {
-      migSelected = {
-        projectId: tab.migrations.projectId,
-        environment: tab.migrations.environment,
-      };
-      drawProjects();
-      syncBusy();
-      // The grid belongs to a query. A migrations tab shows Flyway's output in
-      // its place — see `showResultsSurface`.
-      showResultsSurface("migrations");
-      showFlywayOutput();
-      // Only when it would show something else: switching back to a list you
-      // were already looking at must not start a JVM.
-      if (migViewShowing !== selectedKey()) void showSelected();
-      return;
-    }
     // Compartment contents live in the EditorState, so a swapped-in state has
     // whatever config it was born with. Re-apply both after every switch.
     //
@@ -2599,7 +2581,6 @@ tabs = new TabManager($("script-tabs"), view, {
     if (tab.kind === "dictionary") {
       setPlainToml(view);
       applyDictionaryLint();
-      showResultsSurface("sql");
       showResults(tab);
       syncBusy();
       refreshFileNote();
@@ -2611,7 +2592,6 @@ tabs = new TabManager($("script-tabs"), view, {
     setDialect(view, tab.dialect);
     setSchema(view, schemaMap);
     applyLintSetting(true);
-    showResultsSurface("sql");
     showResults(tab);
     syncBusy();
     refreshFileNote();
@@ -2622,16 +2602,8 @@ tabs = new TabManager($("script-tabs"), view, {
     view.focus();
     session.schedule();
   },
-  canClose: (tab) => (tab.kind === "migrations" ? Promise.resolve(true) : files.confirmClose(tab)),
+  canClose: (tab) => files.confirmClose(tab),
   onClosed: (tab) => {
-    if (tab.kind === "migrations") {
-      // Nothing to release: it never held a backend session. With no other tab
-      // to activate — no connection open — nothing else would put the editor
-      // back, so it is done here.
-      migViewShowing = "";
-      showMigrationsView(false);
-      return;
-    }
     // Releases that tab's MySQL connection; leaving it would leak until
     // disconnect.
     void api.closeTab(tab.id);
@@ -2667,7 +2639,7 @@ void session.boot().then((warning) => {
   if (message) results.setMessage(message);
 });
 
-// The sidebar's migrations section, filled at boot. It reads the project files
+// The migrations panel's projects, read at boot. It reads the project files
 // and the saved connections and asks Flyway nothing, so it costs a file read —
 // and a project nobody can see is a project nobody remembers they added.
 void renderMigrations();
@@ -3829,6 +3801,12 @@ window.addEventListener("keydown", (e) => {
     // The conventional key for the panel at the bottom, and the one thing
     // somebody reaching for vertical space in a hurry will try.
     setResultsShut(!resultsShut);
+  } else if ((e.key === "m" || e.key === "M") && e.shiftKey) {
+    // Stage 28: the migrations panel. **Shift is required**, read rather than
+    // implied: plain Ctrl+M is CodeMirror's tab-focus toggle, and this branch
+    // matches both cases of the letter.
+    e.preventDefault();
+    setMigOpen(!migOpen);
   } else if (e.key === "h" || e.key === "H") {
     e.preventDefault();
     void history.open();
@@ -4021,11 +3999,33 @@ function elem(tag: string, cls: string, text?: string): HTMLElement {
   return e;
 }
 
-/** Collapse or expand the sidebar's migrations section. */
-function toggleMigrationsSection(open: boolean) {
-  els.migSide.classList.toggle("collapsed", !open);
-  els.migSideToggle.setAttribute("aria-expanded", String(open));
-  els.migSideCaret.classList.toggle("open", open);
+/**
+ * Open the migrations panel, or shut it (Stage 28).
+ *
+ * The width lives in `--mig-w-set` and shutting leaves it alone, as the
+ * assistant's does. Neither is remembered across launches: it starts shut, like
+ * every other panel and splitter here starts where it was born.
+ *
+ * **Opening asks Flyway only when the list on screen is not already this
+ * environment's** — the same rule switching back to the old migrations tab
+ * followed. A JVM per glance at a list already showing is not a cost to pay.
+ */
+let migOpen = false;
+function setMigOpen(open: boolean) {
+  migOpen = open;
+  els.app.classList.toggle("mig-shut", !open);
+  els.migPane.hidden = !open;
+  els.migsplit.hidden = !open;
+  els.btnMigrations.setAttribute("aria-pressed", String(open));
+  els.btnMigrations.classList.toggle("on", open);
+  if (!open) setPickerOpen(false);
+  if (open && selectedTarget() && migViewShowing !== selectedKey()) void showSelected();
+}
+
+/** The environment picker's popover. Shut by choosing, Escape or a click away. */
+function setPickerOpen(open: boolean) {
+  els.migPickerPop.hidden = !open;
+  els.migPicker.setAttribute("aria-expanded", String(open));
 }
 
 /**
@@ -4054,13 +4054,31 @@ function toggleSchema(open: boolean) {
 els.btnSchema.onclick = () => toggleSchema(!schemaOpen);
 els.btnSchema.classList.add("on");
 
-// The caret, from the app's own icon set, so the section reads as something
-// that opens and shuts — like every group in the schema tree. Without it the
-// header looked like a label nobody could do anything with.
-els.migSideCaret.append(icon("chevron"));
-els.migSideToggle.onclick = () =>
-  toggleMigrationsSection(els.migSide.classList.contains("collapsed"));
-els.btnMigSideAdd.onclick = () => void addFlywayProject();
+// Carets from the app's own icon set, so each part reads as something that
+// opens and shuts — like every group in the schema tree.
+els.migPickerCaret.append(icon("chevron"));
+els.migReportCaret.append(icon("chevron"));
+els.btnMigrations.onclick = () => setMigOpen(!migOpen);
+els.migClose.onclick = () => setMigOpen(false);
+els.migPicker.onclick = () => setPickerOpen(els.migPickerPop.hidden);
+// Escape wherever focus is: after a click it is on the picker's own button,
+// not inside the popover.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || els.migPickerPop.hidden) return;
+  setPickerOpen(false);
+  els.migPicker.focus();
+});
+document.addEventListener("mousedown", (e) => {
+  if (els.migPickerPop.hidden) return;
+  const t = e.target as Node;
+  if (!els.migPickerPop.contains(t) && !els.migPicker.contains(t)) setPickerOpen(false);
+});
+els.migReportToggle.onclick = () => {
+  const open = els.migReport.classList.toggle("shut") === false;
+  els.migReportCaret.classList.toggle("open", open);
+  els.migReportToggle.setAttribute("aria-expanded", String(open));
+};
+els.btnMigAdd.onclick = () => void addFlywayProject();
 els.btnMigViewRefresh.onclick = () => void renderMigrations();
 els.btnMigViewApply.onclick = () => void applyMigrations();
 els.btnMigViewRepair.onclick = () => void repairMigrations();
@@ -4139,19 +4157,25 @@ function buttonBusy(btn: HTMLButtonElement, label?: string): () => void {
   };
 }
 
-// ------------------------------------------- Flyway's output, where the grid was
+// ------------------------------------- Flyway's output, in the migrations panel
 //
-// A migrations tab has no result set: its answers are a sentence and a report.
-// So the pane that holds the SQL grid holds Flyway's output instead — a swap,
-// not a second region, because a tab with two scrolling panes one of which is
-// always empty is worse than either.
+// Its answers are a sentence and a report, not rows. They were shown in place of
+// the result grid while a migrations tab was in front (Stage 18); since Stage 28
+// they are the panel's "Last run", and the result pane is about SQL only.
 
-/** Show either the result grid or Flyway's output, never both. */
-function showResultsSurface(kind: TabKind) {
-  const flyway = kind === "migrations";
-  els.flywayPane.hidden = !flyway;
-  els.resultTabs.hidden = flyway;
-  $("grid").hidden = flyway;
+/**
+ * What Flyway last did on each environment, keyed by `selKey`.
+ *
+ * **Per environment, not one global.** The backend keeps only the newest run,
+ * and `uat` must not show the report of the apply just done on `development` —
+ * the rule the migrations tab kept by holding it per tab.
+ */
+const flywayRuns = new Map<string, { outcome?: string; report?: FlywayLastRun | null }>();
+
+function flywayRun(key: string) {
+  let run = flywayRuns.get(key);
+  if (!run) flywayRuns.set(key, (run = {}));
+  return run;
 }
 
 /**
@@ -4269,19 +4293,25 @@ function renderFlywayReport(host: HTMLElement, run: import("./api").FlywayLastRu
  * body is on screen.
  */
 function showFlywayOutput() {
-  const ref = tabs?.active()?.migrations ?? null;
+  const key = selectedKey();
+  // No environment means nothing can have run here, and a "Last run" header
+  // over an empty body is a section about nothing. With no projects at all,
+  // that is the state the panel opens in.
+  els.migReport.hidden = !key;
+  const ref = flywayRuns.get(key) ?? null;
   els.flywayBody.replaceChildren();
-  paintResultsHead();
+  const op = ref?.report?.op;
+  els.migReportOp.textContent = op ? `\u00b7 ${op}` : "";
 
-  if (!ref?.lastReport && !ref?.lastOutcome) {
+  if (!ref?.report && !ref?.outcome) {
     els.flywayBody.append(
       elem("div", "fw-note", "Nothing has run here yet. Apply or Repair will report in full."),
     );
     return;
   }
   // Our sentence first — it is the answer — then Flyway's own account of it.
-  if (ref.lastOutcome) els.flywayBody.append(elem("div", "fw-outcome", ref.lastOutcome));
-  if (ref.lastReport) renderFlywayReport(els.flywayBody, ref.lastReport);
+  if (ref.outcome) els.flywayBody.append(elem("div", "fw-outcome", ref.outcome));
+  if (ref.report) renderFlywayReport(els.flywayBody, ref.report);
 }
 
 /**
@@ -4292,9 +4322,9 @@ function showFlywayOutput() {
  * replace a migrate's report with that.
  */
 async function captureFlywayRun() {
-  const ref = tabs?.active()?.migrations;
-  if (!ref) return;
-  ref.lastReport = await api.flywayLastRun().catch(() => null);
+  const key = selectedKey();
+  if (!key) return;
+  flywayRun(key).report = await api.flywayLastRun().catch(() => null);
 }
 
 /**
@@ -4905,17 +4935,14 @@ async function whileBusy<T>(
  * it without having to remember to.
  */
 function migrationsOutcome(text: string) {
-  const ref = tabs?.active()?.migrations;
-  if (ref) ref.lastOutcome = text;
-  // Into the output pane, which is what this tab has instead of a grid. It
-  // used to go through `results.setMessage`, which painted a surface a
-  // migrations tab no longer shows.
+  const key = selectedKey();
+  if (key) flywayRun(key).outcome = text;
   showFlywayOutput();
 }
 
 function migUi(): MigUi {
   return {
-    projects: els.migSideBody,
+    projects: els.migPickerPop,
     detail: els.migViewEnv,
     list: els.migViewList,
     apply: els.btnMigViewApply,
@@ -5229,24 +5256,6 @@ async function attachDictionary(entry: ConnectionEntry): Promise<boolean> {
   return true;
 }
 
-/**
- * Swap the main area between the editor and the migrations view.
- *
- * The editor keeps its state and its scroll position; it is hidden, not
- * rebuilt. The run controls go with it — they belong to the buffer, and a Run
- * button over a list of migrations would be a control with nothing to act on.
- */
-function showMigrationsView(on: boolean) {
-  els.migView.hidden = !on;
-  els.editorHost.hidden = on;
-  els.editorHead.hidden = on;
-}
-
-/** Is the migrations view the thing in front? */
-function migrationsViewActive(): boolean {
-  return tabs?.active()?.kind === "migrations";
-}
-
 /** An empty list that says what to do next, rather than an empty list. */
 function migrationsMessage(
   text: string,
@@ -5450,27 +5459,32 @@ async function renderMigrations() {
   if (!flywayProjects.length) {
     migSelected = null;
     ui.detail.hidden = true;
-    // **In the sidebar, not the view.** With no projects there is no view open
-    // and nothing to open one from, so a message drawn in the view's list
-    // would be a message nobody could see.
+    drawProjects();
+    paintPending(null);
+    showFlywayOutput();
     return migrationsMessage(
       "No Flyway projects yet. Add the flyway.toml you open with Flyway Desktop " +
         "to see what each of its environments has applied and what is pending. " +
         "No connection needs to be open — Flyway connects by itself.",
       { label: "Add a project…", run: () => void addFlywayProject() },
-      ui.projects,
     );
   }
 
   migSelected = validSelection(migSelected);
   drawProjects();
-  // Only when a view is open: a JVM start per launch, for a project nobody
-  // clicked, is not a cost to pay on somebody's behalf.
-  if (migrationsViewActive()) await showSelected();
+  // Only when the panel is open: a JVM start per launch, for a project nobody
+  // looked at, is not a cost to pay on somebody's behalf.
+  if (migOpen) await showSelected();
 }
 
 /** The project list: each file, and each of its environments. */
 function drawProjects() {
+  const t = selectedTarget();
+  els.migPickerLabel.textContent = t
+    ? `${t.project.name || (t.project.path.split(/[\\/]/).pop() ?? t.project.path)} \u00b7 ${t.env.id}`
+    : flywayProjects.length
+      ? "Choose an environment"
+      : "No projects yet";
   migUi().projects.replaceChildren(
     ...flywayProjects.map((p) => {
       const box = elem("div", "mig-project");
@@ -5563,11 +5577,9 @@ async function selectEnvironment(p: FlywayProjectView, e: FlywayEnvironment) {
   // A preference, remembered for next launch. Losing it costs a click.
   void api.flywaySelectEnvironment(p.id, e.id).catch(() => {});
 
-  // One tab, re-pointed (Stage 18 §5.3). Clicking the environment already in
-  // front is how you bring the view back after looking at a query, so it is
-  // not treated as "nothing to do".
-  tabs.openMigrations({ projectId: p.id, environment: e.id }, `Migrations \u00b7 ${e.id}`);
-  if (!again || migViewShowing !== selectedKey()) await showSelected();
+  setPickerOpen(false);
+  if (!migOpen) setMigOpen(true);
+  else if (!again || migViewShowing !== selectedKey()) await showSelected();
 }
 
 /**
@@ -5587,13 +5599,17 @@ async function showSelected() {
     ui.detail.hidden = true;
     migViewShowing = "";
     migProgressHide();
-    return migrationsMessage("Choose an environment in the sidebar.");
+    paintPending(null);
+    showFlywayOutput();
+    return migrationsMessage("Choose an environment from the list above.");
   }
   const key = selKey(t.project.id, t.env.id);
   if (!migrationsOutOfOrder.has(key)) migrationsOutOfOrder.set(key, t.project.outOfOrder);
   const switched = migViewShowing !== key;
   migViewShowing = key;
   showEnvironmentDetail(t.project, t.env);
+  showFlywayOutput();
+  if (switched) paintPending(null);
 
   // **The same loader Apply and Repair use.** `info` starts a JVM and talks to
   // the server, so it is seconds of waiting like any other Flyway call, and it
@@ -5629,6 +5645,28 @@ async function showSelected() {
   }
 }
 
+/**
+ * What the rail button says: how many are waiting, or that one has failed.
+ *
+ * On the button rather than inside the panel, so a migration waiting is visible
+ * while the panel is shut — and left showing while it is open, because a badge
+ * that vanished on opening would read as "nothing pending". Only ever from a
+ * reading — nothing asks Flyway to fill it — and cleared when the environment
+ * changes, so it never describes the wrong one.
+ */
+function paintPending(list: FlywayMigration[] | null) {
+  const failed = list?.filter((m) => m.group === "failed").length ?? 0;
+  const pending = list?.filter((m) => m.group === "pending").length ?? 0;
+  const count = failed || pending;
+  const text = failed ? `${failed} failed` : pending ? `${pending} pending` : "";
+  els.migPending.textContent = count ? String(count) : "";
+  els.migPending.hidden = !count;
+  els.migPending.classList.toggle("bad", failed > 0);
+  els.btnMigrations.title = text
+    ? `Migrations: ${text} (Ctrl+Shift+M)`
+    : "Migrations (Ctrl+Shift+M)";
+}
+
 function outOfOrderFor(key: string): boolean {
   return migrationsOutOfOrder.get(key) ?? false;
 }
@@ -5647,6 +5685,7 @@ function paintReading(key: string, reading: FlywayReading) {
   if (selectedKey() !== key) return;
   const t = selectedTarget();
   if (!t) return;
+  paintPending(reading.migrations);
   if (!reading.migrations.length) {
     return migrationsMessage("This environment has no migrations.");
   }

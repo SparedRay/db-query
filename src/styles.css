@@ -213,7 +213,7 @@ body {
   gap: 0;
   grid-template-columns:
     48px var(--tree-w, var(--sidebar-w, 260px)) var(--tree-gap, 7px) minmax(0, 1fr)
-    var(--chat-gap, 7px) var(--chat-w, 380px);
+    var(--mig-gap, 7px) var(--mig-w, 380px) var(--chat-gap, 7px) var(--chat-w, 380px);
   /* The row must be pinned, not implicit. An implicit row is `auto`, which
      sizes to its tallest child — so a schema with more tables than fit made the
      row taller than the window, pushed the results grid below the fold, and
@@ -238,7 +238,7 @@ body {
    a region of one flat screen — the same move the settings fieldsets make.
    `overflow: hidden` is what keeps a sticky table header or a long tree from
    painting over the rounded corner. */
-.railbar, #sidebar, #editor-pane, #results-pane, #chat-pane {
+.railbar, #sidebar, #editor-pane, #results-pane, #mig-pane, #chat-pane {
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
@@ -271,12 +271,10 @@ body {
 #app > #sidebar { grid-column: 2; }
 #app > #vsplit { grid-column: 3; }
 #app > #main { grid-column: 4; }
-#app > #msplit { grid-column: 5; }
-#app > #chat-pane { grid-column: 6; }
-#mig-title {
-  flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+#app > #migsplit { grid-column: 5; }
+#app > #mig-pane { grid-column: 6; }
+#app > #msplit { grid-column: 7; }
+#app > #chat-pane { grid-column: 8; }
 /* Which environment this is, said permanently rather than only at import —
    §3.5's second half: a guard can only compare what differs, so the cases it
    cannot catch are answered by never letting the environment out of sight. */
@@ -290,64 +288,92 @@ body {
 /* The project line. It exists because there was no way to see any of this:
    a connection could point at a flyway.toml on some branch and the only
    evidence was the migrations it listed. */
-.mig-proj-top { display: flex; align-items: center; gap: 8px; }
-.mig-proj-name {
-  flex: 1; min-width: 0; font-weight: 600; color: var(--fg);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 .mig-proj-where, .mig-proj-from, .mig-proj-env {
   margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .mig-proj-where, .mig-proj-from { font-family: var(--mono); font-size: 10.5px; }
-/* The environment is a button, because moving between dev and UAT is what this
-   pane gets used for most. Underlined rather than boxed, so the line still
-   reads as a sentence instead of growing a second control next to Change. */
-.mig-proj-swap {
-  padding: 0; border: none; background: none; cursor: pointer;
-  font: inherit; font-weight: 600; color: var(--fg);
-  border-bottom: 1px dashed var(--border);
-}
-.mig-proj-swap:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .mig-ooo {
   display: flex; align-items: center; gap: 6px;
   margin-top: 6px; cursor: pointer; user-select: none;
 }
 
-/* --- Stage 18: migrations in the sidebar, and the view they open --- */
+/* --- Stage 28: migrations docked on the right --------------------------- */
 
-/* The sidebar section. Capped so a long project list cannot push the schema
-   tree off the pane; it scrolls within its own share. */
-.mig-side {
-  flex: 0 0 auto; max-height: 45%; display: flex; flex-direction: column;
-  border-top: 1px solid var(--border);
+/* Shut is nothing, open is the width the seam was dragged to. The width lives
+   in `--mig-w-set` and shutting leaves it alone, as the assistant's. */
+#app.mig-shut { --mig-w: 0px; --mig-gap: 0px; }
+#app:not(.mig-shut) { --mig-w: var(--mig-w-set, 380px); }
+.mig-pane {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--bg-raised);
 }
-.mig-side.collapsed { max-height: none; }
-.mig-side.collapsed .mig-side-body { display: none; }
-.mig-side-head { display: flex; align-items: center; padding: 2px 8px 2px 4px; }
-.mig-side-toggle {
-  flex: 1; display: flex; align-items: center; gap: 4px;
-  padding: 4px 2px; border: none; background: none; cursor: pointer;
-  color: var(--fg-dim); font: 600 10.5px/1.4 system-ui, sans-serif;
-  text-transform: uppercase; letter-spacing: .4px;
+/* The same caret as every other thing that opens and shuts here, rotating
+   rather than swapping glyph. */
+.mig-picker .twisty, .mig-report-head .twisty {
+  display: flex; align-items: center; color: var(--fg-dim);
 }
-.mig-side-toggle:hover { color: var(--fg); }
-/* The same caret the tree uses, rotating rather than swapping glyph, so open
-   and shut cannot drift apart. */
-.mig-side-toggle .twisty { display: flex; align-items: center; color: var(--fg-dim); }
-.mig-side-toggle .twisty svg { width: 12px; height: 12px; transition: transform .12s ease; }
-.mig-side-toggle .twisty.open svg { transform: rotate(90deg); }
-.mig-side-body { overflow: auto; padding-bottom: 4px; }
-/* Rows read as tree rows here: same size, same hover, indented under the file. */
-.mig-side .mig-project-head { padding: 3px 10px; }
-.mig-side .mig-project-name { font-weight: 600; font-size: 12.5px; }
-.mig-side .mig-envrow { padding: 3px 10px 3px 22px; font-size: 12.5px; }
-.mig-side .mig-env-target { display: none; }
-.mig-side .mig-project-more { opacity: 0; }
-.mig-side .mig-project-head:hover .mig-project-more { opacity: 1; }
-.mig-side .mig-empty { padding: 8px 10px; }
+.mig-picker .twisty svg, .mig-report-head .twisty svg {
+  width: 12px; height: 12px; transition: transform .12s ease;
+}
+.mig-report-head .twisty.open svg,
+.mig-picker[aria-expanded="true"] .twisty svg { transform: rotate(90deg); }
+/* How many are pending, on the rail button, open or shut. Red when one has
+   failed: that blocks every apply until it is repaired. */
+.rail-badge {
+  position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px;
+  padding: 0 4px; border-radius: 8px; box-sizing: border-box;
+  font: 600 9.5px/15px system-ui, sans-serif; text-align: center;
+  color: var(--bg-raised); background: var(--warn-fg);
+}
+.rail-badge.bad { background: var(--danger-fg); }
+.mig-pane-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 
-/* The view. It gets the main area's width, which is the point: a migration
-   list is a table, and in the pane it had to drop the date and the state. */
+/* The environment picker: the project and environment rows the sidebar drew,
+   in a popover under a button that names the choice. */
+.mig-pick-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 9px; border-bottom: 1px solid var(--border);
+}
+.mig-picker {
+  flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font: inherit; font-size: 12px; color: var(--fg-strong); cursor: pointer;
+  background: var(--btn-bg); border: 1px solid var(--border-dashed); border-radius: 6px; padding: 3px 9px;
+}
+.mig-picker:hover { background: var(--btn-bg-hover); }
+#mig-picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mig-picker-pop {
+  position: absolute; left: 8px; right: 8px; top: 38px; z-index: 20;
+  max-height: 60%; overflow: auto; padding: 4px 0;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
+.mig-picker-pop .mig-project-head { padding: 3px 10px; }
+.mig-picker-pop .mig-project-name { font-weight: 600; font-size: 12.5px; }
+.mig-picker-pop .mig-envrow { padding: 3px 10px 3px 22px; font-size: 12.5px; }
+.mig-picker-pop .mig-project-more { opacity: 0; }
+/* Nothing to choose from: the button already says "No projects yet", and an
+   empty bordered sliver under it says less than nothing. */
+.mig-picker-pop:empty { display: none; }
+.mig-picker-pop .mig-project-head:hover .mig-project-more,
+.mig-picker-pop .mig-project-more:focus-visible { opacity: 1; }
+
+/* Flyway's report on the last run, under the list. Capped so a long report
+   cannot push the migrations off the panel; it scrolls within its share. */
+.mig-report {
+  flex: 0 0 auto; max-height: 40%; min-height: 0;
+  display: flex; flex-direction: column; border-top: 1px solid var(--border);
+}
+.mig-report-head {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px;
+  padding: 4px 8px 4px 4px; border: none; background: var(--bg-raised);
+  cursor: pointer; text-align: left; color: var(--fg-dim);
+  font: 600 10.5px/1.4 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .4px;
+}
+.mig-report-head:hover { color: var(--fg); }
+.mig-report-op { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.mig-report.shut .flyway-body { display: none; }
+
+/* The view, in the panel since Stage 28. */
 .mig-view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .mig-view .mig-env { border-bottom: none; padding-bottom: 0; }
 /* The tree's "the dictionary describes this" mark (Stage 25).
@@ -386,7 +412,7 @@ body {
   padding: 5px 12px;
 }
 .mig-view .mig-when {
-  width: 160px; padding-right: 12px; color: var(--fg-dim);
+  width: 118px; padding-right: 12px; color: var(--fg-dim);
   font-size: 11px; font-family: var(--mono);
 }
 .mig-view .mig-group-head { padding: 6px 12px; }
@@ -395,19 +421,9 @@ body {
 .mig-uptohere { font-family: system-ui, sans-serif; opacity: 0; }
 .mig-row:hover .mig-uptohere, .mig-uptohere:focus-visible { opacity: 1; }
 
-.stab.stab-view .stab-origin { color: var(--fg-dim); opacity: 1; }
-
 /* The project list (Stage 17). Environments are rows, like databases in the
    schema tree, and each says which saved connection it is — the colour is what
-   says "this is prod" before anybody presses Apply. Capped so a long list
-   cannot push the migrations off the pane. */
-#editor[hidden] { display: none; }
-
-.mig-projects {
-  max-height: 40%; overflow: auto; flex: 0 0 auto;
-  border-bottom: 1px solid var(--border); padding: 2px 0;
-}
-.mig-projects:empty { display: none; }
+   says "this is prod" before anybody presses Apply. */
 .mig-project-head {
   display: flex; align-items: center; gap: 6px; padding: 5px 9px 2px;
 }
@@ -1656,7 +1672,8 @@ button .spinner {
 
 /* --- Stage 26: the result pane's header -------------------------------- */
 
-/* Built from `.pane-head` and the sidebar's `.mig-side-toggle`, because this is
+/* Built from `.pane-head` and the collapsing header the migrations panel now
+   wears (`.mig-report-head`), because this is
    the third thing in the app that collapses and a third look would be a third
    thing to learn. */
 .res-head {
@@ -1691,8 +1708,7 @@ button .spinner {
 .results-body { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 #main.results-shut .results-body { display: none; }
 
-/* --- L3: Flyway's output, where the grid would be ----------------------- */
-.flyway-pane { display: flex; flex-direction: column; min-height: 0; flex-grow: 1; }
+/* --- L3: Flyway's output, in the migrations panel since Stage 28 -------- */
 .flyway-body {
   flex-grow: 1; overflow: auto; padding: 8px 12px;
   scrollbar-gutter: stable;

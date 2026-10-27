@@ -9,13 +9,21 @@
   <body>
     <!-- `chat-closed` from the first byte: the class is what zeroes the two
          right-hand grid tracks, and adding it from script would paint one
-         frame with a 380px gap in it. -->
-    <div id="app" class="chat-closed">
+         frame with a 380px gap in it. `mig-shut` likewise: the migrations
+         panel starts shut (Stage 28). -->
+    <div id="app" class="chat-closed mig-shut">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
         <!-- Icons are injected from src/icons.ts, so the drawings live in one
              place rather than being duplicated as markup here. -->
         <button id="btn-assistant" class="rail-cog" type="button" title="Ask the assistant (Ctrl+K)"></button>
+        <!-- Stage 28. Opens the migrations panel, and carries how many are
+             pending once a reading exists — the one thing worth seeing
+             without opening it. -->
+        <button id="btn-migrations" class="rail-cog" type="button"
+                title="Migrations (Ctrl+Shift+M)" aria-pressed="false" aria-controls="mig-pane">
+          <span id="mig-pending" class="rail-badge" hidden></span>
+        </button>
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
         <button id="btn-schema" class="rail-cog" type="button"
                 title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
@@ -41,18 +49,6 @@
           <span id="tree-filter-count" class="filter-count" hidden></span>
         </div>
         <div id="tree" class="tree"></div>
-        <!-- Stage 18: projects live where choosing happens. Hidden in the pane
-             layout, which keeps them on the other side of the window. -->
-        <section id="mig-side" class="mig-side">
-          <div class="mig-side-head">
-            <button id="mig-side-toggle" class="mig-side-toggle" type="button" aria-expanded="true">
-              <span class="twisty open" id="mig-side-caret"></span><span>Migrations</span>
-            </button>
-            <button id="btn-mig-side-add" class="mini" type="button"
-                    title="Add a flyway.toml">Add&hellip;</button>
-          </div>
-          <div id="mig-side-body" class="mig-side-body"></div>
-        </section>
       </aside>
 
       <div id="vsplit" class="splitter splitter-v" title="Drag to resize"></div>
@@ -96,27 +92,6 @@
             </label>
           </div>
           <div id="editor"></div>
-          <!-- The migrations view: shown in place of the editor while a
-               migrations tab is in front. Same strip, same window, so moving
-               between a migration and a query is a tab click. -->
-          <div id="mig-view" class="mig-view" hidden>
-            <div id="mig-view-env" class="mig-env"></div>
-            <div class="mig-view-actions" id="mig-view-actions">
-              <button id="btn-mig-view-apply" class="mini" hidden>Apply</button>
-              <button id="btn-mig-view-repair" class="mini" hidden>Repair schema history</button>
-              <button id="btn-mig-view-refresh" class="mini"
-                      title="Re-read the project and ask Flyway again">Refresh</button>
-            </div>
-            <!-- L2. Shown only while Flyway is running. It says what we
-                 actually know — the operation, the environment, which
-                 migrations were asked for, and how long it has been — and says
-                 plainly that Flyway reports at the end rather than as it goes,
-                 because `-outputType=json` gives one document when it
-                 finishes. There is no Stop: killing a JVM part-way through a
-                 migration is how a schema history ends up locked. -->
-            <div id="mig-progress" class="mig-progress" hidden></div>
-            <div id="mig-view-list" class="mig-list"></div>
-          </div>
         </section>
 
         <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>
@@ -155,26 +130,12 @@
           <div id="results-body" class="results-body">
             <!-- A finished job's report (Stage 23). In the strip's slot, because
                  a run ends by turning one into the other — but a *band* rather
-                 than a replacement for the grid: `#flyway-pane` replaces it
-                 because a migrations tab has no result set, and this is not that
-                 case. Outside the tab system, so switching tabs and running
+                 than a replacement for the grid. Outside the tab system, so switching tabs and running
                  queries leave it alone, which is the whole point: today's export
                  report goes into `#grid` and `onActivate` repaints that. -->
             <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
             <div id="tabs" class="tabs"></div>
             <div id="grid" class="grid-host" tabindex="0"></div>
-            <!-- L3. A migrations tab has no result set — its answers are
-                 sentences and a report — so the pane that holds the SQL grid
-                 holds Flyway's output instead. It replaces the grid rather than
-                 sitting beside it: two scrolling regions in one tab, one of them
-                 always empty, is worse than a swap. -->
-            <!-- No header of its own since Stage 26: the pane header above says
-                 "Flyway output" and carries the operation, and its own Hide
-                 button was a second way to do the same thing a few pixels
-                 lower. -->
-            <section id="flyway-pane" class="flyway-pane" hidden>
-              <div id="flyway-body" class="flyway-body" tabindex="0"></div>
-            </section>
             <!-- Two rows. The note used to sit between the status chips and the
                  buttons, which left it a few characters wide: the chips wrapped
                  into a vertical stack to make room, and the sentence was
@@ -195,6 +156,67 @@
           </div>
         </section>
       </main>
+
+      <!-- Stage 28. Migrations as a panel of their own, docked on the right
+           like the assistant, so reading them never hides the editor. Shut, it
+           is gone, as the assistant is; its rail button opens it. -->
+      <div id="migsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+
+      <section id="mig-pane" class="mig-pane" aria-label="Migrations" hidden>
+        <div class="pane-head">
+          <span class="chat-title">Migrations</span>
+          <button type="button" id="mig-close" class="mini"
+                  title="Close migrations (Ctrl+Shift+M)" aria-label="Close migrations">
+            &times;
+          </button>
+        </div>
+        <div id="mig-pane-body" class="mig-pane-body">
+          <!-- Which project and environment, chosen here rather than in the
+               sidebar: the picker lists the rows the sidebar used to draw,
+               matches and errors included. -->
+          <div class="mig-pick-row">
+            <button type="button" id="mig-picker" class="mig-picker"
+                    aria-haspopup="true" aria-expanded="false" aria-controls="mig-picker-pop">
+              <span id="mig-picker-label">Choose an environment</span>
+              <span class="twisty" id="mig-picker-caret"></span>
+            </button>
+            <button id="btn-mig-add" class="mini" type="button"
+                    title="Add a flyway.toml">Add&hellip;</button>
+          </div>
+          <div id="mig-picker-pop" class="mig-picker-pop" hidden></div>
+          <div id="mig-view" class="mig-view">
+            <div id="mig-view-env" class="mig-env"></div>
+            <div class="mig-view-actions" id="mig-view-actions">
+              <button id="btn-mig-view-apply" class="mini" hidden>Apply</button>
+              <button id="btn-mig-view-repair" class="mini" hidden>Repair schema history</button>
+              <button id="btn-mig-view-refresh" class="mini"
+                      title="Re-read the project and ask Flyway again">Refresh</button>
+            </div>
+            <!-- L2. Shown only while Flyway is running. It says what we
+                 actually know — the operation, the environment, which
+                 migrations were asked for, and how long it has been — and says
+                 plainly that Flyway reports at the end rather than as it goes,
+                 because `-outputType=json` gives one document when it
+                 finishes. There is no Stop: killing a JVM part-way through a
+                 migration is how a schema history ends up locked. -->
+            <div id="mig-progress" class="mig-progress" hidden></div>
+            <div id="mig-view-list" class="mig-list"></div>
+          </div>
+          <!-- Flyway's own account of the last Apply or Repair on this
+               environment. It was the result pane's, in place of the grid,
+               while a migrations tab was in front; with no tab, it is this
+               panel's, and the result pane is about SQL only. -->
+          <section id="mig-report" class="mig-report">
+            <button type="button" id="mig-report-toggle" class="mig-report-head"
+                    aria-expanded="true" aria-controls="flyway-body">
+              <span class="twisty open" id="mig-report-caret"></span>
+              <span class="mig-report-title">Last run</span>
+              <span id="mig-report-op" class="mig-report-op"></span>
+            </button>
+            <div id="flyway-body" class="flyway-body" tabindex="0"></div>
+          </section>
+        </div>
+      </section>
 
       <!-- The assistant, docked rather than modal.
            It was a `showModal()` dialog, which meant you could not click the

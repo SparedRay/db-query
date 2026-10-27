@@ -13,38 +13,15 @@ import { emptySelection, type GridSelection } from "./grid";
  * What a tab *is*.
  *
  * `sql` is every tab there has ever been: an editor buffer with its own
- * results. `migrations` is a view onto one Flyway project environment
- * (Stage 18) — no buffer, no results of its own, and no connection.
+ * results. `dictionary` is an **editor** tab that runs nothing: it holds the
+ * TOML file saying what a database's tables and columns mean (Stage 25) — the
+ * editor with the SQL controls off and TOML in place of SQL.
+ *
+ * There was a third, `migrations`: a view onto one Flyway project environment
+ * shown in place of the editor (Stage 18). Since Stage 28 that view is a panel
+ * docked on the right, so no tab is anything but an editor.
  */
-/**
- * `dictionary` is an **editor** tab that runs nothing: it holds the TOML file
- * saying what a database's tables and columns mean (Stage 25). Unlike
- * `migrations`, which replaces the editor with a view, this one *is* the
- * editor — with the SQL controls off and TOML in place of SQL.
- */
-export type TabKind = "sql" | "migrations" | "dictionary";
-
-/** Which project environment a `migrations` tab is looking at. */
-export interface MigrationsRef {
-  projectId: string;
-  environment: string;
-  /**
-   * What Flyway last did here, so switching away and back shows it again.
-   *
-   * A migrations tab has no `result` — its outcomes are sentences, not rows —
-   * so without this the grid either kept the previous tab's result set or
-   * forgot the answer the moment you looked at something else.
-   */
-  lastOutcome?: string;
-  /**
-   * Flyway's own report from that run, as the pane shows it.
-   *
-   * Per tab rather than global: the backend keeps only the newest run, and a
-   * tab on `uat` must not show the report from the one you just did on
-   * `development`.
-   */
-  lastReport?: import("./api").FlywayLastRun | null;
-}
+export type TabKind = "sql" | "dictionary";
 
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
@@ -52,15 +29,12 @@ export interface ScriptTab {
   /**
    * The connection this tab belongs to, for life. Tabs never migrate.
    *
-   * **`null` means it belongs to none of them** and is shown in every strip,
-   * including when nothing is connected. Only a `migrations` tab is global so
-   * far, because a Flyway project needs no connection open (Stage 17 §2) and a
-   * per-connection strip would have put it back behind one.
+   * **`null` means it belongs to none of them** and would be shown in every
+   * strip. Only Stage 18's migrations tab ever was, and it is gone (Stage 28);
+   * the case is still handled so a global tab can come back without surgery.
    */
   connectionId: string | null;
   kind: TabKind;
-  /** Set for `migrations` tabs, `null` for `sql` ones. */
-  migrations: MigrationsRef | null;
   title: string;
   filePath: string | null;
   dialect: string;
@@ -406,69 +380,6 @@ export class TabManager {
     return n;
   }
 
-  /**
-   * Open the migrations view, or re-point the one already open.
-   *
-   * **One at a time.** The sidebar holds the choosing, so a second tab would
-   * only put two Apply buttons for two different databases on screen at once —
-   * the confusion Stage 17 set out to remove.
-   */
-  openMigrations(ref: MigrationsRef, title: string): ScriptTab {
-    const open = this.tabs.find((t) => t.kind === "migrations");
-    if (open) {
-      open.migrations = ref;
-      open.title = title;
-      if (this.activeId === open.id) {
-        // Already in front: `activate` would return early, and the caller still
-        // needs the strip redrawn and the view re-rendered.
-        this.render();
-        this.hooks.onActivate(open);
-      } else {
-        this.activate(open.id);
-      }
-      return open;
-    }
-
-    const state = createEditorState("");
-    const tab: ScriptTab = {
-      id: `t${++idSeq}`,
-      connectionId: null,
-      kind: "migrations",
-      migrations: ref,
-      title,
-      filePath: null,
-      dialect: "mysql",
-      encoding: "utf-8",
-      lineEnding: "lf",
-      bom: false,
-      mtimeMs: null,
-      baseline: state.doc,
-      state,
-      ...emptyResultState(),
-      sourceTable: null,
-      busy: false,
-      activeDb: null,
-      serverConnId: 0,
-      untitledNumber: null,
-      origin: "own",
-    };
-    this.tabs.push(tab);
-    // Deliberately not `onCreated`: that registers a backend session for a tab
-    // that will never run a statement.
-    this.activate(tab.id);
-    return tab;
-  }
-
-  /** The migrations tab, if one is open. */
-  migrationsTab(): ScriptTab | null {
-    return this.tabs.find((t) => t.kind === "migrations") ?? null;
-  }
-
-  closeMigrations() {
-    const open = this.migrationsTab();
-    if (open) void this.close(open.id);
-  }
-
   create(opts?: {
     connectionId?: string;
     contents?: string;
@@ -502,7 +413,6 @@ export class TabManager {
       id: `t${++idSeq}`,
       connectionId,
       kind: opts?.kind ?? "sql",
-      migrations: null,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
       // From the connection, not a constant. This field has been written to
@@ -649,7 +559,6 @@ export class TabManager {
         id: `t${++idSeq}`,
         connectionId,
         kind: "sql",
-        migrations: null,
         title: spec.title,
         filePath: spec.filePath,
         dialect: spec.dialect,
@@ -788,19 +697,8 @@ export class TabManager {
         "stab" +
         (tab.id === this.activeId ? " active" : "") +
         (this.isDirty(tab) ? " dirty" : "") +
-        (tab.kind === "migrations" ? " stab-view" : "") +
         (tab.origin === "own" ? "" : " external");
       el.title = tab.filePath ?? tab.title;
-
-      if (tab.kind === "migrations") {
-        // The same icon as the sidebar section it was opened from, so the tab
-        // is recognisable as that view rather than as a file someone opened.
-        const mark = document.createElement("span");
-        mark.className = "stab-origin";
-        mark.dataset.origin = "migrations";
-        mark.append(icon("migrations"));
-        el.append(mark);
-      }
 
       if (tab.origin !== "own") {
         // Before the label, so it reads as a prefix on the tab rather than as
