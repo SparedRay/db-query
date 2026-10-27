@@ -159,17 +159,40 @@ function flyway(initial: unknown[], extra: Record<string, unknown> = {}) {
   return merged;
 }
 
-/** The sidebar section, with nothing connected and no environment opened. */
+/**
+ * Open the migrations panel from its rail button (Stage 28). Opening it asks Flyway
+ * about the remembered environment, as opening the old tab did.
+ */
+async function openPanel(page: Page) {
+  if (await page.locator("#mig-pane").isHidden()) await page.click("#btn-migrations");
+  await expect(page.locator("#mig-pane")).toBeVisible();
+}
+
+/** The environment picker, open: the project and environment rows. */
+async function picker(page: Page) {
+  await openPanel(page);
+  if (await page.locator("#mig-picker-pop").isHidden()) await page.click("#mig-picker");
+  const pop = page.locator("#mig-picker-pop");
+  await expect(pop).toBeVisible();
+  return pop;
+}
+
+/** Choose an environment from the picker. */
+async function chooseEnv(page: Page, env: string) {
+  await (await picker(page)).locator(`.mig-envrow[data-env="${env}"]`).click();
+}
+
+/** The panel open, with nothing connected. */
 async function openApp(page: Page, extra: Record<string, unknown> = {}) {
   await installBackend(page, flyway([project()], extra));
   await visit(page);
-  await expect(page.locator("#mig-side")).toBeVisible();
+  await openPanel(page);
 }
 
-/** …and `uat` opened as a tab, which is where the list lives. */
+/** …and `uat` chosen, with its list on screen. */
 async function withProject(page: Page, extra: Record<string, unknown> = {}) {
   await openApp(page, extra);
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await page.locator(".mig").first().waitFor();
 }
 
@@ -186,13 +209,20 @@ const infoCalls = async (page: Page) =>
 
 
 
-test("with no projects the sidebar says what to do, and asks Flyway nothing", async ({ page }) => {
+test("with no projects the panel says what to do, and asks Flyway nothing", async ({ page }) => {
   await installBackend(page, flyway([]));
   await visit(page);
-  await expect(page.locator("#mig-side")).toBeVisible();
+  await openPanel(page);
 
   await expect(page.locator(".mig-empty")).toContainText(/No Flyway projects yet/);
   await expect(page.locator(".mig-empty")).toContainText(/No connection needs to be open/);
+
+  // Nothing to choose from and nothing that can have run: the picker's popover
+  // and the Last run section would both be empty boxes with a border on them.
+  await page.click("#mig-picker");
+  await expect(page.locator("#mig-picker-label")).toHaveText("No projects yet");
+  await expect(page.locator("#mig-picker-pop")).toBeHidden();
+  await expect(page.locator("#mig-report")).toBeHidden();
   await expect(page.locator(".mig-empty button")).toHaveText(/Add a project/);
   expect(await commandNames(page)).not.toContain("flyway_info");
 });
@@ -200,7 +230,8 @@ test("with no projects the sidebar says what to do, and asks Flyway nothing", as
 test("adding a project stores its path and lands on its environment", async ({ page }) => {
   await installBackend(page, flyway([]));
   await visit(page);
-  await page.click("#mig-side .mig-empty button");
+  await openPanel(page);
+  await page.click("#mig-pane-body .mig-empty button");
 
   await page.locator(".mig").first().waitFor();
   const added = (await calls(page)).find((c) => c.cmd === "flyway_add_project")!;
@@ -212,16 +243,17 @@ test("adding a project stores its path and lands on its environment", async ({ p
   expect(last(await infoCalls(page))).toMatchObject({ projectId: "fp1", environment: "uat" });
 });
 
-test("the section's Add button adds a project too", async ({ page }) => {
+test("the panel's Add button adds a project too", async ({ page }) => {
   await installBackend(page, flyway([]));
   await visit(page);
-  await page.click("#btn-mig-side-add");
-  await expect(page.locator("#mig-side .mig-envrow")).toHaveCount(2);
+  await openPanel(page);
+  await page.click("#btn-mig-add");
+  await expect((await picker(page)).locator(".mig-envrow")).toHaveCount(2);
 });
 
 test("a project can be removed, and the file is not touched", async ({ page }) => {
   await withProject(page);
-  await page.click("#mig-side .mig-project-more");
+  await (await picker(page)).locator(".mig-project-more").click();
   await expect(page.locator("dialog.ask")).toContainText(PATH);
   await page.locator('dialog.ask button:has-text("Remove from list")').click();
 
@@ -244,10 +276,10 @@ test("a project whose file cannot be read stays listed and says why", async ({ p
     ]),
   );
   await visit(page);
-  await expect(page.locator("#mig-side")).toBeVisible();
+  await openPanel(page);
 
   await expect(page.locator(".mig-project-error")).toContainText("No such file or directory");
-  await expect(page.locator("#mig-side .mig-project-name")).toHaveText("flyway.toml");
+  await expect((await picker(page)).locator(".mig-project-name")).toHaveText("flyway.toml");
   expect(await commandNames(page)).not.toContain("flyway_info");
 });
 
@@ -261,12 +293,12 @@ test("a project whose file cannot be read stays listed and says why", async ({ p
 test("each environment names the saved connection it is, or says it is none", async ({ page }) => {
   await withProject(page);
 
-  const uat = page.locator('#mig-side .mig-envrow[data-env="uat"]');
+  const uat = (await picker(page)).locator('.mig-envrow[data-env="uat"]');
   await expect(uat.locator(".mig-env-target")).toHaveText("uat.example.com:3306");
   await expect(uat.locator(".mig-match-name")).toHaveText("UAT");
   await expect(uat.locator(".conn-dot")).toHaveCSS("background-color", "rgb(239, 68, 68)");
 
-  const dev = page.locator('#mig-side .mig-envrow[data-env="development"]');
+  const dev = (await picker(page)).locator('.mig-envrow[data-env="development"]');
   await expect(dev.locator(".mig-match")).toHaveText("no saved connection");
 
   // The selected one is said in full above the list.
@@ -292,17 +324,17 @@ test("an environment matching several connections shows the first and how many m
       warning: null,
     }),
   });
-  await expect(page.locator("#mig-side .mig-match-name")).toHaveText("UAT +1");
+  await expect((await picker(page)).locator(".mig-match-name")).toHaveText("UAT +1");
 });
 
 // --------------------------------------------------- choosing an environment
 
 test("choosing another environment asks Flyway about it, and is remembered", async ({ page }) => {
   await withProject(page);
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await chooseEnv(page, "development");
 
-  await expect(page.locator('#mig-side .mig-envrow[data-env="development"]')).toHaveClass(/selected/);
-  await expect(page.locator('#mig-side .mig-envrow[data-env="uat"]')).not.toHaveClass(/selected/);
+  await expect((await picker(page)).locator('.mig-envrow[data-env="development"]')).toHaveClass(/selected/);
+  await expect((await picker(page)).locator('.mig-envrow[data-env="uat"]')).not.toHaveClass(/selected/);
   await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
 
   const chosen = (await calls(page)).filter((c) => c.cmd === "flyway_select_environment");
@@ -333,8 +365,8 @@ test("an answer for an environment you have left is dropped", async ({ page }) =
     }),
   );
   await visit(page);
-  await expect(page.locator("#mig-side")).toBeVisible();
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await openPanel(page);
+  await chooseEnv(page, "development");
 
   await expect(page.locator(".mig .d")).toHaveText("dev's own migration");
   // Long enough for the slow uat answer to have arrived and been ignored.
@@ -353,12 +385,12 @@ test("out of order belongs to the environment, not to the window", async ({ page
   await page.locator("#mig-out-of-order").check();
   await expect.poll(async () => last(await infoCalls(page))?.outOfOrder).toBe(true);
 
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await chooseEnv(page, "development");
   await expect(page.locator("#mig-out-of-order")).not.toBeChecked();
   await expect.poll(async () => last(await infoCalls(page))?.environment).toBe("development");
   expect(last(await infoCalls(page))?.outOfOrder).toBe(false);
 
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await expect(page.locator("#mig-out-of-order")).toBeChecked();
 });
 
@@ -393,7 +425,7 @@ const V2_FILE = {
 
 test("clicking a migration opens its SQL in a tab, without binding the file", async ({ page }) => {
   await connect(page, flyway([project()], V2_FILE));
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await page.locator('.mig[data-state="pending"]').click();
 
   await expect(page.locator("#editor .cm-content")).toContainText("ADD colour");
@@ -429,7 +461,7 @@ test("Flyway's own refusal is what the list shows", async ({ page }) => {
       );
     },
   });
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await expect(page.locator(".mig-empty")).toContainText(/run repair to fix the schema history/);
 });
 
@@ -465,8 +497,8 @@ test("out of order re-asks Flyway with the flag", async ({ page }) => {
 
 test("the view says which project file and folder it is using", async ({ page }) => {
   await withProject(page);
-  await expect(page.locator("#mig-side .mig-project-name")).toHaveText("Flyway Connections");
-  await expect(page.locator("#mig-side .mig-project-name")).toHaveAttribute("title", PATH);
+  await expect((await picker(page)).locator(".mig-project-name")).toHaveText("Flyway Connections");
+  await expect((await picker(page)).locator(".mig-project-name")).toHaveAttribute("title", PATH);
   await expect(page.locator(".mig-proj-where")).toContainText("flyway.toml");
   await expect(page.locator(".mig-proj-where")).toContainText("/p");
 });
@@ -524,7 +556,7 @@ test("Apply names the versions and the target, and runs nothing until confirmed"
 /** Unmatched is allowed — often the migration account — but said plainly. */
 test("applying to an environment that is none of your connections says so", async ({ page }) => {
   await withProject(page, { flyway_info: () => PENDING_ONLY });
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await chooseEnv(page, "development");
   await expect(page.locator("#btn-mig-view-apply")).toBeEnabled();
   await page.click("#btn-mig-view-apply");
 
@@ -614,7 +646,7 @@ test("after an apply, an open connection that is this environment is refreshed",
   const connected = (await calls(page)).find((c) => c.cmd === "connect")!;
   connId = (connected.args.profile as { id: string }).id;
 
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await page.locator(".mig").first().waitFor();
   await page.click("#btn-mig-view-apply");
   await page.locator('dialog.ask button:has-text("Apply to uat")').click();
@@ -641,7 +673,7 @@ test("a read-only match is not offered an apply or a repair, and says which", as
     }),
   });
 
-  await expect(page.locator('#mig-side .mig-envrow[data-env="uat"] .chip')).toHaveText("read-only");
+  await expect((await picker(page)).locator('.mig-envrow[data-env="uat"] .chip')).toHaveText("read-only");
   await expect(page.locator("#btn-mig-view-apply")).toBeDisabled();
   await expect(page.locator("#btn-mig-view-apply")).toHaveAttribute("title", /“UAT”.*read-only/);
   await expect(page.locator("#btn-mig-view-repair")).toBeDisabled();
@@ -830,7 +862,7 @@ test("Repair is urged when Flyway asks for one, even with nothing failed", async
   await expect(page.locator("#btn-mig-view-repair")).toHaveAttribute("title", /asked for a repair/);
 
   // Asked for *this* environment. Moving to another must not carry it along.
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await chooseEnv(page, "development");
   await expect(page.locator("#btn-mig-view-repair")).not.toHaveClass(/urge/);
 });
 
@@ -854,25 +886,28 @@ test("an unrelated refusal leaves Repair where it was", async ({ page }) => {
 
 // ------------------------------------------- the view, and what it is not
 
-/** G2. One tab, re-pointed — never one per environment. */
-test("choosing an environment opens one tab, and another re-points it", async ({ page }) => {
-  await withProject(page);
+/** D3/D8. One place, and the editor never leaves: no tab is opened for it. */
+test("choosing an environment shows it in the panel, and the editor stays", async ({ page }) => {
+  await connect(page, flyway([project()]));
+  await chooseEnv(page, "uat");
+  await page.locator(".mig").first().waitFor();
 
-  const strip = page.locator("#script-tabs .stab");
-  await expect(strip.filter({ hasText: "Migrations" })).toHaveCount(1);
-  await expect(strip.filter({ hasText: "Migrations · uat" })).toBeVisible();
-  await expect(page.locator("#mig-view")).toBeVisible();
-  await expect(page.locator("#editor")).toBeHidden();
+  await expect(page.locator("#mig-picker-label")).toHaveText("Flyway Connections \u00b7 uat");
+  await expect(page.locator("#mig-picker-pop")).toBeHidden();
+  await expect(page.locator("#editor")).toBeVisible();
+  await expect(page.locator("#editor-head")).toBeVisible();
+  await expect(page.locator("#grid")).toBeVisible();
+  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations" })).toHaveCount(0);
 
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
-  await expect(strip.filter({ hasText: "Migrations" })).toHaveCount(1);
-  await expect(strip.filter({ hasText: "Migrations · development" })).toBeVisible();
+  await chooseEnv(page, "development");
+  await expect(page.locator("#mig-picker-label")).toHaveText("Flyway Connections \u00b7 development");
+  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations" })).toHaveCount(0);
 });
 
-/** G3. It belongs to no connection, so every connection's strip has it. */
-test("the migrations tab survives switching connection", async ({ page }) => {
+/** It belongs to no connection, so switching connection leaves it alone. */
+test("the panel stays put when the connection changes", async ({ page }) => {
   await connect(page, flyway([project()]));
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await page.locator(".mig").first().waitFor();
 
   // A second connection, with its own workspace.
@@ -882,45 +917,137 @@ test("the migrations tab survives switching connection", async ({ page }) => {
   await page.click("#conn-ok");
   await page.locator("#conn-dialog").waitFor({ state: "hidden" });
 
-  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations · uat" })).toBeVisible();
-  // Its own SQL tab is in front, not the view.
+  await expect(page.locator("#mig-pane-body")).toBeVisible();
+  await expect(page.locator("#mig-picker-label")).toHaveText("Flyway Connections \u00b7 uat");
+  await expect(page.locator(".mig").first()).toBeVisible();
   await expect(page.locator("#editor")).toBeVisible();
-  await expect(page.locator("#mig-view")).toBeHidden();
 });
 
-test("closing the tab puts the editor back", async ({ page }) => {
+/**
+ * D1. Shut from its rail button, its close button and the key, and it gives
+ * all of its width back to the editor — nothing is left on the window edge.
+ */
+test("the panel shuts from the rail, its close button and the key, and gives its width back", async ({ page }) => {
   await withProject(page);
-  await page.locator("#script-tabs .stab").filter({ hasText: "Migrations" }).locator(".stab-mark").click();
+  const pane = page.locator("#mig-pane");
+  const button = page.locator("#btn-migrations");
+  const editorOpen = (await page.locator("#editor-pane").boundingBox())!.width;
+  expect((await pane.boundingBox())!.width).toBeGreaterThan(280);
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+  await expect(button).toHaveClass(/\bon\b/);
+  await expect(page.locator("#migsplit")).toBeVisible();
 
-  await expect(page.locator("#mig-view")).toBeHidden();
-  await expect(page.locator("#editor")).toBeVisible();
-  await expect(page.locator("#script-tabs .stab").filter({ hasText: "Migrations" })).toHaveCount(0);
+  await button.click();
+  await expect(pane).toBeHidden();
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#migsplit")).toBeHidden();
+  // Both tracks go to zero: the editor takes the panel and its seam.
+  const editorShut = (await page.locator("#editor-pane").boundingBox())!.width;
+  expect(editorShut).toBeGreaterThan(editorOpen + 280);
+
+  await page.keyboard.press("Control+Shift+M");
+  await expect(pane).toBeVisible();
+  await page.click("#mig-close");
+  await expect(pane).toBeHidden();
+  await page.keyboard.press("Control+Shift+M");
+  await expect(pane).toBeVisible();
+  await page.keyboard.press("Control+Shift+M");
+  await expect(pane).toBeHidden();
+  // Plain Ctrl+M is the editor's, not the panel's.
+  await page.keyboard.press("Control+m");
+  await expect(pane).toBeHidden();
 });
 
-/** G5. A view has no buffer: the buffer's controls must not act on it. */
-test("Run, Run all and Format do nothing while the view is in front", async ({ page }) => {
-  await connect(page, flyway([project()]));
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
-  await page.locator(".mig").first().waitFor();
+/** D2. The seam drags the width, measured from the panel's own edge. */
+test("the panel's seam drags its width", async ({ page }) => {
+  await withProject(page);
+  const pane = page.locator("#mig-pane");
+  const before = (await pane.boundingBox())!.width;
+  const seam = (await page.locator("#migsplit").boundingBox())!;
+  await page.mouse.move(seam.x + seam.width / 2, seam.y + seam.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(seam.x - 80, seam.y + seam.height / 2, { steps: 4 });
+  await page.mouse.up();
+  const after = (await pane.boundingBox())!.width;
+  expect(after).toBeGreaterThan(before + 60);
 
-  // The buffer's toolbar goes with the buffer: Run, Run all and Format belong
-  // to an editor, and there is none in front.
-  await expect(page.locator("#editor-head")).toBeHidden();
-  await page.keyboard.press("Control+Shift+F");
-  await page.keyboard.press("Control+s");
-  await page.keyboard.press("Control+Enter");
-
-  const names = await commandNames(page);
-  expect(names).not.toContain("run_script");
-  expect(names).not.toContain("format_sql");
-  expect(names).not.toContain("save_file");
+  // Shut and open again: the dragged width survives.
+  await page.click("#btn-migrations");
+  await page.click("#btn-migrations");
+  expect(Math.abs((await pane.boundingBox())!.width - after)).toBeLessThan(2);
 });
 
-/** G6. A view is reopened from the sidebar, never restored from the session. */
-test("the migrations tab is never written to the session", async ({ page }) => {
-  await connect(page, flyway([project()]));
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+/** …and choosing one brings it back, with its own account in it. */
+test("an environment restores the Last run section", async ({ page }) => {
+  await installBackend(page, flyway([]));
+  await visit(page);
+  await openPanel(page);
+  await expect(page.locator("#mig-report")).toBeHidden();
+
+  await page.click("#mig-pane-body .mig-empty button");
   await page.locator(".mig").first().waitFor();
+  await expect(page.locator("#mig-report")).toBeVisible();
+  await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
+});
+
+/**
+ * Decision 5, and the seam's own measurement.
+ *
+ * Both right-hand panels can be open at once, migrations the inner one — it is
+ * about the SQL in the editor, so it sits nearer it. And the seam measures from
+ * **the panel's own right edge**, not the window's, which only matters once
+ * something is open beyond it: measured from the window, the assistant's 380px
+ * offsets every drag and the panel jumps to the seam's ceiling instead of
+ * following the pointer. §7.1 records that bug and its fix; nothing caught it,
+ * because every other drag here happens with the assistant shut.
+ */
+test("both right-hand panels open at once, and the seam still measures from the panel", async ({
+  page,
+}) => {
+  await withProject(page);
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-pane")).toBeVisible();
+  await expect(page.locator("#mig-pane")).toBeVisible();
+
+  const mig = (await page.locator("#mig-pane").boundingBox())!;
+  const chat = (await page.locator("#chat-pane").boundingBox())!;
+  expect(mig.x + mig.width).toBeLessThanOrEqual(chat.x);
+
+  // Rightwards, which narrows it: the floor is 300px and nothing clamps this.
+  const seam = (await page.locator("#migsplit").boundingBox())!;
+  await page.mouse.move(seam.x + seam.width / 2, seam.y + seam.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(seam.x + 60, seam.y + seam.height / 2, { steps: 4 });
+  await page.mouse.up();
+
+  // 60px of pointer is 60px of panel. From the window it would have grown
+  // instead, to the ceiling, because the measurement would be 387px too wide.
+  const after = (await page.locator("#mig-pane").boundingBox())!.width;
+  expect(after).toBeLessThan(mig.width - 40);
+  expect(Math.abs(after - (mig.width - 60))).toBeLessThan(10);
+});
+
+/** The picker shuts by choosing, by Escape wherever focus is, and by a click away. */
+test("the environment picker shuts on Escape and on a click elsewhere", async ({ page }) => {
+  await withProject(page);
+  await picker(page);
+  // Focus is on the picker's button after the click, not inside the popover.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#mig-picker-pop")).toBeHidden();
+  await expect(page.locator("#mig-picker")).toHaveAttribute("aria-expanded", "false");
+
+  await picker(page);
+  await page.locator("#editor .cm-content").click();
+  await expect(page.locator("#mig-picker-pop")).toBeHidden();
+});
+
+/** D8. Nothing about migrations is a tab, so nothing of it reaches the session. */
+test("migrations are never written to the session", async ({ page }) => {
+  await connect(page, flyway([project()]));
+  await chooseEnv(page, "uat");
+  await page.locator(".mig").first().waitFor();
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.type("select 2");
 
   await expect
     .poll(async () => (await calls(page)).filter((c) => c.cmd === "save_session").length)
@@ -1015,15 +1142,63 @@ test("the row action does not open the file", async ({ page }) => {
   await expect.poll(async () => commandNames(page)).toContain("read_file");
 });
 
-test("the section collapses and expands from its caret", async ({ page }) => {
-  await openApp(page);
-  await page.click("#mig-side-toggle");
-  await expect(page.locator("#mig-side")).toHaveClass(/collapsed/);
-  await expect(page.locator("#mig-side-body")).toBeHidden();
+/** D7. Shut, the rail button says what is waiting — from a reading, never by asking. */
+test("shut, the rail button says how many are pending once a reading exists", async ({ page }) => {
+  await installBackend(page, flyway([project()], { flyway_info: () => TWO_PENDING }));
+  await visit(page);
+  // Nothing read yet: the button says nothing, and nothing asked Flyway.
+  await expect(page.locator("#mig-pending")).toBeHidden();
+  expect(await commandNames(page)).not.toContain("flyway_info");
 
-  await page.click("#mig-side-toggle");
-  await expect(page.locator("#mig-side")).not.toHaveClass(/collapsed/);
-  await expect(page.locator("#mig-side-body")).toBeVisible();
+  await openPanel(page);
+  await page.locator(".mig").first().waitFor();
+  await page.click("#btn-migrations");
+  await expect(page.locator("#mig-pane")).toBeHidden();
+  await expect(page.locator("#mig-pending")).toBeVisible();
+  await expect(page.locator("#mig-pending")).toHaveText("2");
+  await expect(page.locator("#mig-pending")).not.toHaveClass(/\bbad\b/);
+  await expect(page.locator("#btn-migrations")).toHaveAttribute("title", /2 pending/);
+});
+
+/**
+ * D7's other half, and why the badge is on the rail button rather than in the
+ * panel: it is **left showing while the panel is open**, because a badge that
+ * vanished on opening would read as "nothing pending". A failure is said in its
+ * own words and in red, since a failed migration blocks every apply until it
+ * is repaired.
+ */
+test("the badge says what failed, in red, and stays while the panel is open", async ({ page }) => {
+  await withProject(page);
+  const badge = page.locator("#mig-pending");
+
+  await expect(page.locator("#mig-pane")).toBeVisible();
+  await expect(badge).toBeVisible();
+  await expect(badge).toHaveText("1");
+  await expect(badge).toHaveClass(/\bbad\b/);
+  await expect(page.locator("#btn-migrations")).toHaveAttribute("title", /1 failed/);
+});
+
+/**
+ * And cleared the moment the environment changes, so a count never describes
+ * the environment you have left. `uat` has a failure; `development`'s answer is
+ * held, and in between the button has to say nothing rather than "1 failed".
+ */
+test("the badge is cleared while another environment is being read", async ({ page }) => {
+  const gate = held();
+  await withProject(page, {
+    flyway_info: (a: Record<string, unknown>) =>
+      a.environment === "development" ? gate.promise : MIGRATIONS,
+  });
+  const badge = page.locator("#mig-pending");
+  await expect(badge).toHaveText("1");
+
+  await chooseEnv(page, "development");
+  await expect(badge).toBeHidden();
+
+  gate.release(TWO_PENDING);
+  await expect(badge).toBeVisible();
+  await expect(badge).toHaveText("2");
+  await expect(badge).not.toHaveClass(/\bbad\b/);
 });
 
 // ------------------------------------------------------- waiting for Flyway
@@ -1168,7 +1343,7 @@ test("Repair shows the wait while it checks, before asking", async ({ page }) =>
  * with the editor, and activating a migrations tab returned before anything
  * repainted it — so somebody else's result set sat there looking like Flyway's.
  */
-test("opening migrations clears the editor's result set", async ({ page }) => {
+test("opening migrations leaves the editor's result set where it is", async ({ page }) => {
   await connect(
     page,
     flyway([project()], {
@@ -1182,36 +1357,31 @@ test("opening migrations clears the editor's result set", async ({ page }) => {
   await page.keyboard.press("Control+Enter");
   await expect(page.locator("#grid table")).toBeVisible();
 
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await expect(page.locator(".mig").first()).toBeVisible();
-  // Not the rows, and not silence either.
-  // The grid is not merely cleared — it is not the surface a migrations tab
-  // uses. Flyway's output pane is.
-  await expect(page.locator("#grid")).toBeHidden();
-  await expect(page.locator("#flyway-pane")).toBeVisible();
-  await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
+  // Since Stage 28 the two sit side by side: the query's rows stay in the grid,
+  // and Flyway's account is the panel's own.
+  await expect(page.locator("#grid table")).toBeVisible();
+  await expect(page.locator("#res-title")).toHaveText("Results");
+  await expect(page.locator("#mig-report #flyway-body")).toContainText("Nothing has run here yet");
 });
 
 /** And an outcome survives a trip to another tab and back. */
-test("what Flyway did is still there when you come back", async ({ page }) => {
+test("what Flyway did stays with its environment", async ({ page }) => {
   // Connected, so there is a SQL tab to switch away to: opening the
   // environment on its own creates the only tab there is.
   await connect(page, flyway([project()]));
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await page.locator(".mig").first().waitFor();
 
   await page.click("#btn-mig-view-repair");
   await page.locator('dialog.ask button:has-text("Repair uat")').click();
   await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
 
-  // Away to the SQL tab and back.
-  await page.locator("#script-tabs .stab").first().click();
-  // A SQL tab gets the grid back, and Flyway's pane goes away with its tab.
-  await expect(page.locator("#flyway-pane")).toBeHidden();
-  await expect(page.locator("#grid")).toBeVisible();
-
-  await page.locator('#script-tabs .stab:has-text("uat")').click();
-  await expect(page.locator("#flyway-pane")).toBeVisible();
+  // Another environment has its own (empty) account, and uat keeps its own.
+  await chooseEnv(page, "development");
+  await expect(page.locator("#flyway-body")).toContainText("Nothing has run here yet");
+  await chooseEnv(page, "uat");
   await expect(page.locator("#flyway-body")).toContainText("Removed failed migrations");
 });
 
@@ -1261,7 +1431,7 @@ test("a long version does not run over the description", async ({ page }) => {
 test("the first open of the tab waits with the loader, not a line of text", async ({ page }) => {
   const gate = held();
   await openApp(page, { flyway_info: () => gate.promise });
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
 
   const strip = page.locator("#mig-progress");
   await expect(strip).toBeVisible();
@@ -1418,20 +1588,18 @@ test("output that is not a report is shown as it came", async ({ page }) => {
  * still asserted is the same property — it can be shut, and it says which
  * output it is while shut.
  */
-test("the output pane collapses from the pane header, which says which it is", async ({ page }) => {
+test("the last run collapses from its own header, and the result pane never shows it", async ({ page }) => {
   await withProject(page);
-  const head = page.locator("#res-toggle");
-  await expect(page.locator("#res-title")).toHaveText("Flyway output");
+  // D6: the result pane is about SQL only.
+  await expect(page.locator("#res-title")).toHaveText("Results");
+  await expect(page.locator("#results-pane #flyway-body")).toHaveCount(0);
+
+  const head = page.locator("#mig-report-toggle");
   await expect(page.locator("#flyway-body")).toBeVisible();
   await expect(head).toHaveAttribute("aria-expanded", "true");
-
   await head.click();
   await expect(page.locator("#flyway-body")).toBeHidden();
   await expect(head).toHaveAttribute("aria-expanded", "false");
-  // Shut, the header is what says anything at all about this pane.
-  await expect(page.locator("#res-summary")).toBeVisible();
-  await expect(page.locator("#res-summary")).not.toBeEmpty();
-
   await head.click();
   await expect(page.locator("#flyway-body")).toBeVisible();
 });
@@ -1612,10 +1780,10 @@ test("Check first belongs to the environment, not to the window", async ({ page 
   await withProject(page, fingerprinted());
 
   await page.check("#mig-check-first");
-  await page.click('#mig-side .mig-envrow[data-env="development"]');
+  await chooseEnv(page, "development");
   await expect(page.locator("#mig-check-first")).not.toBeChecked();
 
-  await page.click('#mig-side .mig-envrow[data-env="uat"]');
+  await chooseEnv(page, "uat");
   await expect(page.locator("#mig-check-first")).toBeChecked();
 });
 
@@ -1711,7 +1879,7 @@ test("a failed apply still ends with a list on screen", async ({ page }) => {
  * simply cuts the last item off. No behavioural test can see that; every
  * button still works perfectly while being invisible.
  */
-test("the actions row fits its toggles and buttons on a narrow pane", async ({ page }) => {
+test("the actions row fits its toggles and buttons in the narrowest panel", async ({ page }) => {
   await withProject(page, fingerprinted());
 
   const row = page.locator("#mig-view-actions");
@@ -1724,7 +1892,8 @@ test("the actions row fits its toggles and buttons on a narrow pane", async ({ p
   ];
   for (const sel of items) await expect(row.locator(sel)).toBeVisible();
 
-  await page.setViewportSize({ width: 640, height: 760 });
+  // The narrowest the seam allows.
+  await page.evaluate(() => document.documentElement.style.setProperty("--mig-w-set", "300px"));
   for (const sel of items) await expect(row.locator(sel)).toBeVisible();
   const clipped = await row.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
   expect(clipped, "the actions row is overflowing, so something is cut off").toBe(false);
