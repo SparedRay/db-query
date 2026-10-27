@@ -70,7 +70,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, replaceRange,
   selectedText,
-  selectRange, setDialect, setEditorTheme, setLinting, setPlainToml, setSchema,
+  selectRange, setDialect, setEditorTheme, setLinting, setPlainToml, setSchema, setSchemaLoader,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -328,8 +328,43 @@ let browseLimit = 1000;
  *
  * Tree expansion still merges into this, which is what fills in the tables
  * beyond the backend\'s detail budget.
+ *
+ * **Nested by database since Stage 27**: `{database: {table: [columns]}}`,
+ * which is the shape `@codemirror/lang-sql` walks a dotted name through. Flat,
+ * it could only ever answer an unqualified name — so `FROM poc.orders`, with
+ * the database already selected, completed nothing at all.
  */
-const schemaMap: SQLNamespace = {};
+const schemaMap: Record<string, Record<string, string[]>> = {};
+
+/** One database\'s slot, created on first use. */
+function dbSlot(db: string): Record<string, string[]> {
+  const slot = schemaMap[db] ?? {};
+  schemaMap[db] = slot;
+  return slot;
+}
+
+/**
+ * Hand the namespace to the editor, with `db` as the database an unqualified
+ * name belongs to.
+ *
+ * **Keys are escaped**: `lang-sql` splits a namespace key on unescaped dots to
+ * build its levels (`dist/index.js`, `addNamespaceObject`, read 2026-10-27),
+ * so a database or table with a dot in its name would otherwise nest itself
+ * one level deeper than it lives.
+ */
+function pushSchema(db: string | null) {
+  const escaped: Record<string, Record<string, string[]>> = {};
+  for (const [database, tables] of Object.entries(schemaMap)) {
+    const inner: Record<string, string[]> = {};
+    for (const [table, cols] of Object.entries(tables)) inner[esc(table)] = cols;
+    escaped[esc(database)] = inner;
+  }
+  setSchema(view, escaped as SQLNamespace, db ? esc(db) : undefined);
+}
+
+function esc(name: string) {
+  return name.replace(/\./g, "\\.");
+}
 
 /**
  * Which `connection\u0000database` `schemaMap` currently describes.
@@ -340,6 +375,27 @@ const schemaMap: SQLNamespace = {};
  * guard for a load that lands after the user has moved on.
  */
 let schemaMapFor = "";
+
+/**
+ * Bumped whenever the map is thrown away, so a load that lands late can tell
+ * it is answering a question nobody is asking any more.
+ */
+let prefetchRun = 0;
+
+/** The connection whose prefetch is in flight, so two cannot run at once. */
+let prefetching = "";
+
+/**
+ * `connection\u0000database` for every load in flight.
+ *
+ * **Not the same guard as `loaded()`**, which asks what has *arrived*. Two
+ * things ask for a database — the current-database load and the prefetch —
+ * and on connect both ran before either answered, so the same introspection
+ * was requested twice. The catch-up loader is worse without this: it fires on
+ * a keystroke, so every character typed after `other.` would ask again while
+ * the first answer was still in flight. Its own test found the duplicate.
+ */
+const loadsInFlight = new Set<string>();
 
 // ---------------------------------------------------------------- utilities
 
@@ -1119,10 +1175,9 @@ async function loadDbChildren(
     host.dataset.loaded = "1";
 
     // Seed autocomplete with table names immediately; columns fill in lazily.
-    for (const t of tables) {
-      if (!(t.name in schemaMap)) (schemaMap as Record<string, string[]>)[t.name] = [];
-    }
-    setSchema(view, schemaMap);
+    const slot = dbSlot(db);
+    for (const t of tables) slot[t.name] ??= [];
+    pushSchema(activeDb);
     refreshLint(view);
   } catch (err) {
     host.replaceChildren(Object.assign(document.createElement("div"), {
@@ -1282,8 +1337,8 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
         const cols = await api.listColumns(connId, db, t.name);
         children.replaceChildren(...cols.map((c) => buildColumnNode(connId, db, t.name, c)));
         children.dataset.loaded = "1";
-        (schemaMap as Record<string, string[]>)[t.name] = cols.map((c) => c.name);
-        setSchema(view, schemaMap);
+        dbSlot(db)[t.name] = cols.map((c) => c.name);
+        pushSchema(activeDb);
         refreshLint(view);
       } catch (err) {
         children.replaceChildren(Object.assign(document.createElement("div"), {
@@ -1967,31 +2022,142 @@ async function loadCompletionSchema() {
   const db = tab?.activeDb ?? null;
   // A `migrations` tab has no connection and no editor to complete in.
   const connectionId = tab?.connectionId ?? null;
-  const key = connectionId && db ? `${connectionId}\u0000${db}` : "";
-  if (key === schemaMapFor) return;
 
-  schemaMapFor = key;
-  for (const name of Object.keys(schemaMap)) {
-    delete (schemaMap as Record<string, string[]>)[name];
+  // **Keyed by connection, not by database.** The map holds the whole server
+  // now, so moving between databases keeps everything already loaded and only
+  // changes which one an unqualified name means. A different *connection* is a
+  // different server, and nothing in the map survives that: connecting to
+  // staging after production once left production's tables completing against
+  // a database that had never heard of them.
+  if ((connectionId ?? "") !== schemaMapFor) {
+    schemaMapFor = connectionId ?? "";
+    prefetchRun += 1;
+    for (const name of Object.keys(schemaMap)) delete schemaMap[name];
   }
-  setSchema(view, schemaMap);
-  if (!key || !tab || !db || !connectionId) return;
+  pushSchema(db);
+  if (!tab || !connectionId) return;
 
-  try {
-    const names = await api.schemaNames(connectionId, db);
-    // The user may have moved to another database while this was in flight,
-    // and a late answer must not overwrite the one that is current.
-    if (schemaMapFor !== key) return;
-    Object.assign(schemaMap, names);
-    setSchema(view, schemaMap);
-    // Linting is schema-aware, so diagnostics computed against the empty map
-    // are stale the moment this lands.
+  const run = prefetchRun;
+  const entry = conns.get(connectionId);
+  const bulk = entry?.capabilities?.bulkColumns ?? false;
+
+  // The database in front of the user, first and on its own: it is the one
+  // every unqualified name in the buffer refers to.
+  if (db && !loaded(db)) {
+    await loadDatabase(connectionId, db, bulk, run);
     refreshLint(view);
+  }
+  // Then the rest of the server, in the background. Deliberately not awaited:
+  // nothing in the app waits for autocomplete to be complete.
+  void prefetchSchemas(connectionId, run);
+}
+
+/** Does the map already describe this database? */
+function loaded(db: string) {
+  return Object.keys(schemaMap[db] ?? {}).length > 0;
+}
+
+/**
+ * Load one database into the map.
+ *
+ * `bulk` is the engine capability, and it decides **what** is fetched rather
+ * than whether: an engine that can describe a whole database in one query gets
+ * its columns too, and one that would need a round trip per table gets the
+ * table names only, with columns left until something refers to them. Measured
+ * on a fixture of 12 databases, 1,920 tables and 26,880 columns: with the bulk
+ * query a database costs ~26ms, so the whole server is ~0.3s; without it,
+ * sixty tables on a distant server took twenty seconds.
+ *
+ * Returns false when the load was abandoned or refused, so a caller can tell
+ * "nothing there" from "not asked yet".
+ */
+async function loadDatabase(
+  connectionId: string,
+  db: string,
+  bulk: boolean,
+  run: number,
+): Promise<boolean> {
+  const inFlight = `${connectionId}\u0000${db}`;
+  if (loadsInFlight.has(inFlight)) return false;
+  loadsInFlight.add(inFlight);
+  try {
+    if (bulk) {
+      const names = await api.schemaNames(connectionId, db);
+      if (!current(connectionId, run)) return false;
+      Object.assign(dbSlot(db), names);
+    } else {
+      const tables = await api.listTables(connectionId, db);
+      if (!current(connectionId, run)) return false;
+      const slot = dbSlot(db);
+      for (const t of tables) slot[t.name] ??= [];
+    }
   } catch {
-    // Being unable to describe the schema must not break the editor. The tree
-    // still fills this in on expand, exactly as it did before.
+    // Being unable to describe a database must not break the editor, and on a
+    // server with one database somebody cannot read it must not stop the
+    // others being described either.
+    return false;
+  } finally {
+    loadsInFlight.delete(inFlight);
+  }
+  pushSchema(tabs?.active()?.activeDb ?? null);
+  return true;
+}
+
+/** Is this still the load the app is waiting on? */
+function current(connectionId: string, run: number) {
+  return prefetchRun === run && schemaMapFor === connectionId;
+}
+
+/**
+ * Describe every other database on the connection, in the background.
+ *
+ * **One database at a time, and awaited between each.** The meta connection is
+ * shared with the tree, the linter and the assistant, so the question is not
+ * what the whole server costs but how long a click can be made to wait for it:
+ * each step holds that connection for one database's query — ~26ms on the
+ * fixture measured above — and releases it before the next. A single
+ * server-wide query would be fewer round trips and would hold the connection
+ * for all of them at once.
+ *
+ * Cancelled by a connection change rather than by a flag: `run` is captured
+ * when it starts, and every step checks it is still the current one.
+ */
+async function prefetchSchemas(connectionId: string, run: number) {
+  if (prefetching === connectionId) return;
+  const entry = conns.get(connectionId);
+  if (!entry) return;
+  const bulk = entry.capabilities?.bulkColumns ?? false;
+
+  prefetching = connectionId;
+  try {
+    for (const db of entry.databases) {
+      if (!current(connectionId, run)) return;
+      if (loaded(db)) continue;
+      await loadDatabase(connectionId, db, bulk, run);
+    }
+  } finally {
+    if (prefetching === connectionId) prefetching = "";
   }
 }
+
+/**
+ * Something typed `<name>.` and the namespace had nothing under that name.
+ *
+ * The catch-up path, for the window between connecting and the prefetch
+ * reaching that database — and the only path at all on an engine whose columns
+ * are not prefetched. The keystroke that asked is too early to answer; the one
+ * after it has the answer.
+ */
+setSchemaLoader((name) => {
+  const connectionId = tabs?.active()?.connectionId ?? null;
+  if (!connectionId || prefetchRun === 0) return;
+  const entry = conns.get(connectionId);
+  // Only a database this connection actually has: a typo must not become a
+  // query, and neither must a table alias that happens to look like a name.
+  const db = entry?.databases.find((d) => d.toLowerCase() === name.toLowerCase());
+  if (!db || loaded(db)) return;
+  void loadDatabase(connectionId, db, entry?.capabilities?.bulkColumns ?? false, prefetchRun);
+});
 
 /** Ctrl+Enter: the selection if there is one, else the statement under the cursor. */
 async function runStatementUnderCursor() {

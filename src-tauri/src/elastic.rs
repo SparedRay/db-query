@@ -57,6 +57,12 @@ pub fn capabilities() -> Capabilities {
         row_cap: RowCap::ServerPageSize,
         // Elasticsearch's own word, and the name of the request field.
         namespace_label: "catalog".into(),
+        // There is no cross-index column query: a mapping is fetched per
+        // index. So autocomplete prefetches index *names* for every catalog
+        // and leaves their fields until something refers to them — on a
+        // cluster of three hundred indices, describing them all up front is
+        // three hundred requests nobody asked for.
+        bulk_columns: false,
     }
 }
 

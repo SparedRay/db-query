@@ -401,6 +401,7 @@ export const MYSQL_CAPS = {
   scriptFiles: true,
   rowCap: "clientLimit",
   namespaceLabel: "database",
+  bulkColumns: true,
 };
 
 /** A read-only engine, for testing what the UI must not offer. */
@@ -420,6 +421,8 @@ export const READ_ONLY_CAPS = {
   scriptFiles: false,
   rowCap: "serverPageSize",
   namespaceLabel: "catalog",
+  // No cross-index column query, so autocomplete prefetches names only.
+  bulkColumns: false,
 };
 
 export const CONN_INFO = {
