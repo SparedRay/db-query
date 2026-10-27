@@ -352,6 +352,10 @@ export interface Capabilities {
   rowCap: "clientLimit" | "serverPageSize";
   /** What this engine calls the thing `USE` switches between. */
   namespaceLabel: string;
+  /** Describing a whole namespace costs one round trip, so describing every
+   *  namespace costs one each. The gate on autocomplete's prefetch: engines
+   *  without it get table names prefetched and their columns on demand. */
+  bulkColumns: boolean;
 }
 
 export interface ConnInfo {

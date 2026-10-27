@@ -85,6 +85,20 @@ pub struct Capabilities {
     /// "database", Elasticsearch says "catalog", Snowflake says "schema" —
     /// borrowing MySQL's word for all of them puts a small lie in the UI.
     pub namespace_label: String,
+    /// Describing a whole namespace costs **one** round trip, so describing
+    /// every namespace on the server costs one per namespace.
+    ///
+    /// The gate on autocomplete's prefetch (Stage 27). Measured on a fixture
+    /// of 12 databases, 1,920 tables and 26,880 columns: with the bulk query,
+    /// a database costs ~26ms and the whole server ~0.3s. Without it, every
+    /// table is a round trip under [`crate::schema::TABLE_DETAIL_BUDGET`] —
+    /// sixty of them took twenty seconds on a server 330ms away, which is not
+    /// something to do for databases nobody has opened. Those engines get
+    /// table *names* prefetched and their columns on demand.
+    ///
+    /// Mirrors [`Engine::all_columns`] answering `Some`. Stated rather than
+    /// probed, because the answer has to be known before anything is asked.
+    pub bulk_columns: bool,
 }
 
 impl Capabilities {
@@ -107,6 +121,7 @@ impl Capabilities {
             script_files: true,
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
+            bulk_columns: true,
         }
     }
 
@@ -388,6 +403,7 @@ mod tests {
             "streamingExport",
             "rowCap",
             "namespaceLabel",
+            "bulkColumns",
         ] {
             assert!(j.get(key).is_some(), "missing {key}: {j}");
         }
@@ -412,6 +428,7 @@ mod tests {
             script_files: false,
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),
+            bulk_columns: false,
         }
     }
 

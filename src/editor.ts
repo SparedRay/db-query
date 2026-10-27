@@ -32,16 +32,29 @@ const schemaCompartment = new Compartment();
 /**
  * Table to column names, as last given to [`setSchema`].
  *
- * Kept flat and separately from `sqlConfig.schema` because
- * [`columnsInScope`] reads it on every keystroke and wants a plain lookup, not
- * a walk of CodeMirror's nested namespace shape.
+ * Kept separately from `sqlConfig.schema` because [`columnsInScope`] reads it
+ * on every keystroke and wants a plain lookup, not a walk of CodeMirror's
+ * nested namespace shape.
  *
- * **Keyed by lower-case name.** `FROM Users` found nothing when the server had
- * said `users`, which is most of what "it does not suggest columns" turned out
- * to mean: MySQL folds table names to lower case on Windows and macOS and
- * people type them however they like everywhere.
+ * **Keyed `database\0table`, both folded to lower case.** Per database since
+ * Stage 27, when the namespace grew to hold the whole server: two databases
+ * with a `users` table in them shared one column list before that, and
+ * whichever loaded second won. Folded because `FROM Users` found nothing when
+ * the server had said `users` — most of what "it does not suggest columns"
+ * turned out to mean, since MySQL folds table names to lower case on Windows
+ * and macOS and people type them however they like everywhere.
  */
 let tableColumns = new Map<string, { table: string; columns: string[] }>();
+
+/** The database an unqualified name belongs to — the tab's own. */
+let currentDb = "";
+
+/** Told that something typed `<name>.`, so a caller can load that database. */
+let onQualifier: (name: string) => void = () => {};
+
+function key(db: string, table: string) {
+  return `${db.toLowerCase()}\u0000${table.toLowerCase()}`;
+}
 
 /** Statement-ish boundary. Crude on purpose — see [`columnsInScope`]. */
 const STATEMENT_BREAK = ";";
@@ -58,10 +71,27 @@ const STATEMENT_BREAK = ";";
 const TABLE_REF =
   /\b(?:from|join|update|into)\s+([`"\w.$]+)(?:\s+(?:as\s+)?([a-z_]\w*))?/gi;
 
-/** `` `db`.`orders` `` and `db.orders` both name the table `orders`. */
-function bareName(raw: string): string {
-  const last = raw.split(".").pop() ?? raw;
-  return last.replace(/[`"]/g, "");
+/** The parts of `` `db`.`orders` ``, unquoted and in order. */
+function nameParts(raw: string): string[] {
+  return raw
+    .split(".")
+    .map((p) => p.replace(/[`"]/g, ""))
+    .filter((p) => p.length > 0);
+}
+
+/**
+ * The columns of a table as a statement refers to it — `orders`,
+ * `other.orders`, or `` `other`.`orders` ``.
+ *
+ * An unqualified name means the tab's own database, which is what makes
+ * `FROM orders` and `FROM poc.orders` describe the same table rather than one
+ * of them describing nothing.
+ */
+function tableRef(raw: string): { table: string; columns: string[] } | undefined {
+  const parts = nameParts(raw);
+  const table = parts[parts.length - 1] ?? "";
+  const db = parts.length > 1 ? parts[parts.length - 2] : currentDb;
+  return tableColumns.get(key(db, table));
 }
 
 /**
@@ -96,7 +126,17 @@ function columnsInScope(context: CompletionContext): CompletionResult | null {
 
   // After a dot, lang-sql already answers with exactly the right columns, and
   // a second source would add every other table's as well.
-  if (from > 0 && context.state.sliceDoc(from - 1, from) === ".") return null;
+  //
+  // It can only answer about a database that has been loaded, though, and the
+  // prefetch may still be working through them — so the name before the dot is
+  // reported, and whoever registered `onQualifier` can go and fetch it. The
+  // keystroke that opened the popup is too early; the next one has it.
+  if (from > 0 && context.state.sliceDoc(from - 1, from) === ".") {
+    const before = context.state.sliceDoc(Math.max(0, from - 130), from - 1);
+    const qualifier = /([\w$`"]+)\s*$/.exec(before)?.[1];
+    if (qualifier) onQualifier(nameParts(qualifier).pop() ?? "");
+    return null;
+  }
 
   const doc = context.state.doc.toString();
   const start = doc.lastIndexOf(STATEMENT_BREAK, context.pos - 1) + 1;
@@ -111,15 +151,24 @@ function columnsInScope(context: CompletionContext): CompletionResult | null {
   const named: { table: string; columns: string[] }[] = [];
   TABLE_REF.lastIndex = 0;
   for (let m = TABLE_REF.exec(statement); m; m = TABLE_REF.exec(statement)) {
-    const found = tableColumns.get(bareName(m[1]).toLowerCase());
+    const found = tableRef(m[1]);
     if (found && !named.includes(found)) named.push(found);
   }
 
   // Something typed, or Ctrl+Space pressed. Both mean "show me what there is";
   // what is excluded is the popup that opens by itself with an empty word,
   // where nine hundred column names would be noise nobody asked for.
+  //
+  // **The fallback is this database only**, though the namespace now holds the
+  // whole server: every column on a twelve-database server is twenty-seven
+  // thousand options, and a statement that names no table is almost always
+  // about the database you are on. Qualified work is served by the path above,
+  // which reads the table the statement actually named.
   const asked = from < context.pos || context.explicit;
-  const sources = named.length ? named : asked ? [...tableColumns.values()] : [];
+  const everything = [...tableColumns.entries()]
+    .filter(([k]) => k.startsWith(`${currentDb.toLowerCase()}\u0000`))
+    .map(([, v]) => v);
+  const sources = named.length ? named : asked ? everything : [];
   if (!sources.length) return null;
 
   // Which tables each name belongs to, in the order the schema gave them.
@@ -151,7 +200,12 @@ function columnsInScope(context: CompletionContext): CompletionResult | null {
  * and the dialect changes when the active tab does. Reconfiguring for one must
  * not throw away the other.
  */
-let sqlConfig: { dialect: SQLDialect; schema?: SQLNamespace; defaultTable?: string } = {
+let sqlConfig: {
+  dialect: SQLDialect;
+  schema?: SQLNamespace;
+  /** The database an unqualified name belongs to. See [`setSchema`]. */
+  defaultSchema?: string;
+} = {
   dialect: MySQL,
 };
 
@@ -440,28 +494,69 @@ export function refreshLint(view: EditorView) {
  */
 export function setPlainToml(view: EditorView) {
   tableColumns = new Map();
+  currentDb = "";
   view.dispatch({
     effects: schemaCompartment.reconfigure(StreamLanguage.define(toml)),
   });
 }
 
-export function setSchema(view: EditorView, schema: SQLNamespace, defaultTable?: string) {
-  sqlConfig = { ...sqlConfig, schema, defaultTable };
+/**
+ * The schema autocomplete works from: **a namespace of databases**, each
+ * holding its tables, each holding its columns.
+ *
+ * `defaultSchema` is the database an unqualified name belongs to, and the two
+ * arguments are a pair rather than a convenience. Read from
+ * `@codemirror/lang-sql` 6.10.0's source (`dist/index.js`,
+ * `completeFromSchema`, 2026-10-27): the completer walks the dotted path
+ * before the cursor through a tree of levels, and **falls back to
+ * `defaultSchema` when the first segment is not a level** — which is what
+ * makes `FROM orders` and `FROM poc.orders` both complete from one namespace.
+ *
+ * A flat `{table: [columns]}` map is what this used to be given, and it made
+ * every qualified name dead: typing `poc.` — the database already selected —
+ * offered nothing at all, and neither did `FROM poc.orders o` then `o.`,
+ * because an alias resolves to the full dotted path. Measured before the
+ * change, in the real editor, with `poc` selected:
+ *
+ * | typed | offered |
+ * | --- | --- |
+ * | `FROM poc.` | nothing |
+ * | `FROM poc.orders.` | nothing |
+ * | `SELECT o.` after `FROM poc.orders o` | nothing |
+ *
+ * All three answer now, and `FROM ` gained the database names.
+ */
+export function setSchema(view: EditorView, schema: SQLNamespace, defaultSchema?: string) {
+  sqlConfig = { ...sqlConfig, schema, defaultSchema };
+  currentDb = defaultSchema ?? "";
   // The same names in the shape `columnsInScope` needs. Tables whose columns
   // have not been loaded are present with an empty list, and simply contribute
   // nothing.
-  tableColumns = new Map(
-    Object.entries(schema as Record<string, unknown>).map(([table, cols]) => [
-      table.toLowerCase(),
-      {
+  tableColumns = new Map();
+  for (const [db, tables] of Object.entries(schema as Record<string, unknown>)) {
+    if (!tables || Array.isArray(tables) || typeof tables !== "object") continue;
+    for (const [table, cols] of Object.entries(tables as Record<string, unknown>)) {
+      tableColumns.set(key(db, table), {
         table,
         columns: Array.isArray(cols)
           ? (cols as string[]).filter((c) => typeof c === "string")
           : [],
-      },
-    ]),
-  );
+      });
+    }
+  }
   applySqlConfig(view);
+}
+
+/**
+ * Register what to do when something types `<name>.` and the namespace has
+ * nothing under that name.
+ *
+ * The editor does not know what a database is or how to fetch one; it only
+ * knows a name was qualified. Whoever owns the connection decides whether that
+ * name is worth a query.
+ */
+export function setSchemaLoader(load: (name: string) => void) {
+  onQualifier = load;
 }
 
 /**
