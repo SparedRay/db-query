@@ -174,10 +174,16 @@ export class ResultView {
     this.selection = opts.selection;
 
     this.result = opts.result;
-    this.active = Math.min(
-      Math.max(0, opts.activeIndex),
-      Math.max(0, opts.result.statements.length - 1),
-    );
+    // **Clamped to a statement that returned rows**, because only those have a
+    // tab since Stage 29.1. `closeStatement` can leave the tab's remembered
+    // index on a statement that has none, and an index with no tab is an index
+    // nothing can take you back to.
+    const sets = resultSets(opts.result);
+    this.active = sets.includes(opts.activeIndex)
+      ? opts.activeIndex
+      : sets.length > 0
+        ? sets[sets.length - 1]
+        : Math.min(Math.max(0, opts.activeIndex), Math.max(0, opts.result.statements.length - 1));
     this.renderTabs();
     this.renderActive();
     // Restore scroll after layout exists.
@@ -186,44 +192,56 @@ export class ResultView {
     this.onChanged();
   }
 
-  /** Index the UI should select for a freshly-arrived result. */
+  /**
+   * Index the UI should select for a freshly-arrived result.
+   *
+   * **Only the no-result-set case is decided here.** `show` clamps to a result
+   * set whenever the run has one, because `closeStatement` can leave a tab's
+   * remembered index on a statement that has no tab — so choosing "the last
+   * statement that returned rows" here as well was asking the same question
+   * twice, and a falsification proved it: reversing this function's order
+   * changed nothing the suite could see.
+   *
+   * What is genuinely left is what the pane falls back to when *nothing*
+   * returned rows: the failure, so its message is what fills the grid, or the
+   * last statement. A failure used to win outright, including over a result
+   * set; it has no tab to be selected into now, and the status bar's `aborted
+   * at N` chip carries its message instead.
+   */
   static initialIndex(result: ScriptResult): number {
-    // A failure wins: it is the thing you need to see.
     if (result.abortedAt !== null) return result.abortedAt;
-    // Otherwise the last statement that actually returned something. A script
-    // ending in `COMMIT;` would otherwise open on the commit and hide the
-    // query above it — the answer is what you ran the script for.
-    for (let i = result.statements.length - 1; i >= 0; i--) {
-      if (result.statements[i].outcome.type === "rows") return i;
-    }
     return Math.max(0, result.statements.length - 1);
   }
 
   private renderTabs() {
     const r = this.result;
     if (!r) return;
-    // A single statement is the common case; tabs would just be noise.
-    if (r.statements.length <= 1) {
+    // **One tab per result set, not per statement** (Stage 29.1). A SET, an
+    // UPDATE and a failure are things that happened, not tables to look at;
+    // they were tabs holding a sentence each, and Sequence is where a list of
+    // things that happened belongs. One result set is the common case, and
+    // tabs over it would be noise.
+    const sets = resultSets(r);
+    if (sets.length <= 1) {
       this.tabsEl.replaceChildren();
       return;
     }
-    const nodes = r.statements.map((s, i) => {
+    const nodes = sets.map((i, nth) => {
+      const s = r.statements[i];
       const t = el("button", "tab");
       // **Numbered, not quoted.** The label used to be the statement's first
       // line, which is the same forty characters for every result of a script
       // that selects from the same table — and unreadable once truncated. The
       // SQL is a keystroke away (double-click) and on the tooltip.
-      t.textContent = `Result ${i + 1}`;
+      // Numbered among the result sets, which is what the strip now holds: a
+      // script whose second and fourth statements returned rows has a Result 1
+      // and a Result 2, and Sequence's links say the same.
+      t.textContent = `Result ${nth + 1}`;
       t.title = `${firstLine(s.sql)}\nDouble-click to select this statement in the editor`;
       const badge = el("span", "badge");
       if (s.outcome.type === "rows") {
         badge.textContent = `${s.outcome.rows.length}`;
         if (s.outcome.truncated) t.classList.add("truncated");
-      } else if (s.outcome.type === "affected") {
-        badge.textContent = `${s.outcome.rows} affected`;
-      } else {
-        badge.append(icon("close"));
-        t.classList.add("errored");
       }
       t.append(badge);
 
@@ -232,7 +250,7 @@ export class ResultView {
       // apart with nothing to tell them apart.
       const close = el("span", "tab-close");
       close.append(icon("close"));
-      close.title = `Close result ${i + 1}`;
+      close.title = `Close result ${nth + 1}`;
       close.setAttribute("role", "button");
       close.onclick = (e) => {
         // Or selecting the tab we are closing repaints it on the way out.
@@ -271,6 +289,10 @@ export class ResultView {
     const s = r?.statements[this.active];
     if (!r || !s) { this.setMessage("No results."); return; }
 
+    // Only a result set has a tab now, so this is the one case where the pane
+    // renders a statement that is not one: the run returned no rows at all,
+    // and what it *did* do is the only answer there is. The statement chosen
+    // is `initialIndex`'s fallback — the failure, or the last one.
     if (s.outcome.type === "error") {
       this.gridEl.replaceChildren(el("div", "err-box", s.outcome.message));
       this.addEmptyHint();
@@ -819,9 +841,20 @@ export class ResultView {
 
     if (r.statements.length > 1) {
       const failed = r.abortedAt !== null ? `, aborted at ${r.abortedAt + 1}` : "";
-      chips.push(
-        el("span", "chip", `${r.statements.length} statements · ${r.totalElapsedMs} ms${failed}`),
+      const chip = el(
+        "span",
+        "chip",
+        `${r.statements.length} statements · ${r.totalElapsedMs} ms${failed}`,
       );
+      // **The message, on the chip.** Since Stage 29.1 a failure has no tab of
+      // its own, so a run that returned rows *and* failed would otherwise say
+      // only "aborted at 4" here, with the reason a view away. Sequence still
+      // has it in full; this is so it can be read without going there.
+      if (r.abortedAt !== null) {
+        const stopped = r.statements[r.abortedAt]?.outcome;
+        if (stopped?.type === "error") chip.title = stopped.message;
+      }
+      chips.push(chip);
     }
     this.statusEl.replaceChildren(...chips);
   }
@@ -851,6 +884,20 @@ function cellText(v: CellValue): string | null {
   // Before `String(v)`, which would render the binary cell as [object Object].
   if (isBinaryCell(v)) return binaryPlaceholder(v);
   return String(v);
+}
+
+/**
+ * Which statements returned a table, by index.
+ *
+ * The strip, the clamp, the initial selection and Sequence's links all turn on
+ * this one question, so it is asked in one place.
+ */
+export function resultSets(result: ScriptResult): number[] {
+  const out: number[] = [];
+  result.statements.forEach((s, i) => {
+    if (s.outcome.type === "rows") out.push(i);
+  });
+  return out;
 }
 
 function el(tag: string, cls: string, text?: string): HTMLElement {

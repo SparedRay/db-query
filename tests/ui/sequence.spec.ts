@@ -28,6 +28,7 @@ const SCRIPT = [
   "SET @cutoff = 1;",
   "SELECT id FROM orders;",
   "UPDATE orders SET status = 2;",
+  "SELECT id FROM shipments;",
   "DELETE FROM cart WHERE ord_id = 101;",
 ].join("\n");
 
@@ -38,26 +39,29 @@ function stmt(sql: string, kind: string, outcome: unknown, elapsedMs: number) {
   return { sql, start, end: start + sql.length, effectiveSql: null, kind, outcome, elapsedMs };
 }
 
+function rows(n: number, name: string) {
+  return {
+    type: "rows",
+    columns: [{ name, sqlType: "INT", typeHint: "numeric" }],
+    rows: Array.from({ length: n }, (_, i) => [String(i + 1)]),
+    truncated: false,
+  };
+}
+
 /**
- * One of each: a session statement, rows, a change, and the error that stopped
- * it. Four shapes, which is the whole point of the view.
+ * One of each: a session statement, rows, a change, more rows, and the error
+ * that stopped it. Four shapes, which is the whole point of the view — and
+ * **two result sets out of five statements**, which is the point of the strip
+ * since Stage 29.1: statements 2 and 4 are Result 1 and Result 2, and nothing
+ * else gets a tab at all.
  */
 function mixedRun() {
   return {
     statements: [
       stmt("SET @cutoff = 1", "session", { type: "affected", rows: 0 }, 1),
-      stmt(
-        "SELECT id FROM orders",
-        "select",
-        {
-          type: "rows",
-          columns: [{ name: "id", sqlType: "INT", typeHint: "numeric" }],
-          rows: [["1"], ["2"], ["3"]],
-          truncated: false,
-        },
-        8,
-      ),
+      stmt("SELECT id FROM orders", "select", rows(3, "id"), 8),
       stmt("UPDATE orders SET status = 2", "modify", { type: "affected", rows: 2 }, 12),
+      stmt("SELECT id FROM shipments", "select", rows(2, "id"), 5),
       stmt(
         "DELETE FROM cart WHERE ord_id = 101",
         "modify",
@@ -66,7 +70,7 @@ function mixedRun() {
       ),
     ],
     totalElapsedMs: 64,
-    abortedAt: 3,
+    abortedAt: 4,
     delimiterDetected: false,
     cancelled: false,
     timedOut: false,
@@ -92,7 +96,8 @@ async function runAll(page: Page, text = SCRIPT) {
   await page.keyboard.press("Control+a");
   await page.keyboard.type(text);
   await page.keyboard.press("Control+Shift+Enter");
-  await expect(page.locator("#tabs .tab")).toHaveCount(4);
+  // Two of the five statements returned rows, so the strip holds two tabs.
+  await expect(page.locator("#tabs .tab")).toHaveCount(2);
 }
 
 const seq = (page: Page) => page.locator("#sequence");
@@ -123,8 +128,10 @@ test("the header offers both views, each with its own count", async ({ page }) =
   await expect(page.locator("#res-count-sequence")).toBeHidden();
 
   await runAll(page);
-  await expect(page.locator("#res-count-results")).toHaveText("4");
-  await expect(page.locator("#res-count-sequence")).toHaveText("4");
+  // **Two against five.** Results counts result sets, Sequence counts
+  // statements, and the gap between them is the reason both are shown.
+  await expect(page.locator("#res-count-results")).toHaveText("2");
+  await expect(page.locator("#res-count-sequence")).toHaveText("5");
 
   await toSequence(page);
   await expect(page.locator("#res-view-sequence")).toHaveAttribute("aria-pressed", "true");
@@ -191,32 +198,35 @@ test("Sequence lists what ran, grouped under its run", async ({ page }) => {
   await expect(seq(page).locator(".seq-run")).toHaveCount(1);
   await expect(seq(page).locator(".seq-run .seq-what")).toHaveText("Run all");
   const summary = seq(page).locator(".seq-run-summary");
-  await expect(summary).toContainText("4 statements");
-  await expect(summary).toContainText("stopped at statement 4");
+  await expect(summary).toContainText("5 statements");
+  await expect(summary).toContainText("stopped at statement 5");
   await expect(summary).toContainText("64 ms");
 
   const rows = seq(page).locator(".seq-row");
-  await expect(rows).toHaveCount(4);
+  await expect(rows).toHaveCount(5);
 
   // **The verb is read off the SQL**, because `kind` is a category: `modify`
   // covers the UPDATE and the DELETE, which are two different things to find.
   await expect(rows.nth(0).locator(".seq-verb")).toHaveText("SET");
   await expect(rows.nth(1).locator(".seq-verb")).toHaveText("SELECT");
   await expect(rows.nth(2).locator(".seq-verb")).toHaveText("UPDATE");
-  await expect(rows.nth(3).locator(".seq-verb")).toHaveText("DELETE");
+  await expect(rows.nth(3).locator(".seq-verb")).toHaveText("SELECT");
+  await expect(rows.nth(4).locator(".seq-verb")).toHaveText("DELETE");
 
   // What each one did, in its own words.
   await expect(rows.nth(0)).toContainText("OK");
   await expect(rows.nth(1)).toContainText("3 rows");
   await expect(rows.nth(2)).toContainText("2 rows affected");
-  await expect(rows.nth(3)).toContainText("Unknown column");
-  await expect(rows.nth(3).locator(".seq-ms")).toHaveText("30 ms");
+  await expect(rows.nth(3)).toContainText("2 rows");
+  await expect(rows.nth(4)).toContainText("Unknown column");
+  await expect(rows.nth(4).locator(".seq-ms")).toHaveText("30 ms");
 
   // Shape as well as colour: four states told apart at a glance.
   await expect(rows.nth(0).locator(".seq-dot")).toHaveClass(/seq-ok/);
   await expect(rows.nth(1).locator(".seq-dot")).toHaveClass(/seq-data/);
   await expect(rows.nth(2).locator(".seq-dot")).toHaveClass(/seq-change/);
-  await expect(rows.nth(3).locator(".seq-dot")).toHaveClass(/seq-error/);
+  await expect(rows.nth(3).locator(".seq-dot")).toHaveClass(/seq-data/);
+  await expect(rows.nth(4).locator(".seq-dot")).toHaveClass(/seq-error/);
 });
 
 /** A second run is its own group, and the one you just did is on top. */
@@ -236,20 +246,20 @@ test("each run is its own group, newest first", async ({ page }) => {
   await expect(what.nth(0)).toHaveText("Run");
   await expect(what.nth(1)).toHaveText("Run all");
   // Eight statements across the two runs, and the count says so.
-  await expect(page.locator("#res-count-sequence")).toHaveText("8");
+  await expect(page.locator("#res-count-sequence")).toHaveText("10");
   // **Only the newest run can link.** The run before it had its result
   // replaced, and offering a link to one would send you to another run's rows
   // — which, since both ran the same script, would look right.
-  await expect(seq(page).locator(".seq-link")).toHaveCount(1);
+  await expect(seq(page).locator(".seq-link")).toHaveCount(2);
 });
 
 /**
  * Q5. The link names the result tab the strip actually shows.
  *
- * The canvas drew result sets numbered among themselves — the first and third
- * statements as "Result 1" and "Result 2" — but the app numbers them by
- * statement, so the third is `Result 3`. A row saying "Result 2" while the
- * strip said "Result 3" would be a confident lie, so the app wins.
+ * Numbered **among the result sets**, which is all the strip holds since Stage
+ * 29.1: statements 2 and 4 of five are Result 1 and Result 2. Stage 29 had to
+ * say 2 and 4 here, because the strip then numbered every statement — the
+ * canvas drew it this way from the start and only needed the strip to agree.
  */
 test("a statement that returned rows links to its own result tab", async ({ page }) => {
   await open(page);
@@ -257,14 +267,16 @@ test("a statement that returned rows links to its own result tab", async ({ page
   await toSequence(page);
 
   const links = seq(page).locator(".seq-link");
-  await expect(links).toHaveCount(1);
-  await expect(links).toHaveText("3 rows → Result 2");
+  await expect(links).toHaveCount(2);
+  await expect(links.nth(0)).toHaveText("3 rows → Result 1");
+  await expect(links.nth(1)).toHaveText("2 rows → Result 2");
 
-  await links.click();
+  await links.nth(1).click();
   // It takes you there: Results, with that result selected.
   await expect(page.locator("#grid")).toBeVisible();
   await expect(page.locator("#res-view-results")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#tabs .tab").nth(1)).toHaveClass(/active/);
+  await expect(page.locator("#grid tbody tr[data-row]")).toHaveCount(2);
 });
 
 /** Q5. And the SQL goes the other way, to the statement in the buffer. */
@@ -294,18 +306,19 @@ test("closing a result keeps its Sequence row and drops only the link", async ({
   await open(page);
   await runAll(page);
   await toSequence(page);
-  await expect(seq(page).locator(".seq-link")).toHaveCount(1);
+  await expect(seq(page).locator(".seq-link")).toHaveCount(2);
 
   await page.click("#res-view-results");
   await page.locator("#tabs .tab").nth(1).locator(".tab-close").click();
-  await expect(page.locator("#res-count-results")).toHaveText("3");
+  await expect(page.locator("#res-count-results")).toHaveText("1");
 
   await toSequence(page);
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
-  await expect(seq(page).locator(".seq-row").nth(1)).toContainText("3 rows");
-  await expect(page.locator("#res-count-sequence")).toHaveText("4");
-  // No link to a result that is no longer there.
-  await expect(seq(page).locator(".seq-link")).toHaveCount(0);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
+  await expect(seq(page).locator(".seq-row").nth(3)).toContainText("2 rows");
+  await expect(page.locator("#res-count-sequence")).toHaveText("5");
+  // The closed one stops offering a link; the one still open keeps its own.
+  await expect(seq(page).locator(".seq-link")).toHaveCount(1);
+  await expect(seq(page).locator(".seq-link")).toHaveText("3 rows → Result 1");
 });
 
 /** Closing every result leaves the log alone too. */
@@ -316,8 +329,8 @@ test("discarding the results leaves the log standing", async ({ page }) => {
   await expect(page.locator("#res-count-results")).toBeHidden();
 
   await toSequence(page);
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
-  await expect(page.locator("#res-count-sequence")).toHaveText("4");
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
+  await expect(page.locator("#res-count-sequence")).toHaveText("5");
 });
 
 /** One statement, one failure — a run with nothing in it to call a change. */
@@ -400,7 +413,7 @@ test("the footer counts what the log holds", async ({ page }) => {
   await runAll(page);
   await toSequence(page);
 
-  await expect(chips(page).nth(0)).toHaveText("4 statements");
+  await expect(chips(page).nth(0)).toHaveText("5 statements");
   await expect(chips(page).nth(1)).toHaveText("1 changed 2 rows");
   await expect(chips(page).nth(2)).toHaveText("1 error");
   await expect(page.locator("#seq-scope")).toHaveText("This tab, since it opened");
@@ -412,7 +425,7 @@ test("Changes and Errors filter the list, and the chips keep counting the log", 
   await open(page);
   await runAll(page);
   await toSequence(page);
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
 
   await page.click("#seq-changes");
   await expect(page.locator("#seq-changes")).toHaveAttribute("aria-pressed", "true");
@@ -420,15 +433,15 @@ test("Changes and Errors filter the list, and the chips keep counting the log", 
   await expect(seq(page).locator(".seq-row")).toHaveCount(1);
   await expect(seq(page).locator(".seq-verb")).toHaveText("UPDATE");
   // Unmoved by the filter, and the one place that says what it hid.
-  await expect(chips(page).nth(0)).toHaveText("4 statements");
-  await expect(page.locator("#seq-scope")).toHaveText("Showing 1 of 4");
+  await expect(chips(page).nth(0)).toHaveText("5 statements");
+  await expect(page.locator("#seq-scope")).toHaveText("Showing 1 of 5");
 
   await page.click("#seq-errors");
   await expect(seq(page).locator(".seq-row")).toHaveCount(1);
   await expect(seq(page).locator(".seq-verb")).toHaveText("DELETE");
 
   await page.click("#seq-all");
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
   await expect(page.locator("#seq-scope")).toHaveText("This tab, since it opened");
 });
 
@@ -453,7 +466,7 @@ test("two tabs hold their own filters at once", async ({ page }) => {
   await runAll(page);
   await page.click("#res-view-sequence");
   await expect(page.locator("#seq-all")).toHaveAttribute("aria-pressed", "true");
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
 
   // And the first one is still where it was left.
   await page.locator("#script-tabs .stab").first().click();
@@ -479,8 +492,8 @@ test("a run with nothing left in it loses its header", async ({ page }) => {
   await expect(seq(page).locator(".seq-what")).toHaveText("Run all");
   await expect(seq(page).locator(".seq-row")).toHaveCount(1);
   // Both runs are still counted: a filter changes the view, not the history.
-  await expect(chips(page).nth(0)).toHaveText("5 statements");
-  await expect(page.locator("#seq-scope")).toHaveText("Showing 1 of 5");
+  await expect(chips(page).nth(0)).toHaveText("6 statements");
+  await expect(page.locator("#seq-scope")).toHaveText("Showing 1 of 6");
 });
 
 /** And a filter that matches nothing says which nothing it is. */
@@ -513,7 +526,7 @@ test("Copy as log copies what is shown, and reports on itself", async ({ page })
 
   const text = await copied(page);
   expect(text).toContain("Run all");
-  expect(text).toContain("4 statements");
+  expect(text).toContain("5 statements");
   // One line per statement, tab-separated — the grid's own copy format.
   expect(text).toContain("\tSELECT\t8 ms\t3 rows\tSELECT id FROM orders");
   expect(text).toContain("DELETE");
@@ -555,10 +568,10 @@ test("Clear empties the log and leaves the results standing", async ({ page }) =
   await expect(page.locator("#res-count-sequence")).toBeHidden();
 
   // The results are untouched.
-  await expect(page.locator("#res-count-results")).toHaveText("4");
+  await expect(page.locator("#res-count-results")).toHaveText("2");
   await page.click("#res-view-results");
-  await expect(page.locator("#tabs .tab")).toHaveCount(4);
-  await page.locator("#tabs .tab").nth(1).click();
+  await expect(page.locator("#tabs .tab")).toHaveCount(2);
+  await page.locator("#tabs .tab").nth(0).click();
   await expect(page.locator("#grid table")).toBeVisible();
   await expect(page.locator("#grid tbody tr[data-row]")).toHaveCount(3);
 });
@@ -576,7 +589,7 @@ test("Clear puts the filter back to All", async ({ page }) => {
   // from the editor, which is where that keystroke lives.
   await page.locator("#editor .cm-content").click();
   await page.keyboard.press("Control+Shift+Enter");
-  await expect(seq(page).locator(".seq-row")).toHaveCount(4);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
 });
 
 /**
@@ -616,6 +629,90 @@ async function runInSequence(page: Page, text: string) {
   await page.keyboard.press("Control+Shift+Enter");
 }
 
+// ----------------------------------------------------- a run in flight
+
+/**
+ * A run in flight, in the log.
+ *
+ * The backend answers once, at the end, so a run that has started has no
+ * entries yet — it is a header with nothing under it, at the top where its
+ * statements will appear. It names **which** run, which is the part the grid's
+ * "Running…" cannot: a log of five runs needs to know whether the sixth is a
+ * Run all or one statement.
+ */
+test("a run in flight is a line at the top of the log", async ({ page }) => {
+  const gate = held();
+  await open(page, { run_script: () => gate.promise });
+  await toSequence(page);
+  // Nothing has run yet, so this is also the first-run case: the sentence has
+  // to give way to the line rather than claim nothing has happened.
+  await expect(seq(page).locator(".seq-empty")).toBeVisible();
+
+  await runInSequence(page, SCRIPT);
+  const running = seq(page).locator(".seq-run.seq-running");
+  await expect(running).toBeVisible();
+  await expect(running).toContainText("Executing");
+  await expect(running).toContainText("Run all");
+  await expect(seq(page).locator(".seq-empty")).toHaveCount(0);
+
+  gate.release(mixedRun());
+  await expect(running).toHaveCount(0);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
+});
+
+/** It sits above the run before it, and does not disturb what is already there. */
+test("a run in flight sits above the log it is adding to", async ({ page }) => {
+  const gate = held();
+  let first = true;
+  await open(page, {
+    run_script: () => {
+      if (!first) return gate.promise;
+      first = false;
+      return mixedRun();
+    },
+  });
+  await toSequence(page);
+  await runInSequence(page, SCRIPT);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
+
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+Shift+Enter");
+  // The line is first; the finished run is still under it, entries and all.
+  await expect(seq(page).locator(".seq-run").first()).toHaveClass(/seq-running/);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(5);
+
+  gate.release(mixedRun());
+  await expect(seq(page).locator(".seq-run.seq-running")).toHaveCount(0);
+  await expect(seq(page).locator(".seq-row")).toHaveCount(10);
+});
+
+/** Shut, the strip says it too, and says which run. */
+test("shut, the strip says a run is executing", async ({ page }) => {
+  const gate = held();
+  await open(page, { run_script: () => gate.promise });
+  await toSequence(page);
+  await page.click("#res-toggle");
+  await expect(page.locator("#results-body")).toBeHidden();
+
+  await page.locator("#editor .cm-content").click();
+  await page.keyboard.press("Control+a");
+  await page.keyboard.type(SCRIPT);
+  await page.keyboard.press("Control+Shift+Enter");
+  await expect(page.locator("#res-summary")).toHaveText("Executing \u00b7 Run all");
+
+  gate.release(mixedRun());
+  await expect(page.locator("#res-summary")).toHaveText(/^DELETE \u00b7 Error 1054/);
+});
+
+/** A Node-side promise the test opens when it chooses, as migrations.spec does. */
+function held() {
+  let release!: (v: unknown) => void;
+  const promise = new Promise<unknown>((r) => {
+    release = r;
+  });
+  return { promise, release };
+}
+
 // ---------------------------------------------------- a run with no rows
 
 /**
@@ -652,13 +749,19 @@ test("a run that returned no rows says so, and offers Sequence", async ({ page }
  * splices that one, so a view asking it would tell you there were no result
  * sets in a run whose result set you had just closed yourself.
  */
-test("closing the only result does not make it a run with no result sets", async ({ page }) => {
+test("closing every result does not make it a run with no result sets", async ({ page }) => {
   await open(page);
   await runAll(page);
-  await page.locator("#tabs .tab").nth(1).locator(".tab-close").click();
-  await expect(page.locator("#tabs .tab")).toHaveCount(3);
 
-  // Nothing left in the grid returns rows, and still no hint: the run did.
+  // Both of them, so the live array has no row-returning statement left while
+  // three statements remain — which is the state that tells the two gates
+  // apart.
+  await page.locator("#tabs .tab").nth(1).locator(".tab-close").click();
+  await expect(page.locator("#tabs .tab")).toHaveCount(0);
+  await page.click("#btn-close-results");
+  await expect(page.locator("#res-count-results")).toBeHidden();
+
+  // No hint: the run returned rows, and you closed them. The log remembers.
   await expect(page.locator("#grid .empty-hint")).toHaveCount(0);
 });
 
@@ -667,11 +770,37 @@ test("a run with a result set shows no such hint", async ({ page }) => {
   await open(page);
   await runAll(page);
   await expect(page.locator("#grid .empty-hint")).toHaveCount(0);
-  // Even on the statement that returned nothing: the run has a result set, and
-  // saying otherwise because you are looking at its SET would be false.
   await page.locator("#tabs .tab").nth(0).click();
-  await expect(page.locator("#grid .empty")).toContainText("Statement executed.");
+  await expect(page.locator("#grid table")).toBeVisible();
   await expect(page.locator("#grid .empty-hint")).toHaveCount(0);
+});
+
+/**
+ * **Only a table gets a tab.** The SET, the UPDATE and the failure were each a
+ * tab holding one sentence; a list of things that happened is what Sequence is
+ * for, and the strip is for tables you look at.
+ */
+test("only the statements that returned rows get a tab", async ({ page }) => {
+  await open(page);
+  await runAll(page);
+
+  const tabs = page.locator("#tabs .tab");
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.nth(0)).toContainText("Result 1");
+  await expect(tabs.nth(1)).toContainText("Result 2");
+  // The two SELECTs, by their row counts, and nothing wearing "affected" or an
+  // error mark.
+  await expect(tabs.nth(0).locator(".badge")).toHaveText("3");
+  await expect(tabs.nth(1).locator(".badge")).toHaveText("2");
+  await expect(page.locator("#tabs .tab.errored")).toHaveCount(0);
+  await expect(page.locator("#tabs")).not.toContainText("affected");
+
+  // It opens on the last result set, not on the statement that stopped it.
+  await expect(tabs.nth(1)).toHaveClass(/active/);
+  // The failure is still marked, and its message is on the chip that marks it.
+  const chip = page.locator("#status .chip", { hasText: "aborted at 5" });
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("title", /Unknown column/);
 });
 
 // ------------------------------------------------- the cap, and the painting

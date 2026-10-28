@@ -55,7 +55,7 @@ import { contextMenu } from "./menu";
 import { icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter } from "./treefilter";
-import { ResultView } from "./grid";
+import { ResultView, resultSets } from "./grid";
 import { TabManager, clearResult, type OutputView, type ScriptTab } from "./tabs";
 import {
   SequenceView, emptyLog, entryCount, logText, pushRun, returnedRows, runFrom, runTotals,
@@ -1869,7 +1869,9 @@ function showSequence(tab: ScriptTab) {
   for (const [el, filter] of SEQ_FILTERS) {
     el.setAttribute("aria-pressed", String(tab.seqFilter === filter));
   }
-  if (empty) {
+  // Empty **and** idle. A first run in flight has a line of its own to show,
+  // and "nothing has run in this tab yet" would be false while it ran.
+  if (empty && !tab.busy) {
     sequenceView.setMessage(
       connected
         ? "Nothing has run in this tab yet. Ctrl+Enter runs the statement under the cursor."
@@ -1877,11 +1879,12 @@ function showSequence(tab: ScriptTab) {
     );
     return;
   }
-  paintSequenceFoot(tab);
+  if (!empty) paintSequenceFoot(tab);
   sequenceView.show({
+    running: tab.busy ? (tab.runningWhat ?? "Run") : null,
     log: tab.sequence,
     filter: tab.seqFilter,
-    resultIndexOf: (runIndex, entry) => resultIndexOf(tab, runIndex, entry),
+    resultTabOf: (runIndex, entry) => resultTabOf(tab, runIndex, entry),
     onGoToResult: (i) => {
       tab.activeResultIndex = i;
       setOutputView(tab, "results");
@@ -1937,22 +1940,36 @@ const SEQ_FILTERS: [HTMLButtonElement, SeqFilter][] = [
 ];
 
 /**
- * Which result tab this entry's statement has, or -1.
+ * Which result tab this entry's statement has, as a label and a statement index.
  *
  * **Only the newest run can have one.** A run is recorded at the moment its
  * `ScriptResult` becomes `tab.result`, and the next run replaces that — so
  * every older run's results are gone, and offering a link to one would send
  * you to somebody else's rows.
  *
- * Matched on the offsets, not the text: `SequenceEntry.sql` is collapsed to one
- * line for the row, so comparing it to the statement's own SQL would never
- * match. Within one run the offsets are unique by construction.
+ * The label counts result sets, which is what the strip holds since Stage
+ * 29.1; the index is the statement, which is what selecting one takes. Matched
+ * on the offsets, not the text: `SequenceEntry.sql` is collapsed to one line
+ * for the row, so comparing it to the statement's own SQL would never match.
+ * Within one run the offsets are unique by construction.
  */
-function resultIndexOf(tab: ScriptTab, runIndex: number, entry: SequenceEntry): number {
-  if (runIndex !== 0) return -1;
+function resultTabOf(
+  tab: ScriptTab,
+  runIndex: number,
+  entry: SequenceEntry,
+): { label: number; index: number } | null {
+  if (runIndex !== 0) return null;
   const statements = tab.result?.statements;
-  if (!statements) return -1;
-  return statements.findIndex((st) => st.start === entry.start && st.end === entry.end);
+  if (!statements) return null;
+  let label = 0;
+  for (let i = 0; i < statements.length; i++) {
+    if (statements[i].outcome.type !== "rows") continue;
+    label += 1;
+    if (statements[i].start === entry.start && statements[i].end === entry.end) {
+      return { label, index: i };
+    }
+  }
+  return null;
 }
 
 /** The same reveal a result tab's double-click does, from a Sequence row. */
@@ -2164,6 +2181,7 @@ async function run(sql: string, base = 0, what = "Run") {
   if (!connected || tab.busy || !sql.trim()) return;
   tab.resultBase = base;
   tab.error = null;
+  tab.runningWhat = what;
   setBusy(tab, true);
   if (isFocused(tab)) showResults(tab);
 
@@ -2196,6 +2214,7 @@ async function run(sql: string, base = 0, what = "Run") {
   } finally {
     // Clear busy BEFORE painting: showResults renders the running state while
     // the flag is set, so painting first would leave "Running…" over the rows.
+    tab.runningWhat = null;
     setBusy(tab, false);
     // The user may have switched tabs while this ran; only paint if still here.
     // Either way the outcome is on the tab, so switching back shows it.
@@ -2542,7 +2561,10 @@ function paintViewSwitch(tab: ScriptTab | null) {
   const showing: OutputView = tab?.outputView ?? "results";
   els.resViewResults.setAttribute("aria-pressed", String(showing === "results"));
   els.resViewSequence.setAttribute("aria-pressed", String(showing === "sequence"));
-  paintCount(els.resCountResults, tab?.result?.statements.length ?? 0);
+  // **Result sets, not statements.** The strip holds one tab per result set
+  // since Stage 29.1, and a count that said otherwise would be a figure the
+  // view below it contradicts.
+  paintCount(els.resCountResults, tab?.result ? resultSets(tab.result).length : 0);
   paintCount(els.resCountSequence, tab ? entryCount(tab.sequence) : 0);
 }
 
@@ -2559,6 +2581,9 @@ function paintCount(el: HTMLElement, n: number) {
  * same purpose; neither composes a figure the view below it does not show.
  */
 function sequenceSummary(tab: ScriptTab): string {
+  // While a run is in flight the strip says so, as Results' does — but names
+  // which run, which is what the grid's generic "Running…" cannot.
+  if (tab.busy) return `Executing · ${tab.runningWhat ?? "Run"}`;
   const run = tab.sequence.runs[0];
   if (!run) return "Nothing has run in this tab yet.";
   const last = run.entries[run.entries.length - 1];
