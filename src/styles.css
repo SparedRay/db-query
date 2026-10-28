@@ -1767,6 +1767,11 @@ button .spinner {
   position: sticky; top: 0; z-index: 1;
 }
 .seq-what { font-weight: 600; flex: 0 0 auto; }
+/* The run in flight. Accented rather than animated: the Cancel button and the
+   toolbar's spinner already move, and a third moving thing in one pane is
+   noise rather than information. */
+.seq-run.seq-running { background: var(--sel-header-bg); }
+.seq-run.seq-running .seq-what { color: var(--accent); }
 .seq-at { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); flex: 0 0 auto; }
 .seq-run-summary {
   flex: 1; min-width: 0; color: var(--fg-dim); font-size: 11.5px;

@@ -1,6 +1,6 @@
 # Stage 29 — Results, and Sequence beside it
 
-**Status:** ✅ Done — built and verified 2026-10-27
+**Status:** ✅ Done — built and verified 2026-10-27; §12 follows up, 2026-10-28
 
 ---
 
@@ -163,6 +163,7 @@ in §9.1 rather than back-filled here.
 - [x] Flyway stays where it is (Q11)
 
 - [x] Hands-on (Q12) — *"All working as expected"*
+- [x] 29.1 — only a result set gets a tab; a line for the run in flight (§12)
 
 ## 8. Built — 2026-10-27 (slices 1 and 2)
 
@@ -356,3 +357,78 @@ Three things left to settle with use rather than by a test:
   whether every run should just read `Run` and `Run all` as the canvas had it.
 * **Whether a cap of 2,000 is the right number.** It is a measured guess at
   "more history than anybody scrolls" and nothing has pushed on it yet.
+
+## 12. 29.1 — only a table gets a tab, and a line while it runs — 2026-10-28
+
+Two things from using it.
+
+> *"Results that does not belong to result still generate a tab instead of
+> being just in sequence. Lets fix that so only table like results are shown on
+> results table with a tab and sequence can show all"*
+
+> *"we can add on the sequence a line like: Executing when something is in
+> progress. Currently that is only on result but is generic text"*
+
+### 12.1 One tab per result set
+
+`renderTabs` had drawn one tab per **statement** since Stage 12, so a SET, an
+UPDATE and a failure each got a tab holding a single sentence, sitting in a
+strip whose every other tab holds a table. Before Stage 29 there was nowhere
+else for them to go. There is now.
+
+16. **The strip holds result sets, and nothing else.** Numbered among
+    themselves, so statements 2 and 4 of five are `Result 1` and `Result 2` —
+    which is **what the canvas drew all along**. Stage 29 §8.1 recorded the
+    opposite as a deliberate deviation ("the app numbers them by statement, so
+    the app wins"); the reason was the strip, and the strip has changed, so
+    Sequence's links say 1 and 2 now. The principle held, not the number: the
+    link says whatever the strip says.
+17. **The Results count is result sets too**, so the canvas's `Results 0 ·
+    Sequence 6` is finally a state this app can be in.
+18. **A failure is marked, not tabbed.** It no longer has a tab to be opened
+    on, so the status bar's `aborted at N` chip carries its message on its
+    title, and Sequence has it in full. When a run returned *no* rows at all
+    the failing statement is still what fills the grid, verbatim, as it always
+    was — that path is unchanged.
+
+The one behaviour genuinely lost: a script that returns rows **and** fails used
+to open on the failure. It opens on the last result set now, with the failure
+in the chip and in the log. Pinned by a rewritten Stage 12 test rather than
+left to be rediscovered.
+
+### 12.2 A line while a run is in flight
+
+19. **Sequence shows the run that has started**, as a header with nothing under
+    it yet, at the top where its statements will appear — the backend answers
+    once, at the end, so there is nothing else to show. It names **which** run,
+    which is the part the grid's generic "Running…" cannot: a log of five runs
+    needs to know whether the sixth is a `Run all` or one statement. That is
+    what `ScriptTab.runningWhat` is for. The shut strip says it too.
+
+### 12.3 What the tests found
+
+**A third falsification that passed, same class as yesterday's.** Reversing
+`initialIndex`'s order — putting the failure back ahead of the last result set
+— changed nothing the suite could see, because `show`'s new clamp forces the
+selection onto a result set anyway. Two mechanisms, one question. `initialIndex`
+now decides only what it really decides, the no-result-set fallback, and the
+falsification moved to the clamp, where it bites. Yesterday it was a redundant
+guard in `addEmptyHint`; the day before, a redundant question in
+`resultIndexOf`. Three for three: when a change adds a mechanism, the thing it
+duplicates is where to look.
+
+**21 tests broke, and that list was the specification.** Every one was a count
+the change is about — two tabs where there were five, `Results 2` where it said
+`Results 4`, `Result 1` where the link said `Result 2`. Two were Stage 12's and
+needed their claims restated rather than their numbers patched: "a failed
+statement is marked and its error shown" is now about the chip and the log, and
+"the tab that opens is the last one with rows" needed a fixture with two result
+sets, because with one there is no strip to choose within.
+
+**Six more falsifications, each biting its own assertion**: a tab per statement
+again; the count back to statements; the link numbering by statement; the
+aborted chip without its message; no line for the run in flight; and the line
+not saying which run.
+
+**589 UI tests on Chromium and 588 on WebKit, none failing** (one skipped on
+WebKit); `mise run check` exit 0. The backend still has not changed.

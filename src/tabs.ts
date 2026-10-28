@@ -60,6 +60,14 @@ export interface ScriptTab {
   seqScrollTop: number;
   /** Which statements Sequence is showing. Per tab, like the view itself. */
   seqFilter: SeqFilter;
+  /**
+   * What the run in flight was called, while `busy` — null otherwise.
+   *
+   * `busy` says that something is running; this says **which** run, which is
+   * the part the grid's "Running…" cannot. A log of five runs needs to know
+   * whether the sixth is a Run all or one statement.
+   */
+  runningWhat: string | null;
   title: string;
   filePath: string | null;
   dialect: string;
@@ -442,6 +450,7 @@ export class TabManager {
       sequence: emptyLog(),
       seqScrollTop: 0,
       seqFilter: "all",
+      runningWhat: null,
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
       // From the connection, not a constant. This field has been written to
@@ -595,6 +604,7 @@ export class TabManager {
         sequence: emptyLog(),
         seqScrollTop: 0,
         seqFilter: "all",
+        runningWhat: null,
         title: spec.title,
         filePath: spec.filePath,
         dialect: spec.dialect,

@@ -346,6 +346,7 @@ export function logText(log: SequenceLog, filter: SeqFilter): string {
 
 /** One row of the painted list: a run's header, or one of its statements. */
 type Row =
+  | { kind: "running"; what: string }
   | { kind: "run"; run: SequenceRun }
   | { kind: "entry"; run: SequenceRun; runIndex: number; entry: SequenceEntry };
 
@@ -353,14 +354,27 @@ export interface SequenceFor {
   log: SequenceLog;
   filter: SeqFilter;
   /**
-   * Which result tab this entry's statement has right now, or -1.
+   * What is running right now, or null.
    *
-   * Asked rather than stored, because `closeStatement` renumbers the tabs: a
-   * row saying "Result 3" while the strip says "Result 2" would be a confident
-   * lie, and an entry whose result has been closed should simply stop offering
-   * the link.
+   * A run in flight has no entries to list — the backend answers once, at the
+   * end — so it is a header with nothing under it yet, at the top where its
+   * entries will appear. It says **which** run, which is the part the result
+   * grid's "Running…" cannot: a log of five runs needs to know whether this is
+   * the Run all or the one statement.
    */
-  resultIndexOf: (runIndex: number, entry: SequenceEntry) => number;
+  running: string | null;
+  /**
+   * Which result tab this entry's statement has right now, or null.
+   *
+   * **Two numbers, because they are two different things.** `label` is what the
+   * strip prints — a position among the result sets, which is all the strip
+   * holds since Stage 29.1 — and `index` is the statement to select when the
+   * link is clicked. Asked rather than stored, because `closeStatement`
+   * renumbers both: a row saying "Result 3" while the strip says "Result 2"
+   * would be a confident lie, and an entry whose result has been closed should
+   * simply stop offering the link.
+   */
+  resultTabOf: (runIndex: number, entry: SequenceEntry) => { label: number; index: number } | null;
   onGoToResult: (index: number) => void;
   onReveal: (run: SequenceRun, entry: SequenceEntry) => void;
   scrollTop: number;
@@ -401,6 +415,7 @@ export class SequenceView {
   show(opts: SequenceFor) {
     this.opts = opts;
     this.rows = [];
+    if (opts.running) this.rows.push({ kind: "running", what: opts.running });
     opts.log.runs.forEach((run, runIndex) => {
       const kept = run.entries.filter((entry) => matches(entry, opts.filter));
       // A run with nothing left in it is a header over a gap. The run still
@@ -444,6 +459,13 @@ export class SequenceView {
   }
 
   private rowEl(row: Row, opts: SequenceFor): HTMLElement {
+    if (row.kind === "running") {
+      const head = div("seq-run seq-running");
+      head.style.height = `${SEQ_ROW_H}px`;
+      head.append(div("seq-what", "Executing"), div("seq-at", row.what));
+      head.append(div("seq-run-summary", "… the server reports when it finishes."));
+      return head;
+    }
     if (row.kind === "run") {
       const head = div("seq-run");
       head.style.height = `${SEQ_ROW_H}px`;
@@ -475,14 +497,14 @@ export class SequenceView {
     sql.onclick = () => opts.onReveal(run, entry);
     el.append(sql);
 
-    const at = entry.madeRows ? opts.resultIndexOf(runIndex, entry) : -1;
-    if (at >= 0) {
+    const at = entry.madeRows ? opts.resultTabOf(runIndex, entry) : null;
+    if (at) {
       const link = document.createElement("button");
       link.type = "button";
       link.className = "seq-out seq-link";
-      link.textContent = `${entry.outcome} → Result ${at + 1}`;
+      link.textContent = `${entry.outcome} → Result ${at.label}`;
       link.title = "Show this result in Results";
-      link.onclick = () => opts.onGoToResult(at);
+      link.onclick = () => opts.onGoToResult(at.index);
       el.append(link);
     } else {
       const out = div(`seq-out seq-out-${entry.shape}`, entry.outcome);

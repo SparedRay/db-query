@@ -234,15 +234,31 @@ test("copy after switching to a shorter result copies that result", async ({ pag
   await expect.poll(() => sent).toEqual([["1"]]);
 });
 
-test("a failed statement is marked and its error shown", async ({ page }) => {
+/**
+ * **A failure is marked, and its message is reachable** — but not as a tab.
+ *
+ * It had one until Stage 29.1, holding a sentence where every other tab holds
+ * a table. The strip is result sets now, so the mark is the status bar's run
+ * chip and the message is on its title; Sequence carries it in full. Pinned
+ * here because "the error is shown" was this test's whole point, and where it
+ * is shown changed.
+ */
+test("a failed statement is marked, and its message is on the chip", async ({ page }) => {
   const r = twoStatements();
   r.statements[1].outcome = { type: "error", message: "Unknown column 'zzz'" } as never;
   r.abortedAt = 1 as never;
   await connect(page, { run_script: () => r });
   await page.click("#btn-run-all");
 
-  await expect(page.locator("#tabs .tab.errored")).toHaveCount(1);
-  await expect(page.locator("#grid")).toContainText(/Unknown column/);
+  // Not a tab, and not a tab wearing an error mark either.
+  await expect(page.locator("#tabs .tab.errored")).toHaveCount(0);
+  const chip = page.locator("#status .chip", { hasText: "aborted at 2" });
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("title", /Unknown column/);
+
+  // And in full, in the log.
+  await page.click("#res-view-sequence");
+  await expect(page.locator("#sequence")).toContainText("Unknown column 'zzz'");
 });
 
 // ------------------------------------------------------------------- the grid
@@ -360,15 +376,23 @@ test("an UPDATE that matched nothing still reports zero", async ({ page }) => {
   await expect(page.locator("#grid .empty")).toHaveText("0 row(s) affected.");
 });
 
-/** A script ending in COMMIT must not open on the commit. */
+/**
+ * A script ending in COMMIT must not open on the commit.
+ *
+ * Two result sets, because one gets no strip at all: the question is *which*
+ * tab opens, so there have to be two to choose between. Since Stage 29.1 the
+ * COMMIT has no tab either, which makes the naive rule impossible rather than
+ * merely wrong — the clamp in `show` is what guarantees that.
+ */
 test("the tab that opens is the last one with rows, not the last statement", async ({ page }) => {
-  const r = sessionThenSelect();
-  // SELECT first, then COMMIT: the naive "last statement" rule picks the wrong one.
-  r.statements = [r.statements[1], { ...r.statements[0], sql: "COMMIT" }];
+  const r = twoStatements();
+  const commit = { ...sessionThenSelect().statements[0], sql: "COMMIT" };
+  r.statements = [r.statements[0], r.statements[1], commit as never];
   await connect(page, { run_script: () => r });
   await page.click("#btn-run-all");
 
-  await expect(page.locator("#tabs .tab.active")).toContainText("Result 1");
+  await expect(page.locator("#tabs .tab")).toHaveCount(2);
+  await expect(page.locator("#tabs .tab.active")).toContainText("Result 2");
   await expect(page.locator("table.rs")).toBeVisible();
 });
 
