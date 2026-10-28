@@ -56,7 +56,11 @@ import { icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter } from "./treefilter";
 import { ResultView } from "./grid";
-import { TabManager, clearResult, type ScriptTab } from "./tabs";
+import { TabManager, clearResult, type OutputView, type ScriptTab } from "./tabs";
+import {
+  SequenceView, emptyLog, entryCount, logText, pushRun, returnedRows, runFrom, runTotals,
+  totals, type SeqFilter, type SequenceEntry, type SequenceRun,
+} from "./sequence";
 import {
   ConnectionManager, COLOURS, newConnectionId, serverLabel, type ConnectionEntry,
 } from "./connections";
@@ -187,7 +191,24 @@ const els = {
   expCreateDbNote: $<HTMLElement>("exp-create-db-note"),
   expOmitDefiner: $<HTMLInputElement>("exp-omit-definer"),
   flywayBody: $<HTMLElement>("flyway-body"),
+  resHead: $<HTMLElement>("res-head"),
   resToggle: $<HTMLButtonElement>("res-toggle"),
+  resViewResults: $<HTMLButtonElement>("res-view-results"),
+  resViewSequence: $<HTMLButtonElement>("res-view-sequence"),
+  resCountResults: $<HTMLElement>("res-count-results"),
+  resCountSequence: $<HTMLElement>("res-count-sequence"),
+  sequence: $<HTMLElement>("sequence"),
+  sequencePane: $<HTMLElement>("sequence-pane"),
+  seqFilters: $<HTMLElement>("seq-filters"),
+  seqAll: $<HTMLButtonElement>("seq-all"),
+  seqChanges: $<HTMLButtonElement>("seq-changes"),
+  seqErrors: $<HTMLButtonElement>("seq-errors"),
+  seqScope: $<HTMLElement>("seq-scope"),
+  seqFoot: $<HTMLElement>("seq-foot"),
+  seqChips: $<HTMLElement>("seq-chips"),
+  seqCopy: $<HTMLButtonElement>("seq-copy"),
+  seqClear: $<HTMLButtonElement>("seq-clear"),
+  resultBarRow: $<HTMLElement>("result-bar-row"),
   resCaret: $("res-caret"),
   resTitle: $("res-title"),
   resSummary: $("res-summary"),
@@ -279,6 +300,9 @@ const results = new ResultView(
   // is exactly the class of bug this project has already shipped once.
   (headers) => void copySelection(headers),
 );
+
+/** Stage 29's second view of the same runs. Its own host, beside the grid. */
+const sequenceView = new SequenceView($("sequence"));
 
 let view!: EditorView;
 let tabs!: TabManager;
@@ -1822,10 +1846,148 @@ function showResults(tab: ScriptTab) {
     showResultsInner(tab);
   } finally {
     refreshExportBar();
+    paintResultsHead();
   }
 }
 
+/**
+ * Sequence: the log, or a sentence saying there is none.
+ *
+ * `scrollTop` comes back off the tab, as the grid's does — a repaint is what
+ * every run and every tab switch causes, and a list that jumped to the top
+ * each time would be unreadable while a script was being iterated on.
+ */
+function showSequence(tab: ScriptTab) {
+  // Nothing has run: a sentence is the whole answer. A filter over an empty log
+  // and a footer counting to zero would both be controls for a thing that is
+  // not there.
+  const empty = tab.sequence.runs.length === 0;
+  els.seqFilters.hidden = empty;
+  els.seqFoot.hidden = empty;
+  // Painted whether or not it is on screen. A hidden control whose state
+  // disagrees with the tab is a control that is wrong the moment it is shown.
+  for (const [el, filter] of SEQ_FILTERS) {
+    el.setAttribute("aria-pressed", String(tab.seqFilter === filter));
+  }
+  if (empty) {
+    sequenceView.setMessage(
+      connected
+        ? "Nothing has run in this tab yet. Ctrl+Enter runs the statement under the cursor."
+        : "Not connected.",
+    );
+    return;
+  }
+  paintSequenceFoot(tab);
+  sequenceView.show({
+    log: tab.sequence,
+    filter: tab.seqFilter,
+    resultIndexOf: (runIndex, entry) => resultIndexOf(tab, runIndex, entry),
+    onGoToResult: (i) => {
+      tab.activeResultIndex = i;
+      setOutputView(tab, "results");
+    },
+    onReveal: (run, entry) => revealSequenceEntry(run, entry),
+    scrollTop: tab.seqScrollTop,
+    onScrolled: (top) => { tab.seqScrollTop = top; },
+  });
+}
+
+/**
+ * The filter's state, what the log holds, and how much of it is on screen.
+ *
+ * **The chips count the whole log.** They are its summary the way the result
+ * bar is a result set's; a filter changes what you look through, not what the
+ * tab did. How much is hidden is said once, beside the control that hid it.
+ */
+function paintSequenceFoot(tab: ScriptTab) {
+  const t = totals(tab.sequence, tab.seqFilter);
+  const chips: HTMLElement[] = [chip(`${t.statements} statement${t.statements === 1 ? "" : "s"}`)];
+  if (t.changes > 0) {
+    chips.push(chip(`${t.changes} changed ${t.rowsChanged} row${t.rowsChanged === 1 ? "" : "s"}`));
+  }
+  if (t.errors > 0) chips.push(chip(`${t.errors} error${t.errors === 1 ? "" : "s"}`, "chip warn"));
+  // What the cap took, said where the totals are said. As a row at the end of
+  // the list it would sit two thousand rows below anybody who wanted it.
+  if (tab.sequence.droppedRuns > 0) {
+    const runs = tab.sequence.droppedRuns;
+    const gone = tab.sequence.droppedEntries;
+    chips.push(
+      chip(
+        `${runs} earlier run${runs === 1 ? "" : "s"} dropped ` +
+          `(${gone} statement${gone === 1 ? "" : "s"})`,
+      ),
+    );
+  }
+  els.seqChips.replaceChildren(...chips);
+
+  els.seqScope.textContent =
+    tab.seqFilter === "all"
+      ? "This tab, since it opened"
+      : `Showing ${t.shown} of ${t.statements}`;
+}
+
+function chip(text: string, cls = "chip"): HTMLElement {
+  return elem("span", cls, text);
+}
+
+const SEQ_FILTERS: [HTMLButtonElement, SeqFilter][] = [
+  [els.seqAll, "all"],
+  [els.seqChanges, "changes"],
+  [els.seqErrors, "errors"],
+];
+
+/**
+ * Which result tab this entry's statement has, or -1.
+ *
+ * **Only the newest run can have one.** A run is recorded at the moment its
+ * `ScriptResult` becomes `tab.result`, and the next run replaces that — so
+ * every older run's results are gone, and offering a link to one would send
+ * you to somebody else's rows.
+ *
+ * Matched on the offsets, not the text: `SequenceEntry.sql` is collapsed to one
+ * line for the row, so comparing it to the statement's own SQL would never
+ * match. Within one run the offsets are unique by construction.
+ */
+function resultIndexOf(tab: ScriptTab, runIndex: number, entry: SequenceEntry): number {
+  if (runIndex !== 0) return -1;
+  const statements = tab.result?.statements;
+  if (!statements) return -1;
+  return statements.findIndex((st) => st.start === entry.start && st.end === entry.end);
+}
+
+/** The same reveal a result tab's double-click does, from a Sequence row. */
+function revealSequenceEntry(run: SequenceRun, entry: SequenceEntry) {
+  // The note, not the grid: Sequence's grid is not on screen, and printing the
+  // answer there would mean leaving the log to read it. The row's own title
+  // already carries the whole statement, so a line is enough here.
+  revealSql(run.base, entry.start, entry.end, entry.fullSql, () =>
+    showNote("That statement is no longer in this tab. Its full text is on the row's tooltip."),
+  );
+}
+
+/**
+ * Stage 29. Which surface is in front, and the view switch above it.
+ *
+ * A swap rather than two regions side by side: Results and Sequence hold
+ * different things about the same run, and either one at half height is worse
+ * than either one whole. The note under them stays in both — "that statement is
+ * no longer in this tab" is as true of a Sequence row as of a result tab.
+ */
+function showSurface(tab: ScriptTab) {
+  const seq = tab.outputView === "sequence";
+  els.resultTabs.hidden = seq;
+  els.grid.hidden = seq;
+  els.resultBarRow.hidden = seq;
+  els.sequencePane.hidden = !seq;
+  paintViewSwitch(tab);
+}
+
 function showResultsInner(tab: ScriptTab) {
+  showSurface(tab);
+  if (tab.outputView === "sequence") {
+    showSequence(tab);
+    return;
+  }
   if (tab.busy) {
     results.setMessage(
       tab.result
@@ -1855,7 +2017,34 @@ function showResultsInner(tab: ScriptTab) {
     onSelectionChanged: () => refreshExportBar(),
     onCloseStatement: (i) => closeStatement(tab, i),
     onRevealStatement: (i) => revealStatement(tab, i),
+    emptyHint: emptyRunHint(tab),
   });
+}
+
+/**
+ * What to say when a run returned no rows at all — and the way through to the
+ * view that does have something.
+ *
+ * **Results stays in front.** A view that switched itself would make the count
+ * on the header unreadable as a fact, and would take the pane away from
+ * somebody who ran a migration script on purpose and wants to see it finish.
+ * So it says what the run did instead, and offers the move rather than making
+ * it.
+ */
+function emptyRunHint(tab: ScriptTab): { text: string; label: string; run: () => void } | null {
+  const run = tab.sequence.runs[0];
+  if (!run || returnedRows(run)) return null;
+  const t = runTotals(run);
+  const bits = [`${t.statements} statement${t.statements === 1 ? "" : "s"}`];
+  if (t.changes > 0) {
+    bits.push(`${t.changes} changed ${t.rowsChanged} row${t.rowsChanged === 1 ? "" : "s"}`);
+  }
+  if (t.errors > 0) bits.push(`${t.errors} error${t.errors === 1 ? "" : "s"}`);
+  return {
+    text: `No result sets in this run \u2014 ${bits.join(", ")}.`,
+    label: "Show in Sequence",
+    run: () => setOutputView(tab, "sequence"),
+  };
 }
 
 /** Byte offset of a character position in the current buffer. */
@@ -1876,26 +2065,44 @@ function byteOffsetOf(pos: number): number {
 function revealStatement(tab: ScriptTab, index: number) {
   const statement = tab.result?.statements[index];
   if (!statement) return;
-
-  const doc = view.state.doc.toString();
-  const toChar = makeByteToChar(doc);
-  const from = toChar(tab.resultBase + statement.start);
-  const to = toChar(tab.resultBase + statement.end);
-  const found =
-    doc.slice(from, to) === statement.sql
-      ? { from, to }
-      : locate(doc, statement.sql);
-  if (!found) {
+  revealSql(tab.resultBase, statement.start, statement.end, statement.sql, (sql) =>
+    // Into the grid, as it has been since Stage 12: the statement's whole text
+    // is the useful half of this answer, and the grid is the only surface here
+    // with room to print it.
     results.setMessage(
       `The statement behind result ${index + 1} is no longer in this tab. ` +
         "It ran as:\n\n" +
-        statement.sql,
-    );
+        sql,
+    ),
+  );
+}
+
+/**
+ * Select `sql`, which ran at `start`–`end` bytes past `base`.
+ *
+ * Shared with Sequence since Stage 29, which asks the same question of a log
+ * entry. The failure goes through `showNote` rather than the grid: a Sequence
+ * row's grid is not on screen, and the note under both views is.
+ */
+function revealSql(
+  base: number,
+  start: number,
+  end: number,
+  sql: string,
+  fail: (sql: string) => void,
+) {
+  const doc = view.state.doc.toString();
+  const toChar = makeByteToChar(doc);
+  const from = toChar(base + start);
+  const to = toChar(base + end);
+  const found = doc.slice(from, to) === sql ? { from, to } : locate(doc, sql);
+  if (!found) {
+    fail(sql);
     return;
   }
-
   selectRange(view, found.from, found.to);
 }
+
 
 /** Where `needle` sits in `haystack`, if it sits there exactly once. */
 function locate(haystack: string, needle: string): { from: number; to: number } | null {
@@ -1950,7 +2157,7 @@ function closeAllResults(tab: ScriptTab) {
  * is what turns a result back into the SQL that produced it — see
  * `revealStatement`.
  */
-async function run(sql: string, base = 0) {
+async function run(sql: string, base = 0, what = "Run") {
   const tab = activeTab();
   // A view has no buffer to run, and its tab belongs to no connection.
   if (tab.kind !== "sql") return;
@@ -1968,6 +2175,11 @@ async function run(sql: string, base = 0) {
 
     tab.result = res;
     tab.error = null;
+    // Stage 29. The log is written here, beside `tab.result`, because this is
+    // the one place a result lands — which is also what makes "the newest run
+    // is the one with result tabs" true rather than hopeful.
+    pushRun(tab.sequence, runFrom(what, base, res));
+    tab.seqScrollTop = 0;
     tab.activeResultIndex = ResultView.initialIndex(res);
     tab.scrollTop = 0;
     tab.colWidths.clear();
@@ -2163,17 +2375,17 @@ setSchemaLoader((name) => {
 /** Ctrl+Enter: the selection if there is one, else the statement under the cursor. */
 async function runStatementUnderCursor() {
   const sel = selectedText(view);
-  if (sel) return run(sel, byteOffsetOf(view.state.selection.main.from));
+  if (sel) return run(sel, byteOffsetOf(view.state.selection.main.from), "Run selection");
 
   // Boundary rules live in exactly one place — the Rust splitter. This asks
   // for the statement text rather than reimplementing the scan here, so the
   // statement we run is by construction the one execution would pick.
   const stmt = await api.statementAtCursor(docText(view), cursorByteOffset(view));
-  if (stmt) await run(stmt.sql, stmt.start);
+  if (stmt) await run(stmt.sql, stmt.start, "Run");
 }
 
 els.btnRun.onclick = () => void runStatementUnderCursor();
-els.btnRunAll.onclick = () => void run(docText(view));
+els.btnRunAll.onclick = () => void run(docText(view), 0, "Run all");
 els.btnCancel.onclick = async () => {
   try {
     await api.cancelQuery(activeTab().id);
@@ -2269,9 +2481,11 @@ function setResultsShut(shut: boolean) {
     : "Collapse the results to a strip (Ctrl+J)";
   if (!shut) clearLanded();
   paintResultsHead();
-  // The grid paints only the rows its viewport can show, and the viewport just
-  // went from nothing to full height. `relayout` is what makes the rows appear.
+  // Neither view paints more rows than its viewport can show, and the viewport
+  // just went from nothing to full height. `relayout` is what makes them
+  // appear.
   results.relayout();
+  sequenceView.relayout();
 }
 
 function clearLanded() {
@@ -2307,9 +2521,67 @@ function noteResultsLanded() {
  * many rows arrived.
  */
 function paintResultsHead() {
-  // Results only, since Stage 28: Flyway's report is the migrations panel's.
-  els.resTitle.textContent = "Results";
-  els.resSummary.textContent = statusSummary();
+  const tab = tabs?.active() ?? null;
+  // "Output", not "Results", since Stage 29: Results is one of the two views
+  // inside it, and the switch below the title is what names them.
+  els.resTitle.textContent = "Output";
+  paintViewSwitch(tab);
+  els.resSummary.textContent =
+    tab?.outputView === "sequence" ? sequenceSummary(tab) : statusSummary();
+}
+
+/**
+ * Which view is pressed, and what each one holds.
+ *
+ * **Both counts, always.** The view you are not reading still says whether it
+ * has anything — which is the whole reason a run with no result sets is not a
+ * dead end: Results says nothing came back and the switch says six statements
+ * did.
+ */
+function paintViewSwitch(tab: ScriptTab | null) {
+  const showing: OutputView = tab?.outputView ?? "results";
+  els.resViewResults.setAttribute("aria-pressed", String(showing === "results"));
+  els.resViewSequence.setAttribute("aria-pressed", String(showing === "sequence"));
+  paintCount(els.resCountResults, tab?.result?.statements.length ?? 0);
+  paintCount(els.resCountSequence, tab ? entryCount(tab.sequence) : 0);
+}
+
+function paintCount(el: HTMLElement, n: number) {
+  el.textContent = n > 0 ? String(n) : "";
+  el.hidden = n === 0;
+}
+
+/**
+ * What a shut pane says while Sequence is the view in front.
+ *
+ * The newest run's last statement, because that is where a script stops — the
+ * error, or the last thing it managed. Results reads the status chips for the
+ * same purpose; neither composes a figure the view below it does not show.
+ */
+function sequenceSummary(tab: ScriptTab): string {
+  const run = tab.sequence.runs[0];
+  if (!run) return "Nothing has run in this tab yet.";
+  const last = run.entries[run.entries.length - 1];
+  if (!last) return `${run.what} ${run.summary}`;
+  return `${last.verb} \u00b7 ${last.outcome} \u00b7 ${last.elapsedMs} ms`;
+}
+
+/**
+ * Switch view, for this tab only.
+ *
+ * **It does not open a shut pane.** The switch is in the strip and stays usable
+ * while the pane is shut — the summary follows the view you chose — and a
+ * click that reopened the pane would make the strip's own control a way of
+ * undoing Ctrl+J.
+ */
+function setOutputView(tab: ScriptTab, next: OutputView) {
+  if (tab.outputView === next) return;
+  tab.outputView = next;
+  showResults(tab);
+  // Both viewports just changed between nothing and full height, and both
+  // paint only the rows theirs can show.
+  results.relayout();
+  sequenceView.relayout();
 }
 
 function statusSummary(): string {
@@ -2324,6 +2596,47 @@ function statusSummary(): string {
 }
 
 els.resToggle.onclick = () => setResultsShut(!resultsShut);
+for (const [el, view] of [
+  [els.resViewResults, "results"],
+  [els.resViewSequence, "sequence"],
+] as [HTMLButtonElement, OutputView][]) {
+  el.onclick = () => {
+    const tab = tabs?.active();
+    if (tab) setOutputView(tab, view);
+  };
+}
+
+for (const [el, filter] of SEQ_FILTERS) {
+  el.onclick = () => {
+    const tab = tabs?.active();
+    if (!tab || tab.seqFilter === filter) return;
+    tab.seqFilter = filter;
+    // Back to the top: the rows under the old scroll position are not the
+    // rows that were there, so holding it would land somewhere arbitrary.
+    tab.seqScrollTop = 0;
+    showResults(tab);
+  };
+}
+
+// Reports on itself and puts its own label back — the same button Stage 10's
+// assistant uses, for the same reason: a copy that silently failed is the one
+// outcome a clipboard must never have.
+wireCopyButton(els.seqCopy, () => {
+  const tab = tabs?.active();
+  return tab ? logText(tab.sequence, tab.seqFilter) : "";
+});
+
+els.seqClear.onclick = () => {
+  const tab = tabs?.active();
+  if (!tab) return;
+  // **The results are not touched.** Clearing the log is about the log; the
+  // rows in the grid were asked for separately and "Close results" is how you
+  // say you are done with them.
+  tab.sequence = emptyLog();
+  tab.seqFilter = "all";
+  tab.seqScrollTop = 0;
+  showResults(tab);
+};
 els.resCaret.append(icon("chevron"));
 els.resToggle.title = "Collapse the results to a strip (Ctrl+J)";
 
@@ -2414,7 +2727,7 @@ view = createEditor($("editor"), {
   // SQL buffer, which is where the question belongs — a guard in the key
   // binding would be a second place to forget it.
   onRunStatement: () => void runStatementUnderCursor(),
-  onRunAll: () => void run(docText(view)),
+  onRunAll: () => void run(docText(view), 0, "Run all"),
   onFormat: () => void formatBuffer(),
   // Keeps the dirty dot honest without polling.
   onDocChanged: () => {
@@ -3199,7 +3512,7 @@ const assistant = createAssistant({
       results.setMessage("Open a connection first — a statement runs against one.");
       return;
     }
-    void run(sql);
+    void run(sql, 0, "Assistant");
   },
   // Asked per block as it is drawn, so a statement proposed before you
   // connected is offered properly once you have.

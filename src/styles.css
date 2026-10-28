@@ -1678,14 +1678,42 @@ button .spinner {
    thing to learn. */
 .res-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 6px 10px; min-height: 30px; flex: 0 0 auto;
-  border: none; border-bottom: 1px solid var(--border);
-  background: var(--bg-raised); cursor: pointer; text-align: left;
+  padding: 0 10px; min-height: 30px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised); text-align: left;
+  box-sizing: border-box;
 }
-.res-head:hover { background: var(--bg-hover); }
+/* The toggle takes the row's spare width, so most of the strip is still the
+   target Stage 26 made it — see index.html for why it is no longer all of it. */
+.res-toggle {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; border: none; background: none; cursor: pointer;
+  font: inherit; color: inherit; text-align: left;
+}
+.res-toggle:hover .res-title { color: var(--fg); }
 .res-head .twisty { display: flex; align-items: center; color: var(--fg-dim); }
 .res-head .twisty svg { width: 12px; height: 12px; transition: transform .12s ease; }
 .res-head .twisty.open svg { transform: rotate(90deg); }
+
+/* --- Stage 29: the view switch ----------------------------------------- */
+
+/* Built like the migrations panel's picker (Stage 28): the same border, the
+   same radius, the same 12px label. */
+/* One segmented control, used by the view switch and by the log's filter: the
+   same shape of choice, so a second look would be a second thing to learn. */
+.seg { flex: 0 0 auto; display: flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg-btn {
+  display: flex; align-items: center; gap: 5px;
+  font: inherit; font-size: 12px; color: var(--fg-dim);
+  padding: 2px 10px; border: none; background: transparent; cursor: pointer;
+}
+.seg-btn:hover { color: var(--fg); background: var(--btn-bg); }
+.seg-btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+.seg-count {
+  font-size: 11px; border-radius: 9px; padding: 0 6px;
+  background: var(--btn-bg); color: var(--fg);
+}
+.seg-btn[aria-pressed="true"] .seg-count { background: rgba(0, 0, 0, .22); color: var(--on-accent); }
 .res-title {
   font: 600 10.5px/1.4 system-ui, sans-serif; letter-spacing: .1em;
   text-transform: uppercase; color: var(--fg-dim);
@@ -1700,13 +1728,105 @@ button .spinner {
 #main:not(.results-shut) .res-summary { display: none; }
 /* What landed while the pane was shut. Held for a moment rather than forever:
    it answers "did that run do anything" and then gets out of the way. */
-.res-head.landed { background: var(--sel-header-bg); }
-.res-head.landed .res-title, .res-head.landed .res-summary { color: var(--fg-strong); }
+.res-toggle.landed { background: var(--sel-header-bg); }
+.res-toggle.landed .res-title, .res-toggle.landed .res-summary { color: var(--fg-strong); }
 .res-key { margin-left: 0; flex: 0 0 auto; }
 
 /* Everything the header hides. The job strip is NOT in here — see index.html. */
 .results-body { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 #main.results-shut .results-body { display: none; }
+
+/* --- Stage 29: Sequence's rows ----------------------------------------- */
+
+/* Every row is `SEQ_ROW_H` tall and says so in its own style attribute, because
+   the list is windowed on that number: a row that disagreed with it would make
+   the spacers the wrong size and the scrollbar a lie. */
+/* The pane is three rows: the filter, the list, the footer. Only the middle
+   one scrolls — a filter that scrolled away would be unreachable from the
+   bottom of a long log, which is where you would be when you wanted it. */
+.sequence-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.seq-filters {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--bg-raised);
+}
+.seq-scope {
+  flex: 1; min-width: 0; text-align: right; font-size: 11.5px; color: var(--fg-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.seq-foot { flex: 0 0 auto; border-top: 1px solid var(--border); background: var(--bg-raised); }
+.seq-foot .status { flex: 1; border-top: none; min-width: 0; }
+.sequence-host { flex: 1 1 auto; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.sequence-host:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.seq-empty { padding: 12px 14px; color: var(--fg-dim); white-space: pre-wrap; }
+
+/* A run's header. Darker than its statements, so the grouping reads without a
+   rule between every block. */
+.seq-run {
+  display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  background: var(--bg-hover); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 1;
+}
+.seq-what { font-weight: 600; flex: 0 0 auto; }
+.seq-at { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); flex: 0 0 auto; }
+.seq-run-summary {
+  flex: 1; min-width: 0; color: var(--fg-dim); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Stage 29: under the grid's own message, when a run returned no rows at all.
+   A sentence naming what it did instead, and the way through to the view that
+   has it — offered, not taken: nothing switches view on its own. */
+.empty-hint {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 14px 14px; color: var(--fg-dim);
+  /* Its own font and colour: it sits inside `.err-box` too, which is mono and
+     red, and a sentence from the app should not read as the server's error. */
+  font: 12px system-ui, sans-serif;
+}
+
+.seq-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: 11px 62px minmax(0, 1fr) auto 62px;
+  padding: 0 12px 0 20px; border-bottom: 1px solid var(--border);
+}
+.seq-row:hover { background: var(--btn-bg); }
+
+/* Shape as well as colour: four states that have to be told apart at a glance,
+   and hue alone does not do that. Each also differs in lightness. */
+.seq-dot { width: 9px; height: 9px; }
+.seq-dot.seq-data { border-radius: 50%; background: var(--accent); }
+.seq-dot.seq-change { border-radius: 2px; background: var(--warn-fg); }
+.seq-dot.seq-ok { border-radius: 50%; border: 2px solid var(--fg-dim); box-sizing: border-box; }
+.seq-dot.seq-error { background: var(--danger-fg); transform: rotate(45deg); }
+
+.seq-verb {
+  font: 600 10.5px/1.6 var(--mono); text-align: center; border-radius: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--btn-bg); color: var(--fg-dim);
+}
+.seq-verb-data { background: var(--sel-header-bg); color: var(--fg-strong); }
+.seq-verb-change { background: var(--btn-bg); color: var(--warn-fg); }
+.seq-verb-error { background: var(--btn-bg); color: var(--danger-fg); }
+
+.seq-sql {
+  min-width: 0; font: inherit; font-family: var(--mono); font-size: 12px;
+  color: var(--fg); background: none; border: none; padding: 0; cursor: pointer;
+  text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.seq-sql:hover { color: var(--accent); }
+
+.seq-out {
+  font-size: 11.5px; justify-self: end; max-width: 280px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.seq-out-change { color: var(--warn-fg); }
+.seq-out-error { color: var(--danger-fg); }
+.seq-out-ok { color: var(--fg-dim); }
+.seq-link {
+  font: inherit; font-size: 11.5px; background: none; border: none; padding: 0;
+  color: var(--accent); cursor: pointer; text-decoration: underline;
+}
+.seq-ms { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); text-align: right; }
 
 /* --- L3: Flyway's output, in the migrations panel since Stage 28 -------- */
 .flyway-body {

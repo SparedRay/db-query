@@ -106,16 +106,36 @@
 
                A <button> spanning the row rather than a caret you have to hit:
                the whole strip is the target, which is what makes it a habit. -->
-          <button type="button" id="res-toggle" class="res-head"
-                  aria-expanded="true" aria-controls="results-body">
-            <span class="twisty open" id="res-caret"></span>
-            <span class="res-title" id="res-title">Results</span>
-            <!-- What is worth seeing while the pane is shut: the status chips in
-                 one line, or Flyway's operation. Hidden while it is open, where
-                 the result bar already says it. -->
-            <span class="res-summary" id="res-summary"></span>
+          <!-- Stage 29: a row, not one button.
+               Stage 26 made the whole strip the toggle — the whole strip is the
+               target, which is what makes it a habit — but a <button> cannot
+               contain the two buttons of a segmented control. So the toggle
+               keeps the caret, the title and the shut summary and takes the
+               row's spare width; the view switch sits to its right. The target
+               shrinks; Ctrl+J and the seam are the other two ways in. -->
+          <div class="res-head" id="res-head">
+            <button type="button" id="res-toggle" class="res-toggle"
+                    aria-expanded="true" aria-controls="results-body">
+              <span class="twisty open" id="res-caret"></span>
+              <span class="res-title" id="res-title">Output</span>
+              <!-- What is worth seeing while the pane is shut, and it follows
+                   the view in front: Results reads the status chips, Sequence
+                   its newest entry. Hidden while the pane is open, where each
+                   view's own footer says it. -->
+              <span class="res-summary" id="res-summary"></span>
+            </button>
+            <!-- Two views of the same runs. Each carries its own count, so the
+                 one you are not reading still says whether it has anything. -->
+            <div class="seg" role="group" aria-label="Output view">
+              <button type="button" id="res-view-results" class="seg-btn" aria-pressed="true">
+                Results<span class="seg-count" id="res-count-results" hidden></span>
+              </button>
+              <button type="button" id="res-view-sequence" class="seg-btn" aria-pressed="false">
+                Sequence<span class="seg-count" id="res-count-sequence" hidden></span>
+              </button>
+            </div>
             <kbd class="res-key">Ctrl+J</kbd>
-          </button>
+          </div>
           <!-- A long job's progress, raised by whoever is running one. The
                migrations view has had this since Stage 20 as `#mig-progress`;
                it moved out here when the schema export needed the same thing,
@@ -136,13 +156,45 @@
             <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
             <div id="tabs" class="tabs"></div>
             <div id="grid" class="grid-host" tabindex="0"></div>
+            <!-- Stage 29. Sequence: its filter, its own scrolling region beside
+                 the grid rather than in it, and its own footer. The grid and
+                 the log hold different things about the same run, and a swap is
+                 what keeps either from being half a surface. -->
+            <div id="sequence-pane" class="sequence-pane" hidden>
+              <div class="seq-filters" id="seq-filters">
+                <!-- The same control as the view switch above it: three-way
+                     here, two-way there, one thing to learn. -->
+                <div class="seg" role="group" aria-label="Filter the log">
+                  <button type="button" id="seq-all" class="seg-btn" aria-pressed="true">All</button>
+                  <button type="button" id="seq-changes" class="seg-btn" aria-pressed="false">Changes</button>
+                  <button type="button" id="seq-errors" class="seg-btn" aria-pressed="false">Errors</button>
+                </div>
+                <!-- What the log covers, or how much of it a filter is hiding.
+                     Said once, beside the control that caused it, so the chips
+                     below can go on counting the whole log. -->
+                <span class="seq-scope" id="seq-scope"></span>
+              </div>
+              <div id="sequence" class="sequence-host" tabindex="0"></div>
+              <!-- Built from the result bar's own row: `.status` and
+                   `.result-actions` are what a footer under this pane already
+                   looks like. -->
+              <div class="result-bar-row seq-foot" id="seq-foot">
+                <div class="status" id="seq-chips"></div>
+                <div class="result-actions">
+                  <button type="button" id="seq-copy"
+                          title="Copy the log as shown, tab-separated">Copy as log</button>
+                  <button type="button" id="seq-clear"
+                          title="Discard this tab's log. The results are not touched">Clear</button>
+                </div>
+              </div>
+            </div>
             <!-- Two rows. The note used to sit between the status chips and the
                  buttons, which left it a few characters wide: the chips wrapped
                  into a vertical stack to make room, and the sentence was
                  ellipsised after its first clause. A whole sentence needs a whole
                  row. -->
-            <div class="result-bar">
-              <div class="result-bar-row">
+            <div class="result-bar" id="result-bar">
+              <div class="result-bar-row" id="result-bar-row">
                 <div id="status" class="status"></div>
                 <div class="result-actions">
                   <button id="btn-copy" title="Copy the selection (Ctrl+C)">Copy</button>

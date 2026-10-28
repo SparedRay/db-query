@@ -63,6 +63,16 @@ export interface ResultsFor {
   onCloseStatement: (index: number) => void;
   /** Show the caller which statement produced result `index`. */
   onRevealStatement: (index: number) => void;
+  /**
+   * Stage 29. What to say under the grid's message when **nothing in this run
+   * returned rows** — a line naming what it did instead, and the way through
+   * to the view that shows it.
+   *
+   * The caller composes the line, because it is the log that knows how many
+   * statements changed how many rows. Nothing switches view on its own: a
+   * count on the header is information, and this is the action beside it.
+   */
+  emptyHint?: { text: string; label: string; run: () => void } | null;
 }
 
 export class ResultView {
@@ -78,6 +88,7 @@ export class ResultView {
   private onSelectionChanged: () => void = () => {};
   private onCloseStatement: (index: number) => void = () => {};
   private onRevealStatement: (index: number) => void = () => {};
+  private emptyHint: ResultsFor["emptyHint"] = null;
   /** Anchors for shift-click ranges. */
   private lastCol: number | null = null;
   private lastRow: number | null = null;
@@ -158,6 +169,7 @@ export class ResultView {
     this.onSelectionChanged = opts.onSelectionChanged;
     this.onCloseStatement = opts.onCloseStatement;
     this.onRevealStatement = opts.onRevealStatement;
+    this.emptyHint = opts.emptyHint ?? null;
     this.widths = opts.widths;
     this.selection = opts.selection;
 
@@ -261,6 +273,7 @@ export class ResultView {
 
     if (s.outcome.type === "error") {
       this.gridEl.replaceChildren(el("div", "err-box", s.outcome.message));
+      this.addEmptyHint();
     } else if (s.outcome.type === "affected") {
       // "0 rows affected" is true of a SET and tells you nothing — it reads as
       // a query that matched nothing rather than as a statement that never had
@@ -270,15 +283,44 @@ export class ResultView {
         el(
           "div",
           "empty",
-          s.kind === "session"
-            ? "Statement executed."
-            : `${s.outcome.rows} row(s) affected.`,
+          s.kind === "session" ? "Statement executed." : `${s.outcome.rows} row(s) affected.`,
         ),
       );
+      this.addEmptyHint();
     } else {
       this.buildTable(s.outcome.columns, s.outcome.rows);
     }
     this.renderStatus(r, s);
+  }
+
+  /**
+   * The hint, under whichever message this statement has.
+   *
+   * **Whether there should be one at all is the caller's question**, not this
+   * view's. It was asked in both places at first, and the copy here read
+   * `this.result` — the live array, which `closeStatement` splices. So closing
+   * the one result a run returned would have made this say "no result sets in
+   * this run" about a run that returned one and had it discarded. The caller
+   * asks the log, which remembers what the run did.
+   *
+   * **Beside the message, never inside it.** It went inside at first, and two
+   * Stage 12 tests caught it: `#grid .empty` is asserted by its exact text,
+   * and a sentence Stage 29 appended made "Statement executed." read as
+   * "Statement executed.No result sets in this run — 1 statement.Show in
+   * Sequence". Results is unchanged means its text too.
+   */
+  private addEmptyHint() {
+    const hint = this.emptyHint;
+    if (!hint) return;
+    const line = el("div", "empty-hint");
+    line.append(el("span", "empty-hint-text", hint.text));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mini";
+    button.textContent = hint.label;
+    button.onclick = hint.run;
+    line.append(button);
+    this.gridEl.append(line);
   }
 
   private cols: ColumnMeta[] = [];

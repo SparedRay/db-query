@@ -620,6 +620,35 @@ test("confirming applies, and says what Flyway did", async ({ page }) => {
 });
 
 /**
+ * Stage 29, Q11. **Flyway is not in Sequence.** Its account of an Apply or a
+ * Repair is this panel's "Last run" (Stage 28, decision 4); the output pane's
+ * log is about SQL the editor ran. One run recorded in two places is the
+ * confusion Stage 18 §5.3 removed, and the two would drift — the panel keeps
+ * its report per environment, the log per tab.
+ */
+test("an Apply is the panel's own account, and never the output pane's log", async ({ page }) => {
+  await connect(
+    page,
+    flyway([project()], {
+      flyway_info: () => PENDING_ONLY,
+      flyway_migrate: () => ({ executed: 1, target: "5" }),
+    }),
+  );
+  await chooseEnv(page, "uat");
+  await page.locator(".mig").first().waitFor();
+
+  await page.click("#btn-mig-view-apply");
+  await page.locator('dialog.ask button:has-text("Apply to uat")').click();
+  await expect(page.locator("#flyway-body")).toContainText("applied 1 migration to uat");
+
+  // Nothing reached the log, and the header does not claim it did.
+  await expect(page.locator("#res-count-sequence")).toBeHidden();
+  await page.click("#res-view-sequence");
+  await expect(page.locator("#sequence .seq-empty")).toContainText("Nothing has run in this tab");
+  await expect(page.locator("#seq-foot")).toBeHidden();
+});
+
+/**
  * F6. The tree beside the pane should show what the apply just made. Every
  * open connection this environment *is* has its schema cache dropped.
  */
@@ -1362,7 +1391,7 @@ test("opening migrations leaves the editor's result set where it is", async ({ p
   // Since Stage 28 the two sit side by side: the query's rows stay in the grid,
   // and Flyway's account is the panel's own.
   await expect(page.locator("#grid table")).toBeVisible();
-  await expect(page.locator("#res-title")).toHaveText("Results");
+  await expect(page.locator("#res-title")).toHaveText("Output");
   await expect(page.locator("#mig-report #flyway-body")).toContainText("Nothing has run here yet");
 });
 
@@ -1591,7 +1620,7 @@ test("output that is not a report is shown as it came", async ({ page }) => {
 test("the last run collapses from its own header, and the result pane never shows it", async ({ page }) => {
   await withProject(page);
   // D6: the result pane is about SQL only.
-  await expect(page.locator("#res-title")).toHaveText("Results");
+  await expect(page.locator("#res-title")).toHaveText("Output");
   await expect(page.locator("#results-pane #flyway-body")).toHaveCount(0);
 
   const head = page.locator("#mig-report-toggle");

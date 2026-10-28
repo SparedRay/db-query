@@ -8,6 +8,7 @@ import type { ScriptResult, SourceTable } from "./api";
 import { createEditorState, STARTER_DOC } from "./editor";
 import { icon, type IconName } from "./icons";
 import { emptySelection, type GridSelection } from "./grid";
+import { emptyLog, type SeqFilter, type SequenceLog } from "./sequence";
 
 /**
  * What a tab *is*.
@@ -23,6 +24,9 @@ import { emptySelection, type GridSelection } from "./grid";
  */
 export type TabKind = "sql" | "dictionary";
 
+/** Which of the output pane's two views a tab is reading (Stage 29). */
+export type OutputView = "results" | "sequence";
+
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
   id: string;
@@ -35,6 +39,27 @@ export interface ScriptTab {
    */
   connectionId: string | null;
   kind: TabKind;
+  /**
+   * Which view of the output pane this tab is reading (Stage 29).
+   *
+   * **Per tab**, like `activeResultIndex` and unlike Ctrl+J's shut state: a tab
+   * whose run returned no rows is worth leaving in Sequence while the tab
+   * beside it shows its grid, and switching tabs must not change what you were
+   * reading. Not persisted, like every other pane state here.
+   */
+  outputView: OutputView;
+  /**
+   * What has run in this tab, newest run first (Stage 29).
+   *
+   * Not part of `emptyResultState`: closing a result releases its rows, and
+   * `closeStatement` does that by splicing the array the grid reads — so a log
+   * living there would lose its own history. These records hold no rows.
+   */
+  sequence: SequenceLog;
+  /** Where Sequence was scrolled to, so a repaint does not jump to the top. */
+  seqScrollTop: number;
+  /** Which statements Sequence is showing. Per tab, like the view itself. */
+  seqFilter: SeqFilter;
   title: string;
   filePath: string | null;
   dialect: string;
@@ -413,6 +438,10 @@ export class TabManager {
       id: `t${++idSeq}`,
       connectionId,
       kind: opts?.kind ?? "sql",
+      outputView: "results",
+      sequence: emptyLog(),
+      seqScrollTop: 0,
+      seqFilter: "all",
       title: opts?.title ?? `Untitled-${untitledNumber}`,
       filePath: opts?.filePath ?? null,
       // From the connection, not a constant. This field has been written to
@@ -559,6 +588,13 @@ export class TabManager {
         id: `t${++idSeq}`,
         connectionId,
         kind: "sql",
+        // Deliberately not restored: a log of statements is the same category
+        // of thing as a result, and the session has never written one down
+        // (Stage 7, S6).
+        outputView: "results",
+        sequence: emptyLog(),
+        seqScrollTop: 0,
+        seqFilter: "all",
         title: spec.title,
         filePath: spec.filePath,
         dialect: spec.dialect,
