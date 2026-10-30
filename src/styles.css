@@ -759,6 +759,22 @@ input.num {
 /* A twisty still pointing right at a revealed container would be a lie about
    the state we deliberately did not change; while filtering it says nothing. */
 .tree.filtering .twisty { visibility: hidden; }
+/* How many matched inside something the tree has not drawn (Stage 29.2).
+   An attribute read back by CSS rather than an appended element, because the
+   tree's mutation observer re-runs the filter on `childList` — a badge the
+   filter inserted would retrigger it for ever.
+
+   **Beside the label, not pushed right.** `margin-left: auto` here made the
+   node as wide as the pane and moved its centre to the far edge, past the
+   horizontal clip — and a tree node you cannot click is worse than one with no
+   badge. Two tests caught it: expanding a database under a live filter stopped
+   working, and only for needles that produced a badge. */
+.tree.filtering .node[data-filter-note]::after {
+  content: attr(data-filter-note);
+  flex: 0 0 auto; margin-left: 6px; padding: 0 7px;
+  font-size: 10.5px; line-height: 15px; border-radius: 9px;
+  color: var(--on-accent); background: var(--accent);
+}
 
 /* A fixed box, so every label starts at the same x whatever its icon.
    Before this each icon contributed its own advance width and the Tables /
