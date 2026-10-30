@@ -54,7 +54,7 @@ import {
 import { contextMenu } from "./menu";
 import { icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
-import { applyTreeFilter } from "./treefilter";
+import { applyTreeFilter, type SchemaLookup } from "./treefilter";
 import { ResultView, resultSets } from "./grid";
 import { TabManager, clearResult, type OutputView, type ScriptTab } from "./tabs";
 import {
@@ -1010,7 +1010,29 @@ function renderDatabases(connId: string, dbs: string[]) {
   showTree(connId);
 }
 
+/**
+ * Which connection's tree `#tree` is showing.
+ *
+ * The prefetched columns belong to whichever connection the active *tab* is
+ * on, and the tree to whichever connection is active — normally the same, but
+ * connecting to staging after production once had production's tables
+ * completing elsewhere for the same reason. The filter consults the schema
+ * only while the two agree.
+ */
+let treeFor = "";
+
+/**
+ * What each opened database contains, by group label.
+ *
+ * Keyed `connection\u0000database`, filled where the tree fetches it. Cleared
+ * with nothing: a refresh overwrites its own key, and a connection that goes
+ * away takes its tree with it, so a stale entry can only be read through a
+ * `treeFor` that no longer names it.
+ */
+const groupNames = new Map<string, Record<string, string[]>>();
+
 function showTree(connId: string) {
+  treeFor = connId;
   const host = trees.get(connId);
   els.tree.replaceChildren(...(host ? [host] : []));
   // Whatever is in the box applies to whatever tree is now on screen.
@@ -1026,15 +1048,45 @@ function showTree(connId: string) {
  */
 function refilterTree() {
   const q = els.treeFilter.value;
-  const { matches, searched } = applyTreeFilter(els.tree, q);
+  const { matches, searched, partial } = applyTreeFilter(els.tree, q, schemaLookup());
   const on = q.trim() !== "";
   els.treeFilterCount.hidden = !on;
   els.treeFilterCount.classList.toggle("none", on && matches === 0);
+  // **"loaded only" when something could not be searched.** An engine with no
+  // bulk column query keeps its mappings until asked, and a prefetch in flight
+  // has not arrived — either way a bare count would imply the whole server.
+  const scope = partial ? " \u00b7 loaded only" : "";
   els.treeFilterCount.textContent = !on
     ? ""
     : matches === 0
-      ? `none of ${searched}`
-      : `${matches} of ${searched}`;
+      ? `none of ${searched}${scope}`
+      : `${matches} of ${searched}${scope}`;
+}
+
+/**
+ * The prefetched names, for the filter — or nothing, when they are another
+ * server's.
+ *
+ * `null` from either method means *never fetched*, which is what the count
+ * turns into "loaded only". An empty list would mean a database that really
+ * has no tables, and the two must not read the same.
+ */
+function schemaLookup(): SchemaLookup | null {
+  if (!treeFor || treeFor !== schemaMapFor) return null;
+  // **An engine without a bulk column query has none of them.** `loadDatabase`
+  // fills such a connection with `slot[name] ??= []` — table names, and an
+  // empty list standing for "columns not fetched" rather than "no columns"
+  // (Stage 27, decision 3). Returning that as an answer would report a
+  // complete search of a server whose fields were never read, so it says null
+  // and the count says "loaded only".
+  const bulk = conns?.get(treeFor)?.capabilities?.bulkColumns ?? false;
+  const groups = (db: string) => groupNames.get(`${treeFor}\u0000${db}`) ?? null;
+  return {
+    columns: (db, table) => (bulk ? (schemaMap[db]?.[table] ?? null) : null),
+    tables: (db) => (schemaMap[db] ? Object.keys(schemaMap[db]) : null),
+    group: (db, label) => groups(db)?.[label] ?? null,
+    opened: (db) => groups(db) !== null,
+  };
 }
 
 // The rail's own buttons, from the same set as the tree's. Markup in the HTML
@@ -1077,6 +1129,9 @@ new MutationObserver(() => refilterTree()).observe(els.tree, {
 function buildDbNode(connId: string, db: string): HTMLElement {
   const wrap = document.createElement("div");
   const { n, twisty } = node("db", db, "\u25b8", "database");
+  // For the filter: which database this is, so it can search the columns
+  // Stage 27 prefetched for tables nobody has expanded (Stage 29.2).
+  n.dataset.db = db;
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -1194,17 +1249,27 @@ async function loadDbChildren(
     const funcs = routines.filter((r) => r.kind === "function");
 
     host.replaceChildren(
-      buildGroup("Tables", "table", baseTables.length, () =>
+      buildGroup(db, "Tables", "relation", "table", baseTables.length, () =>
         baseTables.map((t) => buildTableNode(connId, db, t)),
       { open: true }),
-      buildGroup("Views", "view", views.length, () =>
+      buildGroup(db, "Views", "relation", "view", views.length, () =>
         views.map((t) => buildTableNode(connId, db, t))),
-      buildGroup("Procedures", "procedure", procs.length, () =>
+      buildGroup(db, "Procedures", "routine", "procedure", procs.length, () =>
         procs.map((r) => buildRoutineNode(connId, db, r))),
-      buildGroup("Functions", "function", funcs.length, () =>
+      buildGroup(db, "Functions", "routine", "function", funcs.length, () =>
         funcs.map((r) => buildRoutineNode(connId, db, r))),
     );
     host.dataset.loaded = "1";
+
+    // What this database turned out to contain, for the filter: a group nobody
+    // has expanded has no nodes to search, and these lists cost nothing — the
+    // two calls above fetched them to label the groups.
+    groupNames.set(`${connId}\u0000${db}`, {
+      Tables: baseTables.map((t) => t.name),
+      Views: views.map((t) => t.name),
+      Procedures: procs.map((r) => r.name),
+      Functions: funcs.map((r) => r.name),
+    });
 
     // Seed autocomplete with table names immediately; columns fill in lazily.
     const slot = dbSlot(db);
@@ -1222,7 +1287,9 @@ async function loadDbChildren(
 
 /** A collapsible "Tables (12)" style grouping. Empty groups are not rendered. */
 function buildGroup(
+  db: string,
   label: string,
+  kind: "relation" | "routine",
   iconName: IconName,
   count: number,
   build: () => HTMLElement[],
@@ -1232,6 +1299,12 @@ function buildGroup(
   if (count === 0) return wrap;
 
   const { n, twisty } = node("group", `${label} (${count})`, "\u25b8", iconName);
+  // For the filter: which database and which group, so a group nobody has
+  // expanded can still be searched (Stage 29.2). `kind` says whether its names
+  // have columns — a routine's parameters are not in the prefetch.
+  n.dataset.db = db;
+  n.dataset.group = label;
+  n.dataset.groupKind = kind;
   const children = document.createElement("div");
   children.className = "children";
   children.hidden = true;
@@ -1352,6 +1425,8 @@ function buildTableNode(connId: string, db: string, t: TableRef): HTMLElement {
   const wrap = document.createElement("div");
   const isView = t.kind.toUpperCase().includes("VIEW");
   const { n, twisty, label } = node("table", t.name, "\u25b8", isView ? "view" : "table");
+  n.dataset.db = db;
+  n.dataset.table = t.name;
   // Before the label, after the icon: the dots then line up into a column.
   label.before(
     dictDot(describesTable(connId, db, t.name), isView ? "view" : "table", t.name),
