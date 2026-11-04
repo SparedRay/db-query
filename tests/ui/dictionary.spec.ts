@@ -461,3 +461,43 @@ test("a merge that fails is reported to the client", async ({ page }) => {
   expect(answer?.outcome.problem).toContain("cannot be read");
   await expect(page.locator("#grid .empty")).toContainText("cannot be read");
 });
+
+// --------------------------------------- Stage 30: the file, and saying so
+
+/**
+ * **M10.** The assistant reads the dictionary **file**, not the buffer — Stage
+ * 25's deliberate stance, because the dots in the tree mean "this is what the
+ * assistant will be told" and a dot promising an unsaved edit would be the
+ * worse lie.
+ *
+ * What was missing is that nobody was told. In the Stage 30 field report the
+ * dictionary tab was full of notes written by `put_notes`, the file on disk
+ * was not, and the assistant answered that the schema had no notes at all —
+ * while the panel's standing sentence said the dictionary was being sent. That
+ * sentence is kept in one place precisely because it is a promise, so this is
+ * where it has to be said.
+ */
+test("the chat admits that unsaved dictionary edits are not sent", async ({ page }) => {
+  await live(page, { assistant_status: () => ({ hasKey: true, ready: true, local: false }) });
+  await openDict(page);
+  await page.click("#btn-assistant");
+
+  // Saved: the dictionary is sent, with nothing to warn about.
+  await expect(page.locator("#chat-note")).toContainText("the dictionary you attached");
+  await expect(page.locator("#chat-note")).not.toContainText("Unsaved");
+
+  // One keystroke in the dictionary tab, and the promise narrows **while the
+  // panel is open** — it is a dock, not a dialog, so a sentence that was true
+  // when it opened is not good enough.
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\nnote = \"mine\"\n");
+  await expect(page.locator("#file-note")).toContainText("unsaved");
+  await expect(page.locator("#chat-note")).toContainText(
+    "Unsaved dictionary edits are not included",
+  );
+
+  // And it still says so when reopened, which is the other moment it is read.
+  await page.click("#chat-close");
+  await page.click("#btn-assistant");
+  await expect(page.locator("#chat-note")).toContainText("Unsaved dictionary edits");
+});

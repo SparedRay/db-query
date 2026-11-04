@@ -558,8 +558,8 @@ impl<R: Runtime> Tools<R> {
     async fn dictionary(&self, id: &str) -> Option<crate::dictionary::Dictionary> {
         let state = self.app.state::<AppState>();
         let server = crate::session::server(&state, id).await.ok()?;
-        let path = server
-            .profile
+        let profile = server.profile();
+        let path = profile
             .dictionary
             .as_deref()
             .map(str::trim)
@@ -583,9 +583,8 @@ impl<R: Runtime> Tools<R> {
             .await
             .map_err(|e| ErrorData::invalid_request(e, None))?;
         server
-            .profile
+            .profile()
             .database
-            .clone()
             .filter(|d| !d.is_empty())
             .ok_or_else(|| {
                 ErrorData::invalid_request(
@@ -614,11 +613,11 @@ impl<R: Runtime> Tools<R> {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         structured(&Databases {
-            connection: server.profile.name.clone(),
+            connection: server.profile().name,
             engine: server.capabilities.engine.clone(),
             label: server.capabilities.namespace_label.clone(),
             databases,
-            default_database: server.profile.database.clone().filter(|d| !d.is_empty()),
+            default_database: server.profile().database.filter(|d| !d.is_empty()),
         })
     }
 
@@ -754,8 +753,8 @@ impl<R: Runtime> Tools<R> {
             let server = crate::session::server(&state, &id)
                 .await
                 .map_err(|e| ErrorData::invalid_request(e, None))?;
-            let bound = server
-                .profile
+            let profile = server.profile();
+            let bound = profile
                 .dictionary
                 .as_deref()
                 .map(str::trim)
@@ -766,12 +765,12 @@ impl<R: Runtime> Tools<R> {
                         "“{}” has no AI dictionary attached, so there is nowhere to write \
                          these notes. In db-query: right-click the connection in the rail \
                          and choose “Add an AI dictionary…”.",
-                        server.profile.name
+                        profile.name
                     ),
                     None,
                 ));
             }
-            server.profile.name.clone()
+            profile.name
         };
 
         if args.tables.is_empty() {

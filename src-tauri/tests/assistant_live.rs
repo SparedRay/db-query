@@ -77,8 +77,12 @@ async fn the_api_accepts_our_request_and_streams_sql_back() {
                 StreamEvent::Text { delta } => answer.push_str(&delta),
                 StreamEvent::Done { .. } => done = true,
                 StreamEvent::Failed { message } => panic!("stream failed: {message}"),
-                // An HTTP provider never sends this; a CLI does.
-                StreamEvent::Started | StreamEvent::Thinking { .. } => {}
+                // An HTTP provider never sends `Started`; a CLI does. And
+                // `Context` is the app talking to the person about its own
+                // prompt, so the decoder of a provider's stream never sees it.
+                StreamEvent::Started
+                | StreamEvent::Context { .. }
+                | StreamEvent::Thinking { .. } => {}
             }
         }
     }

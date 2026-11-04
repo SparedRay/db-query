@@ -301,11 +301,10 @@ pub async fn describe_cache(state: &AppState) -> String {
             server.capabilities.engine,
             server.server_version.as_deref().unwrap_or("unknown"),
             server
-                .profile
+                .profile()
                 .database
-                .as_deref()
                 .filter(|d| !d.is_empty())
-                .unwrap_or("(none set)"),
+                .unwrap_or_else(|| "(none set)".to_string()),
         ));
 
         let cache = server.schema_cache.lock().await;
@@ -324,6 +323,17 @@ pub async fn describe_cache(state: &AppState) -> String {
                     // one table by name and never listed the database.
                     None => "no".to_string(),
                 },
+            ));
+            // **What it costs the assistant**, which is the half of "why does
+            // it not know my tables?" that the counts above cannot answer: a
+            // database can be fully cached and still be described to the model
+            // in part, because a prompt is bounded and the cache is not. Read
+            // off the cache like everything else here, so this costs no query
+            // and no API call — which is the point, since the alternative way
+            // to learn it is to ask a question and pay for it. Stage 30.
+            out.push_str(&format!(
+                "    prompt {}",
+                crate::assistant::reckoning(db, schema)
             ));
         }
     }

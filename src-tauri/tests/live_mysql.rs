@@ -2274,9 +2274,11 @@ async fn the_assistant_prompt_carries_columns_nobody_expanded() {
     let rendered = db_query_lib::assistant::render_schema(
         "poc",
         cache.get("poc").unwrap(),
-        schema::TABLE_DETAIL_BUDGET,
+        &[],
+        db_query_lib::assistant::SCHEMA_BUDGET_CHARS,
         None,
-    );
+    )
+    .text;
 
     assert!(
         !rendered.contains("columns not loaded"),

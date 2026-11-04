@@ -170,6 +170,27 @@ paste into a client. See
 [the Stage 13 tracker](docs/stage-13-mcp-server.md) for the design and the
 reasoning.
 
+The token is **stable**: it is minted once, kept in the keychain, and read back
+on every start. Nothing rotates it but *Regenerate* in Settings, which breaks
+configured clients on purpose. (The `mcp_token` your log shows on each start is
+the name of the call Settings makes to display it, not the value.)
+
+#### Connecting from WSL2
+
+A client running inside WSL cannot reach the server on `127.0.0.1` under WSL2's
+default NAT networking: loopback inside the VM is not the Windows host's, and
+the host's own IP times out because the server is bound to loopback and should
+stay that way. Switch WSL to mirrored networking — in `%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+then `wsl --shutdown` and reopen the shell. `127.0.0.1:<port>` then reaches the
+app, and the `Host` header is still `127.0.0.1`, so nothing about the server's
+origin and host checks has to be relaxed to let it through.
+
 ### The dictionary it writes
 
 A connection can point at a TOML file saying what its tables and columns

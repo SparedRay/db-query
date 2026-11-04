@@ -576,3 +576,63 @@ test("Run is offered but disabled with no connection, and explains why", async (
   await expect(run).toHaveAttribute("title", /Open a connection first/);
   await assertNothingRan(page);
 });
+
+// ------------------------------------------- Stage 30: which schema was sent
+
+/**
+ * The editor's SQL goes with the question, because it says which tables you
+ * are working on — and a 400-table prompt cannot carry every column, so
+ * something has to choose.
+ *
+ * **It is sent to Rust and no further.** `relevance` reads it into a set of
+ * words and drops it; `nothing_but_a_table_name_comes_out_of_the_ranking` is
+ * the test of that half, which can only be made where the ranking is.
+ */
+test("the editor's SQL is sent for ranking, and a dictionary tab's is not", async ({ page }) => {
+  await openChat(page);
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("SELECT id FROM enrolled_item");
+  await ask(page, "which columns does it have?");
+
+  const sent = (await calls(page)).find((c) => c.cmd === "assistant_send");
+  expect(sent?.args.editor).toContain("enrolled_item");
+});
+
+/**
+ * **M9.** The prompt has always told the model that columns were listed for
+ * only some tables. The person — the one who can name the tables, ask about
+ * fewer, or open them in the tree — was told nothing, and that is where the
+ * field report's failure went unexplained.
+ */
+test("the chat says which tables were sent by name only", async ({ page }) => {
+  await openChat(page);
+  await ask(page, "every enrolled item with its balances");
+  await emit(page, [
+    {
+      type: "context",
+      described: 172,
+      elided: ["enrolled_item", "enrolled_party", "supplier_status", "parties"],
+    },
+    { type: "text", delta: "Here is a guess." },
+    { type: "done", stopReason: "end_turn" },
+  ]);
+
+  const said = page.locator(".chat-context");
+  await expect(said).toContainText("172 tables most likely to be relevant");
+  await expect(said).toContainText("4 more were sent by name only");
+  await expect(said).toContainText("enrolled_item, enrolled_party, supplier_status");
+});
+
+/** A schema that fits says nothing — a line every turn would be noise. */
+test("nothing is said when the whole schema fitted", async ({ page }) => {
+  await openChat(page);
+  await ask(page, "hello");
+  await emit(page, [
+    { type: "context", described: 12, elided: [] },
+    { type: "text", delta: "Hi." },
+    { type: "done", stopReason: "end_turn" },
+  ]);
+
+  await expect(page.locator(".chat-msg.from-assistant")).toContainText("Hi.");
+  await expect(page.locator(".chat-context")).toHaveCount(0);
+});

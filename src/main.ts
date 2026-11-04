@@ -514,6 +514,22 @@ function applyLintSetting(force = false) {
   refreshFileNote();
 }
 
+/**
+ * The dictionary chip, and nothing else.
+ *
+ * Split out of `refreshFileNote` because that function's other work — the
+ * tree's dots and the band — costs a round trip each and must not run per
+ * keystroke, while **"· unsaved" has to appear as you type**: it is the one
+ * thing on screen saying that the assistant is still reading the old file.
+ * Before Stage 30 it appeared only when the tab was next activated.
+ */
+function paintDictChip(tab: ScriptTab) {
+  els.fileNote.hidden = false;
+  els.fileNote.className = "chip";
+  els.fileNote.textContent = tabs.isDirty(tab) ? "AI dictionary · unsaved" : "AI dictionary";
+  els.fileNote.title = tab.filePath ?? "";
+}
+
 /** Reflect the ACTIVE tab's busy state. Other tabs keep running regardless. */
 /**
  * Per-tab file indicator. Its whole job is to make "you cannot save this"
@@ -533,10 +549,7 @@ function refreshFileNote() {
     // tree's dots describe the **file**, and nothing else would notice. The
     // backend's own copy invalidates itself — it is keyed on the file's size
     // and modification time, both of which a save moves.
-    els.fileNote.hidden = false;
-    els.fileNote.className = "chip";
-    els.fileNote.textContent = tabs.isDirty(tab) ? "AI dictionary · unsaved" : "AI dictionary";
-    els.fileNote.title = tab.filePath ?? "";
+    paintDictChip(tab);
     void refreshDictMarks();
     void refreshDictBand();
     return;
@@ -2832,9 +2845,18 @@ view = createEditor($("editor"), {
   // Keeps the dirty dot honest without polling.
   onDocChanged: () => {
     tabs?.render();
-    if (dictionaryTab()) {
+    const dict = dictionaryTab();
+    if (dict) {
       // The band counts what the buffer says, so it moves while you type.
       void refreshDictBand();
+      // So does the chip, and so does the chat's standing promise: the
+      // assistant reads the saved file, and an unsaved buffer means the notes
+      // on screen are not the notes being sent. Both are text, neither is a
+      // round trip.
+      paintDictChip(dict);
+      // `assistant` is declared further down; this only ever runs from a
+      // keystroke, which is long after module init.
+      assistant.refreshNote();
     } else {
       applyLintSetting();
     }
@@ -3592,6 +3614,20 @@ const assistant = createAssistant({
   // attached", which the rail already knows, and a round trip to answer it
   // would make the header wait on the thing it is describing.
   hasDictionary: () => !!conns.active()?.profile.dictionary?.trim(),
+  // Any open dictionary tab with unsaved edits, not only this connection's:
+  // one file is shared by dev, UAT and production on purpose, so the tab that
+  // is dirty may belong to a sibling connection pointing at the same path.
+  dictionaryUnsaved: () =>
+    tabs.all().some((t) => t.kind === "dictionary" && tabs.isDirty(t)),
+  // **Ranks the schema, and goes nowhere else.** `relevance` reads it into a
+  // set of words in Rust and drops it. A dictionary tab is not SQL and would
+  // only add TOML keys to the ranking, so it is not offered.
+  editorSql: () => {
+    const tab = tabs.active();
+    if (!tab || tab.kind !== "sql") return null;
+    const text = view.state.doc.toString();
+    return text.trim() ? text : null;
+  },
   // None of these close the panel any more. Closing it was how a modal
   // apologised for being in the way; a dock is not, and shutting it after one
   // insert would throw away the conversation that produced the statement.
@@ -5578,7 +5614,14 @@ async function openDictionary(entry: ConnectionEntry) {
   try {
     await dictionaryTabFor(entry, true);
   } catch (err) {
-    results.setMessage(String(err));
+    // **`showNote`, not `results.setMessage`.** This is how the menu item came
+    // to "do nothing" in the field report: the backend was throwing (its
+    // profile had not followed the save), and the message went to `#grid` —
+    // which `showSurface` sets `hidden` whenever the tab is showing Sequence,
+    // and `[hidden]` here is `display: none !important`. So a failure was not
+    // merely easy to miss, it was not rendered. The note row sits outside
+    // `#result-bar-row` and survives both views. Stage 30 §2.3.
+    showNote(String(err));
   }
 }
 
@@ -5644,13 +5687,13 @@ async function attachDictionary(entry: ConnectionEntry): Promise<boolean> {
 
   if (pick === "create") {
     if (!db) {
-      results.setMessage("Choose a database in the tree first — the starter is built from it.");
+      showNote("Choose a database in the tree first — the starter is built from it.");
       return false;
     }
     try {
       await api.dictionaryCreate(entry.profile.id, path, db);
     } catch (err) {
-      results.setMessage(String(err));
+      showNote(String(err));
       return false;
     }
   }
@@ -5663,7 +5706,7 @@ async function attachDictionary(entry: ConnectionEntry): Promise<boolean> {
     entry.profile = saved.profile;
     conns.upsert(entry);
   } catch (err) {
-    results.setMessage(String(err));
+    showNote(String(err));
     return false;
   }
   return true;

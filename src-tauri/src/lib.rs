@@ -24,6 +24,7 @@ pub mod mysql;
 pub mod prefs;
 pub mod proc;
 pub mod profiles;
+pub mod relevance;
 pub mod schema;
 pub mod secrets;
 pub mod session;
@@ -139,9 +140,22 @@ fn prefs_save(
 ///   * `Some("")` — forget any stored password
 ///   * `None` — leave whatever is stored alone (editing a profile without
 ///     retyping the password)
+///
+/// # It reaches a live connection too
+///
+/// Every save but one is followed by a reconnect, which is what used to make a
+/// change take effect: the connection dialog reconnects on every OK (Stage 14
+/// §8). Attaching a dictionary from the rail's menu is the exception, and must
+/// be — a path to a text file is not a reason to drop a connection — so before
+/// Stage 30 the dictionary was invisible to the assistant, to the tree's dots
+/// and to MCP's `put_notes` until the app was restarted.
+///
+/// `follow_saved` takes only the labels; the connection parameters stay as the
+/// socket was opened. See [`session::ServerConn::follow_saved`].
 #[tauri::command]
-fn save_profile(
+async fn save_profile(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     profile: ConnProfile,
     password: Option<String>,
 ) -> Result<SaveProfileOutcome, String> {
@@ -150,6 +164,13 @@ fn save_profile(
 
     profiles::upsert(&mut existing, profile.clone());
     profiles::save_all(&dir, &existing)?;
+
+    // After the write, so a save that could not be persisted does not relabel
+    // a live connection either. Not an error when nothing is open: saving a
+    // profile you are not connected to is the ordinary case.
+    if let Ok(server) = session::server(&state, &profile.id).await {
+        server.follow_saved(&profile);
+    }
 
     let mut password_warning = None;
     let mut password_stored = secrets::has_stored(&profile.id);
@@ -446,16 +467,72 @@ async fn remember_proposal(state: State<'_, AppState>, sql: String) -> Result<()
     Ok(())
 }
 
+/// Everything one prompt is built from besides the schema itself.
+struct Ask<'a> {
+    connection_id: &'a Option<String>,
+    db: &'a Option<String>,
+    /// The signals that move between one question and the next, or `None` to
+    /// rank on the standing ones alone.
+    ///
+    /// **One `Option` for all three, on purpose.** A kept CLI session is
+    /// primed with the system prompt once and reused only while it stays
+    /// byte-identical (`agentcli::run_session`), so anything that moves
+    /// restarts the process — measured at 5.3-11.7s against 1.85-2.66s a turn.
+    /// Gating the question and leaving history in looked right and was not:
+    /// running a query mid-conversation would have rebuilt the order and
+    /// restarted the CLI, for a reason nobody could have guessed from the
+    /// outside. So the rule is in the type, and `None` turns off every part of
+    /// it at once. Stage 30 §4.3 and §6.3.
+    moving: Option<Moving<'a>>,
+    /// Characters of columns this prompt may carry.
+    budget: usize,
+}
+
+/// The ranking signals that are different on every turn.
+struct Moving<'a> {
+    /// The conversation. Every user turn, not only the last: "and now add the
+    /// supplier" names nothing on its own, while a conversation about one
+    /// domain accumulates the vocabulary that finds its tables.
+    messages: &'a [assistant::ChatMessage],
+    /// The SQL in the editor. **Ranks only, and never reaches the prompt** —
+    /// see `relevance`'s header. The chat's standing promise is that table and
+    /// column names are sent and row data never is, and a literal in somebody's
+    /// buffer is neither.
+    editor: Option<&'a str>,
+}
+
+/// A built prompt, and what it could not carry.
+struct Prompt {
+    system: String,
+    /// Tables sent by name alone because the budget ran out, most relevant
+    /// first — for telling the person, who is the one who can do something
+    /// about it. Stage 30 §4.6.
+    elided: Vec<String>,
+    /// How many tables were described in full.
+    described: usize,
+}
+
 /// The system prompt for one question: the rules, plus this connection's shape.
 ///
 /// Extracted when the CLI providers arrived (Stage 20). Both paths need exactly
 /// the same prompt, and a second copy of the schema-rendering rules is a second
 /// place for them to drift.
+///
+/// # Which tables get their columns
+///
+/// Every column of every table is already in memory — `schema::warm` reads
+/// them in one query on an engine that can. What a prompt cannot do is carry
+/// them all in every request, so [`relevance::order`] ranks them against the
+/// question, the editor, the dictionary and recent history, and the renderer
+/// spends `budget` down that order. Before Stage 30 this passed
+/// `schema::TABLE_DETAIL_BUDGET` — 60, alphabetically — and the field report
+/// is what that looks like from outside: four of the five tables the question
+/// needed were past the letter C.
 async fn assistant_system(
+    app: &tauri::AppHandle,
     state: &State<'_, AppState>,
-    connection_id: &Option<String>,
-    db: &Option<String>,
-) -> String {
+    ask: Ask<'_>,
+) -> Prompt {
     // Schema, when there is a live connection to take it from. Names and types
     // only — `render_schema` cannot see row data, by construction.
     let mut caps: Option<crate::engine::Capabilities> = None;
@@ -463,6 +540,14 @@ async fn assistant_system(
     // paragraph of the prompt, which is what tells the model whose the `--`
     // comments are and that they outrank a guess at a name.
     let mut has_dictionary = false;
+    let mut elided: Vec<String> = Vec::new();
+    let mut described = 0usize;
+    let Ask {
+        connection_id,
+        db,
+        moving,
+        budget,
+    } = ask;
     let (server_version, schema_text) = match connection_id {
         Some(id) => match session::server(state, id).await {
             Ok(server) => {
@@ -495,8 +580,8 @@ async fn assistant_system(
                 // thinner prompt, exactly as an unreachable server is — and
                 // the chat header is where the person is told, rather than
                 // having a question refused because of a typo in a file.
-                let dictionary = server
-                    .profile
+                let profile = server.profile();
+                let dictionary = profile
                     .dictionary
                     .as_deref()
                     .filter(|p| !p.trim().is_empty())
@@ -509,33 +594,86 @@ async fn assistant_system(
                     .filter(|d| !d.is_empty());
                 has_dictionary = dictionary.is_some();
 
-                let text = server
-                    .schema_cache
-                    .lock()
-                    .await
-                    .get(ns)
-                    .map(|s| {
-                        assistant::render_schema(
-                            ns,
-                            s,
-                            schema::TABLE_DETAIL_BUDGET,
-                            dictionary.as_ref(),
+                // What the user asked, for the ranking.
+                let question: Option<String> = moving.as_ref().map(|m| {
+                    m.messages
+                        .iter()
+                        .filter(|m| m.role == "user")
+                        .map(|m| m.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+
+                // SQL lately run on *this* connection, newest first. Capped
+                // because the file keeps 5,000 entries and the signal is the
+                // recent ones; the whole point is what you have been working
+                // on. Read only on a path whose prompt may move: it changes
+                // every time anything is run, which is exactly what a kept CLI
+                // session must not see.
+                let recent: Vec<String> = match (moving.as_ref(), config_dir(app)) {
+                    (Some(_), Ok(dir)) => {
+                        let mut mine: Vec<history::Entry> = history::load(&dir)
+                            .into_iter()
+                            .filter(|e| &e.connection_id == id)
+                            .collect();
+                        mine.sort_by(|a, b| b.at.cmp(&a.at));
+                        mine.into_iter().take(200).map(|e| e.sql).collect()
+                    }
+                    _ => Vec::new(),
+                };
+
+                let cache = server.schema_cache.lock().await;
+                let text = cache.get(ns).map(|s| {
+                    let started = std::time::Instant::now();
+                    let signals = crate::relevance::Signals {
+                        question: question.as_deref(),
+                        editor: moving.as_ref().and_then(|m| m.editor),
+                        history: &recent,
+                        dictionary: dictionary.as_ref(),
+                    };
+                    let order = crate::relevance::order(ns, s, &signals);
+                    let out = assistant::render_schema(ns, s, &order, budget, dictionary.as_ref());
+                    let took = started.elapsed();
+
+                    // **One line per question, so the ranking can be measured
+                    // against a real schema.** Everything about it was fitted
+                    // to a synthetic 400-table fixture, because that is what
+                    // there was; whether the right tables reach the model for
+                    // the questions somebody actually asks is a thing only
+                    // their server can say. `report` already copies the log
+                    // out, so this needs no new surface — and it carries the
+                    // ranking's *words* rather than the question, which is
+                    // both the more diagnostic half and the smaller one. See
+                    // `assistant::ranked_note`.
+                    let asked = question
+                        .as_deref()
+                        .map(crate::relevance::words)
+                        .unwrap_or_default();
+                    let (landed, missed) = crate::relevance::recognised(s, &asked);
+                    logbook::info(
+                        "assistant",
+                        assistant::ranked_note(ns, &landed, missed, &order, &out, took),
+                    );
+
+                    elided = out.elided;
+                    described =
+                        s.tables.as_deref().unwrap_or_default().len() - elided.len() - out.unloaded;
+                    // Say so when the warm-up could not describe every table.
+                    // Silently truncating is how a model ends up confidently
+                    // sure a table has no columns. Distinct from the budget:
+                    // this is "nothing has read them", which the user fixes by
+                    // opening the tree rather than by asking a narrower
+                    // question.
+                    if warmed.tables > warmed.detailed {
+                        format!(
+                            "{}\n(Columns were loaded for {} of {} tables; ask the \
+                             user to open the others in the tree if you need them.)\n",
+                            out.text, warmed.detailed, warmed.tables
                         )
-                    })
-                    .map(|rendered| {
-                        // Say so when the warm-up could not describe every
-                        // table. Silently truncating is how a model ends up
-                        // confidently sure a table has no columns.
-                        if warmed.tables > warmed.detailed {
-                            format!(
-                                "{rendered}\n(Columns were loaded for {} of {} tables; ask the \
-                                 user to open the others in the tree if you need them.)\n",
-                                warmed.detailed, warmed.tables
-                            )
-                        } else {
-                            rendered
-                        }
-                    });
+                    } else {
+                        out.text
+                    }
+                });
                 (version, text)
             }
             Err(_) => ("unknown".to_string(), None),
@@ -543,12 +681,16 @@ async fn assistant_system(
         None => ("unknown".to_string(), None),
     };
 
-    assistant::system_prompt(
-        &server_version,
-        schema_text.as_deref(),
-        caps.as_ref(),
-        has_dictionary,
-    )
+    Prompt {
+        system: assistant::system_prompt(
+            &server_version,
+            schema_text.as_deref(),
+            caps.as_ref(),
+            has_dictionary,
+        ),
+        elided,
+        described,
+    }
 }
 
 /// Stream one reply.
@@ -562,6 +704,7 @@ async fn assistant_system(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn assistant_send(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     provider: assistant::Provider,
     base_url: String,
@@ -569,6 +712,8 @@ async fn assistant_send(
     connection_id: Option<String>,
     db: Option<String>,
     messages: Vec<assistant::ChatMessage>,
+    // The SQL in the editor, for ranking the schema. Never sent anywhere.
+    editor: Option<String>,
     on_event: tauri::ipc::Channel<assistant::StreamEvent>,
 ) -> Result<(), String> {
     if model.trim().is_empty() {
@@ -579,8 +724,27 @@ async fn assistant_send(
         return Err("No API key is set. Add one in Settings to use the assistant.".into());
     }
 
-    let system = assistant_system(&state, &connection_id, &db).await;
-    let body = assistant::request(provider, &model, &system, &messages);
+    let prompt = assistant_system(
+        &app,
+        &state,
+        Ask {
+            connection_id: &connection_id,
+            db: &db,
+            moving: Some(Moving {
+                messages: &messages,
+                editor: editor.as_deref(),
+            }),
+            budget: assistant::SCHEMA_BUDGET_CHARS,
+        },
+    )
+    .await;
+    // Before the request, so it is on screen while the answer is being
+    // written rather than after it has been read.
+    let _ = on_event.send(assistant::StreamEvent::Context {
+        described: prompt.described,
+        elided: prompt.elided.clone(),
+    });
+    let body = assistant::request(provider, &model, &prompt.system, &messages);
 
     // Auth differs by provider, and a local server usually wants none at all —
     // so the header is attached only when there is a key to attach.
@@ -649,15 +813,51 @@ async fn assistant_cli_probe(recipe: agentcli::Recipe) -> agentcli::Status {
 /// talking to a server, and spending the person's quota, until it is killed.
 #[tauri::command]
 async fn assistant_cli_send(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     recipe: agentcli::Recipe,
     request_id: String,
     connection_id: Option<String>,
     db: Option<String>,
     messages: Vec<assistant::ChatMessage>,
+    // The SQL in the editor, for ranking the schema. Never sent anywhere.
+    editor: Option<String>,
     on_event: tauri::ipc::Channel<assistant::StreamEvent>,
 ) -> Result<(), String> {
-    let system = assistant_system(&state, &connection_id, &db).await;
+    // **A kept session is primed once.** `run_session` reuses its process only
+    // while the system prompt is byte-identical, so a prompt that moved with
+    // the question — or with the editor's text, which moves on every keystroke
+    // — would restart the CLI every turn: 5.3-11.7s against 1.85-2.66s. That
+    // path ranks on the standing signals and gets a budget big enough not to
+    // miss the question. Stage 30 §4.3.
+    let kept_session = recipe.session_args().is_some();
+    let prompt = assistant_system(
+        &app,
+        &state,
+        Ask {
+            connection_id: &connection_id,
+            db: &db,
+            moving: if kept_session {
+                None
+            } else {
+                Some(Moving {
+                    messages: &messages,
+                    editor: editor.as_deref(),
+                })
+            },
+            budget: if kept_session {
+                assistant::SCHEMA_BUDGET_SESSION_CHARS
+            } else {
+                assistant::SCHEMA_BUDGET_CHARS
+            },
+        },
+    )
+    .await;
+    let system = prompt.system;
+    let _ = on_event.send(assistant::StreamEvent::Context {
+        described: prompt.described,
+        elided: prompt.elided,
+    });
 
     let cancel = std::sync::Arc::new(session::CliCancel::default());
     state
@@ -1028,8 +1228,8 @@ async fn dictionary_open(
     connection_id: String,
 ) -> Result<OpenedFile, String> {
     let server = session::server(&state, &connection_id).await?;
-    let path = server
-        .profile
+    let profile = server.profile();
+    let path = profile
         .dictionary
         .as_deref()
         .map(str::trim)
@@ -1037,7 +1237,7 @@ async fn dictionary_open(
         .ok_or_else(|| {
             format!(
                 "“{}” has no dictionary yet. Choose a file, or create one from this database.",
-                server.profile.name
+                profile.name
             )
         })?;
     files::read_file(std::path::Path::new(path))
@@ -1107,8 +1307,8 @@ async fn dictionary_marks(
     database: String,
 ) -> Result<DictionaryMarks, String> {
     let server = session::server(&state, &connection_id).await?;
-    let Some(path) = server
-        .profile
+    let profile = server.profile();
+    let Some(path) = profile
         .dictionary
         .as_deref()
         .map(str::trim)

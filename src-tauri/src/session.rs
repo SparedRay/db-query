@@ -287,7 +287,24 @@ pub struct ConnectionStatus {
 /// One live server: its identity, the two shared connections, and the schema
 /// cache (a property of the server, not of any tab).
 pub struct ServerConn {
-    pub profile: ConnProfile,
+    /// This connection's identity, **outside the lock below** because nothing
+    /// can edit it: a save that changed an id would be a different connection.
+    /// It is also what lets [`Self::id`] hand back a `&str`.
+    id: ConnectionId,
+    /// The profile this connection is running under.
+    ///
+    /// Behind a lock because **not every save reconnects.** Attaching a
+    /// dictionary from the rail's menu is a save that must not — a text file
+    /// has nothing to do with the socket — and before Stage 30 this was a
+    /// clone taken at connect and never written again, so the dictionary was
+    /// invisible to the assistant and to MCP until the app was restarted.
+    ///
+    /// [`Self::follow_saved`] is the only writer, and it takes only the fields
+    /// that are labels rather than connection parameters.
+    ///
+    /// `std` rather than `tokio`: every reader clones and drops the guard
+    /// within one expression, so no guard is held across an `await`.
+    profile: std::sync::RwLock<ConnProfile>,
     /// Held for the connection's life because lazy per-tab connections must be
     /// able to authenticate later. Phase 2 replaces this with a zeroizing
     /// `Secret`; it is never serialised or logged.
@@ -351,7 +368,7 @@ impl ServerConn {
     /// on, and it cannot be a tab's, which would freeze somebody's editor for
     /// the length of the dump. The caller owns it and drops it when done.
     pub async fn open_private(&self) -> Result<MySqlConnection, String> {
-        open(&self.profile, &self.password).await
+        open(&self.profile(), &self.password).await
     }
 
     /// The connection `KILL` is issued on.
@@ -372,20 +389,70 @@ impl ServerConn {
             .lock()
             .await;
         if guard.ping().await.is_err() {
-            *guard = open(&self.profile, &self.password).await?;
+            *guard = open(&self.profile(), &self.password).await?;
         }
         Ok(guard)
     }
 
     pub fn id(&self) -> &str {
-        &self.profile.id
+        &self.id
     }
 
     pub fn host_label(&self) -> String {
-        format!(
-            "{}@{}:{}",
-            self.profile.user, self.profile.host, self.profile.port
-        )
+        let p = self.read();
+        format!("{}@{}:{}", p.user, p.host, p.port)
+    }
+
+    /// Split a profile into the identity that cannot change and the part that
+    /// can.
+    ///
+    /// **The only way the pair is built**, at all three construction sites, so
+    /// `id` cannot drift from `profile.id` — which is the invariant
+    /// [`Self::follow_saved`] checks against before it writes anything.
+    fn parts(profile: ConnProfile) -> (ConnectionId, std::sync::RwLock<ConnProfile>) {
+        (profile.id.clone(), std::sync::RwLock::new(profile))
+    }
+
+    /// The profile as it stands.
+    ///
+    /// A clone rather than a borrow: a borrow would have to hold the lock, and
+    /// almost every caller goes on to `await` with what it read.
+    pub fn profile(&self) -> ConnProfile {
+        self.read().clone()
+    }
+
+    /// Recovering from poisoning rather than panicking on it. The only writer
+    /// is [`Self::follow_saved`], which does three clones and nothing that can
+    /// unwind — and a connection that refuses to say its own name because
+    /// another thread panicked is a worse failure than a stale label.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, ConnProfile> {
+        self.profile.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Follow a profile that was just saved, **without reconnecting**.
+    ///
+    /// Only the fields that *describe* this connection, never the ones that
+    /// *define* it. `host`, `port`, `user`, `database`, `url`, `auth`, `kind`,
+    /// `allow_invalid_certs`, `no_password` and `read_only` are the socket this
+    /// is already talking on, and [`crate::engine::Capabilities`] was derived
+    /// from them once at connect. Taking them from a later edit would leave
+    /// this profile describing a connection nobody ever opened — and, for
+    /// `read_only`, would report protection that nothing was applying. Those
+    /// change by reconnecting, which the connection dialog does on every save:
+    /// Stage 14 §8, where that order was settled.
+    ///
+    /// What is left are labels — the name and colour the rail draws, and the
+    /// path to the dictionary. Stage 30 §4.7.
+    pub fn follow_saved(&self, saved: &ConnProfile) {
+        // A save for a different connection reaches here only through a bug,
+        // and quietly relabelling this one would be the worst way to find out.
+        if saved.id != self.id {
+            return;
+        }
+        let mut mine = self.profile.write().unwrap_or_else(|e| e.into_inner());
+        mine.name = saved.name.clone();
+        mine.colour = saved.colour.clone();
+        mine.dictionary = saved.dictionary.clone();
     }
 }
 
@@ -425,7 +492,7 @@ impl TabSession {
         // the moment it ran something.
         //
         // `USE` overwrites this, as it always did.
-        let current_db = server.profile.database.clone().filter(|d| !d.is_empty());
+        let current_db = server.profile().database.filter(|d| !d.is_empty());
         Self {
             server,
             exec: Mutex::new(None),
@@ -614,7 +681,9 @@ pub async fn connect(
     // frontend is told cannot disagree about what this connection may do.
     let capabilities = crate::engine::Capabilities::mysql().for_profile(&profile);
 
+    let (id_of, profile) = ServerConn::parts(profile);
     let conn = Arc::new(ServerConn {
+        id: id_of,
         profile,
         password,
         killer: Some(Mutex::new(killer)),
@@ -691,10 +760,11 @@ pub async fn list_connections(state: &AppState) -> Vec<ConnectionStatus> {
         .map(|s| {
             let mine: Vec<&Arc<TabSession>> =
                 tabs.iter().filter(|t| Arc::ptr_eq(&t.server, &s)).collect();
+            let p = s.profile();
             ConnectionStatus {
-                id: s.profile.id.clone(),
-                name: s.profile.name.clone(),
-                colour: s.profile.colour.clone(),
+                id: p.id,
+                name: p.name,
+                colour: p.colour,
                 host_label: s.host_label(),
                 connected: true,
                 server_version: s.server_version.clone(),
@@ -793,7 +863,7 @@ pub async fn ensure_exec(
     }
 
     let want_db = tab.current_db.lock().await.clone();
-    let mut profile = tab.server.profile.clone();
+    let mut profile = tab.server.profile();
     if want_db.is_some() {
         profile.database = want_db;
     }
@@ -981,7 +1051,9 @@ async fn connect_elastic(
     let id = profile.id.clone();
     let current_database = profile.database.clone().filter(|d| !d.is_empty());
 
+    let (id_of, profile) = ServerConn::parts(profile);
     let conn = Arc::new(ServerConn {
+        id: id_of,
         profile,
         password: String::new(),
         killer: None,
@@ -1037,7 +1109,9 @@ pub(crate) mod tests {
         let engine =
             crate::elastic::ElasticEngine::new("http://127.0.0.1:1", Default::default(), None);
         let capabilities = engine.capabilities().clone();
+        let (id, profile) = ServerConn::parts(profile);
         TabSession::new(Arc::new(ServerConn {
+            id,
             profile,
             password: String::new(),
             killer: None,
@@ -1123,6 +1197,110 @@ pub(crate) mod tests {
         assert_eq!(json["id"], "c1-abc");
         assert_eq!(json["host"], "db.example.com");
         assert_eq!(json["allowInvalidCerts"], false);
+    }
+
+    // ----------------------------------- Stage 30: a save with no reconnect
+
+    /// The one a connected `ServerConn` is built from, so these tests exercise
+    /// the real lock rather than a copy of it.
+    fn offline_server() -> std::sync::Arc<ServerConn> {
+        offline_tab().server
+    }
+
+    /// The bug the field report found. Attaching a dictionary is the one save
+    /// in the app that does not reconnect, and before this the live connection
+    /// never heard about it — so the assistant, the tree's dots and MCP's
+    /// `put_notes` all kept answering "no dictionary" until a restart.
+    #[test]
+    fn a_dictionary_attached_after_connecting_is_visible_at_once() {
+        let server = offline_server();
+        assert_eq!(server.profile().dictionary, None);
+
+        let mut saved = sample();
+        saved.dictionary = Some("/tmp/dictionary.toml".to_string());
+        server.follow_saved(&saved);
+
+        assert_eq!(
+            server.profile().dictionary.as_deref(),
+            Some("/tmp/dictionary.toml"),
+            "the live connection did not follow the save"
+        );
+    }
+
+    /// The rail's label and colour are the same kind of thing as the
+    /// dictionary: they describe the connection, not the socket.
+    #[test]
+    fn the_name_and_colour_follow_a_save_too() {
+        let server = offline_server();
+        let mut saved = sample();
+        saved.name = "AWS QA".to_string();
+        saved.colour = "#ff0000".to_string();
+        server.follow_saved(&saved);
+
+        let now = server.profile();
+        assert_eq!(now.name, "AWS QA");
+        assert_eq!(now.colour, "#ff0000");
+    }
+
+    /// **The half that must not work.** `read_only` narrows
+    /// `Capabilities` once, at connect, and every refusal downstream asks the
+    /// capabilities rather than the profile. A profile that took the flag from
+    /// a later save would report protection that nothing was applying — the
+    /// exact failure Stage 14 §8 found and decided against. Changing it is a
+    /// reconnect, which the connection dialog does on every save.
+    #[test]
+    fn a_connection_parameter_does_not_follow_a_save() {
+        let server = offline_server();
+        let before = server.profile();
+        assert!(!before.read_only, "the fixture must start writable");
+
+        let mut saved = sample();
+        saved.read_only = true;
+        saved.host = "somewhere.else".to_string();
+        saved.port = 1234;
+        saved.database = Some("other".to_string());
+        saved.user = "root".to_string();
+        saved.allow_invalid_certs = true;
+        saved.no_password = true;
+        server.follow_saved(&saved);
+
+        let now = server.profile();
+        assert!(!now.read_only, "read-only was taken without a reconnect");
+        assert_eq!(now.host, before.host);
+        assert_eq!(now.port, before.port);
+        assert_eq!(now.database, before.database);
+        assert_eq!(now.user, before.user);
+        assert_eq!(now.allow_invalid_certs, before.allow_invalid_certs);
+        assert_eq!(now.no_password, before.no_password);
+    }
+
+    /// `save_profile` looks the live session up by the id it just wrote, so
+    /// this can only happen through a bug — and a connection quietly wearing
+    /// another one's name is the worst way to be told about it.
+    #[test]
+    fn a_save_for_another_connection_changes_nothing() {
+        let server = offline_server();
+        let mut other = sample();
+        other.id = "c2-xyz".to_string();
+        other.name = "Production".to_string();
+        other.dictionary = Some("/tmp/wrong.toml".to_string());
+        server.follow_saved(&other);
+
+        let now = server.profile();
+        assert_eq!(now.name, sample().name);
+        assert_eq!(now.dictionary, None);
+    }
+
+    /// `id` lives outside the lock because nothing can edit it. If it ever
+    /// moves back in, `follow_saved`'s guard is comparing a value against
+    /// itself and the test above stops meaning anything.
+    #[test]
+    fn the_id_is_the_identity_and_not_a_label() {
+        let server = offline_server();
+        let mut renamed = sample();
+        renamed.name = "Renamed".to_string();
+        server.follow_saved(&renamed);
+        assert_eq!(server.id(), sample().id, "the identity moved");
     }
 
     /// The other half of the invariant: the flag is derived, so it must not be

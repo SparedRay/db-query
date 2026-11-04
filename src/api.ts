@@ -772,6 +772,18 @@ export type AssistantEvent =
    * its token, and an empty bubble for that long reads as broken.
    */
   | { type: "started" }
+  /**
+   * What the prompt could carry of the schema — **for the person, not the
+   * model.** Sent once, before the answer.
+   *
+   * The prompt has always told the model that columns were listed for only
+   * some tables. The one who can do something about it heard nothing, and in
+   * the Stage 30 field report that is exactly where the failure went
+   * unexplained: the assistant said it was guessing and there was no way to
+   * see why. `elided` is most relevant first, and empty when everything
+   * fitted.
+   */
+  | { type: "context"; described: number; elided: string[] }
   | { type: "thinking"; delta: string }
   | { type: "text"; delta: string }
   | { type: "done"; stopReason: string | null }
@@ -1289,6 +1301,12 @@ export const api = {
     connectionId: string | null,
     db: string | null,
     messages: ChatMessage[],
+    /**
+     * The SQL in the editor, for ranking which tables are worth describing.
+     * **It is never sent to a provider** — Rust reads it into a set of words
+     * and drops it; see `relevance`'s header.
+     */
+    editor: string | null,
     onEvent: (e: AssistantEvent) => void,
   ) => {
     const channel = new Channel<AssistantEvent>();
@@ -1300,6 +1318,7 @@ export const api = {
       connectionId,
       db,
       messages,
+      editor,
       onEvent: channel,
     });
   },
@@ -1335,6 +1354,8 @@ export const api = {
     connectionId: string | null,
     db: string | null,
     messages: ChatMessage[],
+    /** As `assistantSend`'s: ranks the schema, never leaves the machine. */
+    editor: string | null,
     onEvent: (e: AssistantEvent) => void,
   ) => {
     const channel = new Channel<AssistantEvent>();
@@ -1345,6 +1366,7 @@ export const api = {
       connectionId,
       db,
       messages,
+      editor,
       onEvent: channel,
     });
   },

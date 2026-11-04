@@ -61,6 +61,25 @@ export interface AssistantDeps {
    * §3.8.
    */
   hasDictionary: () => boolean;
+  /**
+   * Whether the dictionary tab has edits nobody has saved.
+   *
+   * The assistant reads the **file**, which is Stage 25's deliberate stance:
+   * the dots in the tree mean "this is what the assistant will be told", and a
+   * dot promising an unsaved edit would be a worse lie than none. What was
+   * missing is that nobody was told — the field report's dictionary was full
+   * of notes and the assistant said the schema had none. Stage 30 §4.5.
+   */
+  dictionaryUnsaved: () => boolean;
+  /**
+   * The SQL in the editor, for ranking which tables are worth describing.
+   *
+   * **It never leaves the machine.** Rust reads it into a set of words and
+   * drops it; see `relevance`'s header. The promise this panel makes is that
+   * table and column names are sent and row data never is, and a literal in
+   * somebody's buffer is neither.
+   */
+  editorSql: () => string | null;
   /** Put SQL where the cursor is. */
   insert: (sql: string) => void;
   /** Open it as a new tab instead. */
@@ -223,13 +242,36 @@ function whatIsSent(deps: AssistantDeps): string {
   const dict = deps.hasDictionary()
     ? ", along with the dictionary you attached to this connection"
     : "";
-  return `${base}${dict}; row data never is.`;
+  // **Said here because this sentence is the promise.** It is in one place for
+  // that reason, and for the window the field report found it was false: the
+  // dictionary tab was full of notes, the file on disk was not, and the
+  // assistant was told there were none while this line said they were sent.
+  const unsaved =
+    deps.hasDictionary() && deps.dictionaryUnsaved()
+      ? " Unsaved dictionary edits are not included — save the tab first."
+      : "";
+  return `${base}${dict}; row data never is.${unsaved}`;
 }
 
 export function createAssistant(deps: AssistantDeps) {
   /** The conversation as the API sees it. Prose and SQL both, verbatim. */
   let history: ChatMessage[] = [];
   let streaming = false;
+  /**
+   * How the standing note begins — "claude-opus-5 · " — when the provider is
+   * ready and what it sends is worth describing. `null` while it is not, in
+   * which case the note is a reason and nothing about what leaves the machine.
+   *
+   * Held so the note can be **rebuilt**, which it has to be: it is painted
+   * when the panel opens, and the panel is a dock that stays open. Typing in
+   * the dictionary tab changes what will be sent, and a promise that was true
+   * when you opened the panel is still a promise. Stage 30 §4.5.
+   */
+  let notePrefix: string | null = null;
+
+  function paintNote() {
+    if (notePrefix !== null) deps.note.textContent = notePrefix + whatIsSent(deps);
+  }
 
   function bubble(cls: string): HTMLElement {
     const el = document.createElement("div");
@@ -381,12 +423,28 @@ export function createAssistant(deps: AssistantDeps) {
     setStreaming(true);
     let answer = "";
     let failed: string | null = null;
+    /** The "what was left out" line, made only if there is something to say. */
+    let elided: HTMLElement | null = null;
 
     const onEvent = (e: AssistantEvent) => {
       if (e.type === "started") {
         // The CLI is up and the wait is now the model's rather than the
         // process's. The line stays; only what can be stopped changes.
         setStreaming(true);
+      } else if (e.type === "context") {
+        // Only when something was left out. On a schema that fits — which is
+        // most of them — a line saying so every turn would be noise.
+        if (e.elided.length > 0) {
+          const names = e.elided.slice(0, 3).join(", ");
+          const shown = elided ?? bubble("chat-context");
+          elided = shown;
+          shown.textContent =
+            `Columns sent for the ${e.described} tables most likely to be relevant. ` +
+            `${e.elided.length} more were sent by name only, starting with ${names}. ` +
+            `Name the tables you mean, or ask about fewer, if the answer looks like a guess.`;
+          // Before the reply, which is where it is useful.
+          reply.before(shown);
+        }
       } else if (e.type === "thinking") {
         thinking.hidden = false;
         thinking.textContent += e.delta;
@@ -417,10 +475,18 @@ export function createAssistant(deps: AssistantDeps) {
           connectionId,
           db,
           snapshot,
+          deps.editorSql(),
           onEvent,
         );
       } else {
-        await api.assistantSend(config, connectionId, db, snapshot, onEvent);
+        await api.assistantSend(
+          config,
+          connectionId,
+          db,
+          snapshot,
+          deps.editorSql(),
+          onEvent,
+        );
       }
     } catch (err) {
       // The request never started — nothing was shown, so this replaces it.
@@ -475,6 +541,13 @@ export function createAssistant(deps: AssistantDeps) {
   });
 
   return {
+    /**
+     * Repaint the standing note, because what is sent has changed.
+     *
+     * Called when a dictionary tab is edited: the assistant reads the file, so
+     * an unsaved buffer narrows the promise, and the panel is already open.
+     */
+    refreshNote: paintNote,
     async open() {
       if (deps.panel.isOpen()) {
         deps.input.focus();
@@ -495,6 +568,9 @@ export function createAssistant(deps: AssistantDeps) {
       // Set by each branch below; applied once, after the await, so there is
       // one place that turns the waiting line into an answer.
       let note = "";
+      // The same note minus its what-is-sent tail, for rebuilding it later.
+      // `null` on every branch whose note is a reason rather than a promise.
+      let prefix: string | null = null;
 
       if (config.provider === "localCli" && config.recipe) {
         // A CLI is asked a different question: not "is a key stored" but "is it
@@ -502,8 +578,9 @@ export function createAssistant(deps: AssistantDeps) {
         // asked every time the panel opens rather than cached and trusted.
         const status = await api.assistantCliProbe(config.recipe).catch(() => null);
         ready = (status?.installed ?? false) && (status?.signedIn ?? false);
+        if (ready) prefix = `${cliLabel(config.recipe)} · signed in on this machine; `;
         note = ready
-          ? `${cliLabel(config.recipe)} · signed in on this machine; ${whatIsSent(deps)}`
+          ? prefix + whatIsSent(deps)
           : (status?.detail ?? `Could not ask ${cliLabel(config.recipe)} whether it is ready.`);
       } else {
         const status = await api
@@ -511,6 +588,8 @@ export function createAssistant(deps: AssistantDeps) {
           .catch(() => null);
         ready = (status?.ready ?? false) && config.model.trim() !== "";
 
+        // A local model sends nothing at all, so there is no tail to rebuild.
+        if (ready && !status?.local) prefix = `${config.model} · `;
         note = !ready
           ? status && !status.ready
             ? "No API key set. Add one in Settings to use the assistant."
@@ -522,6 +601,7 @@ export function createAssistant(deps: AssistantDeps) {
       }
 
       checking.stop();
+      notePrefix = prefix;
       deps.note.textContent = note;
       deps.send.disabled = !ready;
       deps.input.disabled = !ready;

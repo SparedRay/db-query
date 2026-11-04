@@ -1488,6 +1488,15 @@ dialog.viewer .viewer-note.copy-failed { color: var(--danger-fg); }
 }
 .chat-error { margin: 6px 0 0; font-size: 12px; color: var(--danger-fg); }
 
+/* Stage 30. What the prompt could not carry, said to the person rather than
+   only to the model. Dimmed and not a bubble: it is the app talking about the
+   question, not an answer to it, and it appears only when something was left
+   out. */
+.chat-msg.chat-context {
+  align-self: stretch; padding: 0 2px;
+  font-size: 11.5px; line-height: 1.5; color: var(--fg-dim);
+}
+
 .chat-sql { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .chat-sql pre {
   margin: 0; padding: 8px 10px; overflow-x: auto;

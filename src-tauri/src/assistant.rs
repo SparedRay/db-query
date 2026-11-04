@@ -121,6 +121,21 @@ pub enum StreamEvent {
     /// for two and a half seconds reads as broken. The HTTP providers have
     /// nothing to report here, so they do not.
     Started,
+    /// What the prompt could carry of the schema, **for the person**.
+    ///
+    /// The prompt has always told the *model* that columns were listed for only
+    /// some tables. The one who can do something about it — ask a narrower
+    /// question, name the tables, open them in the tree — was told nothing, and
+    /// in the Stage 30 field report that is where the whole failure went
+    /// unexplained: the assistant said it was guessing and the person had no
+    /// way to see why. Sent once, before the answer. Stage 30 §4.6.
+    Context {
+        /// Tables described with their columns.
+        described: usize,
+        /// Tables sent by name alone because the budget ran out, most relevant
+        /// first. Empty when everything fitted, which is the common case.
+        elided: Vec<String>,
+    },
     /// A summary of the model's reasoning, shown dimmed. Requested explicitly:
     /// without it a thinking model looks like a long pause before anything.
     Thinking {
@@ -153,6 +168,174 @@ pub enum StreamEvent {
 /// the schema it describes.
 pub const DICTIONARY_BUDGET_CHARS: usize = 8_000;
 
+/// How many characters of *columns* one request may carry.
+///
+/// **Measured** — `tests/measure_prompt.rs`, a 400-table × 12-column database
+/// shaped like the one in the Stage 30 field report. A table with its columns
+/// costs ~315 characters and ~34 named alone, so the whole schema is ~139,000
+/// characters (~35k tokens) and the old limit of 60 tables was ~32,600
+/// (~8k). Rendering is free at every size: 1.54ms for all 400.
+///
+/// 60,000 characters is ~15k tokens, or about 190 average tables — three times
+/// what the old limit carried, in a budget priced in the thing that actually
+/// costs money. **In characters and not tables** because a count prices a
+/// 3-column lookup table the same as a 60-column fact table, and because §3
+/// measured characters; `DICTIONARY_BUDGET_CHARS` is in characters for the
+/// same reason.
+///
+/// This is *not* [`crate::schema::TABLE_DETAIL_BUDGET`], which bounds round
+/// trips on an engine that describes one table at a time. Its own doc comment
+/// always said the prompt limit "lives in `render_schema`'s caller" — and then
+/// the caller passed it, so the prompt was sized by a number chosen for
+/// something else. Stage 30 §4.2.
+pub const SCHEMA_BUDGET_CHARS: usize = 60_000;
+
+/// The same, for a schema that travels **once per session** rather than once
+/// per question.
+///
+/// A kept CLI session is primed with the system prompt and reused only while
+/// `primed_with` holds, so its schema is sent once and costs nothing per turn
+/// thereafter — measured at 1.85-2.66s a turn against 5.3-11.7s for a fresh
+/// process. With no per-request cost to protect there is no reason to ration:
+/// 240,000 characters is ~60k tokens, which covers ~760 average tables whole.
+/// Stage 30 §4.3.
+pub const SCHEMA_BUDGET_SESSION_CHARS: usize = 240_000;
+
+/// A rendered schema, and what did not fit in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rendered {
+    pub text: String,
+    /// Tables carried by name alone because the budget ran out, most relevant
+    /// first.
+    ///
+    /// **So the person can be told, not only the model.** The prompt has always
+    /// said "columns are listed for the first n tables" to the model; the one
+    /// who can do something about it heard nothing. Stage 30 §4.6.
+    pub elided: Vec<String>,
+    /// Tables whose columns nothing has loaded. Named, and said to be
+    /// unloaded, which is honest — but it is a different problem from the
+    /// budget and the two should not be reported as one.
+    pub unloaded: usize,
+}
+
+// ------------------------------------------------- measuring a real schema
+//
+// Stage 30 shipped a ranking and a budget fitted to a *synthetic* 400-table
+// schema (`tests/measure_prompt.rs`), because that is all there was. The two
+// functions below are how the numbers get checked against a real one, and they
+// answer different questions:
+//
+//   * [`reckoning`] — what does this database cost a prompt, and how much of
+//     it fits? Read off the cache, so the diagnostics dialog answers it with
+//     no query and no API call.
+//   * [`ranked_note`] — for *this* question, did the right tables get the
+//     budget? Only a real question can answer that, so it goes in the log,
+//     one line per question, where `report` already copies it out.
+
+/// What a cached schema would cost a prompt, as one line.
+///
+/// Three renders, ~2ms each at 400 tables, against the cache alone — the
+/// diagnostics dialog must not introspect a production server, which is
+/// `describe_cache`'s standing rule.
+pub fn reckoning(db: &str, schema: &DbSchema) -> String {
+    let tables = schema.tables.as_deref().unwrap_or_default().len();
+    if tables == 0 {
+        return "nothing to describe\n".to_string();
+    }
+    // No ranking: these are properties of the schema, not of a question.
+    let whole = render_schema(db, schema, &[], usize::MAX, None);
+    let request = render_schema(db, schema, &[], SCHEMA_BUDGET_CHARS, None);
+    let session = render_schema(db, schema, &[], SCHEMA_BUDGET_SESSION_CHARS, None);
+    let fits = |r: &Rendered| tables - r.elided.len() - r.unloaded;
+    format!(
+        "{} chars to describe whole (~{} tokens); {} of {tables} fit a request, \
+         {} fit a kept session{}\n",
+        whole.text.chars().count(),
+        whole.text.chars().count() / 4,
+        fits(&request),
+        fits(&session),
+        match whole.unloaded {
+            0 => String::new(),
+            n => format!("; {n} have no columns cached"),
+        },
+    )
+}
+
+/// How many names a log line carries before it stops being readable.
+const NAMES_IN_A_LINE: usize = 12;
+
+fn listed(names: &[String], n: usize) -> String {
+    let shown: Vec<&str> = names.iter().take(n).map(String::as_str).collect();
+    if names.len() > n {
+        format!("{}, +{} more", shown.join(" "), names.len() - n)
+    } else if shown.is_empty() {
+        "none".to_string()
+    } else {
+        shown.join(" ")
+    }
+}
+
+/// One question's ranking, as a sentence for the log.
+///
+/// **`landed` is the question's vocabulary as the schema recognised it**, never
+/// the question — see [`crate::relevance::recognised`] for why that is both the
+/// safer half and the more useful one. `missed` is how many of its words the
+/// schema had no name for, as a number, because those are exactly the words
+/// that could be anything.
+pub fn ranked_note(
+    db: &str,
+    landed: &[String],
+    missed: usize,
+    order: &[String],
+    out: &Rendered,
+    took: std::time::Duration,
+) -> String {
+    let tables = order.len();
+    let described = tables - out.elided.len() - out.unloaded;
+    let where_it_is = if db.is_empty() { "schema" } else { db };
+    format!(
+        "{where_it_is}: {described} of {tables} tables described, {} by name, \
+         {} with no columns cached; {} chars; ranked in {}ms; \
+         matched [{}] and {missed} word(s) it does not have; first [{}]; cut at [{}]",
+        out.elided.len(),
+        out.unloaded,
+        out.text.chars().count(),
+        took.as_millis(),
+        listed(landed, 20),
+        listed(order, NAMES_IN_A_LINE),
+        listed(&out.elided, 5),
+    )
+}
+
+/// One table, decided but not yet written out.
+struct Entry {
+    kind: &'static str,
+    name: String,
+    note: Option<String>,
+    join: Option<String>,
+    /// `Some` when this table's columns fit: each one rendered, with whatever
+    /// the dictionary says about it. `None` means named alone.
+    cols: Option<Vec<(String, Option<String>)>>,
+    /// Whether anything has loaded its columns at all, which is a different
+    /// answer from "they did not fit".
+    loaded: bool,
+}
+
+/// `name type NOT NULL PK`, the form the prompt has always used.
+fn render_column(c: &crate::schema::ColumnInfo) -> String {
+    let mut s = format!("{} {}", c.name, c.data_type);
+    if !c.nullable {
+        s.push_str(" NOT NULL");
+    }
+    match c.key.as_deref() {
+        Some("PRI") => s.push_str(" PK"),
+        Some("UNI") => s.push_str(" UNIQUE"),
+        Some("MUL") => s.push_str(" INDEX"),
+        _ => {}
+    }
+    s
+}
+
 /// Render a database's cached schema as compact text for the system prompt.
 ///
 /// Only names and types — the shape, never the contents — plus whatever the
@@ -160,11 +343,20 @@ pub const DICTIONARY_BUDGET_CHARS: usize = 8_000;
 /// expanded yet appear by name alone, which is honest: it tells the model the
 /// table exists without inventing columns for it.
 ///
-/// **At most `detail_limit` tables are rendered with their columns.** The
-/// cache can now hold every column of a large database, and 385 tables of them
-/// is tens of thousands of tokens in every request. Past the limit a table is
-/// named alone and the prompt says why, so the model asks rather than assumes
-/// the table has no columns.
+/// # Two orders, on purpose
+///
+/// `order` is the relevance ranking (see [`crate::relevance`]): names most
+/// worth describing first. **The budget is spent down that order, and the
+/// result is printed alphabetically.** Printing in relevance order would make
+/// the block read as though its sequence meant something, and would reshuffle
+/// the whole schema whenever the question changed; a schema should read like a
+/// schema. Relevance decides *who gets columns*, nothing else.
+///
+/// A name in `order` that this database does not have is ignored, and a table
+/// missing from `order` is considered after every ranked one — so an empty
+/// `order` reproduces the alphabetical behaviour this had before Stage 30, and
+/// a ranker that forgets a table costs that table its columns rather than its
+/// existence.
 ///
 /// # Where a note goes
 ///
@@ -176,12 +368,21 @@ pub const DICTIONARY_BUDGET_CHARS: usize = 8_000;
 /// A table nobody wrote about renders **exactly as it did before this
 /// existed**, on one line. The multi-line form is what paying for notes buys,
 /// so the cost stays proportional to what was written.
+///
+/// **A note and a `join` survive the column budget.** They used not to: a
+/// table past the old limit took a branch that never charged for them, so the
+/// 340 tables sent by name alone lost every note they had — including the one
+/// the Stage 30 report turned on, which said that `enrolled_party.status_id`
+/// points at `party_status` and not at the similarly named `statuses`. They
+/// are short, they are the reason somebody wrote them, and they are what lets
+/// a model pick the right table out of a list of names. Stage 30 §2.2.
 pub fn render_schema(
     db: &str,
     schema: &DbSchema,
-    detail_limit: usize,
+    order: &[String],
+    budget_chars: usize,
     dictionary: Option<&crate::dictionary::Dictionary>,
-) -> String {
+) -> Rendered {
     let mut out = String::new();
     // An engine without namespaces — a local Elasticsearch cluster has no
     // catalogs — describes itself under the empty one, and "Database ``" reads
@@ -195,131 +396,185 @@ pub fn render_schema(
     let tables = schema.tables.as_deref().unwrap_or_default();
     if tables.is_empty() {
         out.push_str("(no tables have been loaded yet)\n");
-        return out;
+        return Rendered {
+            text: out,
+            ..Default::default()
+        };
     }
 
-    let mut detailed = 0;
-    let mut elided = 0;
-    // Spent on notes, against `DICTIONARY_BUDGET_CHARS`. Tables are walked in
-    // the order they are rendered, and each one's own note is paid for before
-    // its columns' — so a dictionary that runs out of budget loses the detail
-    // first and keeps the sentence that says what the table *is*.
+    // Spent on notes, against `DICTIONARY_BUDGET_CHARS`. Walked in relevance
+    // order and charged per table before its columns' — so a dictionary that
+    // runs out of budget loses the detail on the tables nobody asked about,
+    // and keeps the sentence saying what the relevant ones *are*.
     let mut spent = 0usize;
     let mut dropped = 0usize;
+    let mut afford = |text: Option<&str>, spent: &mut usize| -> Option<String> {
+        let text = text.map(str::trim).filter(|t| !t.is_empty())?;
+        let want = text.chars().count();
+        if *spent + want > DICTIONARY_BUDGET_CHARS {
+            dropped += 1;
+            return None;
+        }
+        *spent += want;
+        Some(text.to_string())
+    };
+
+    // Relevance first, then anything the ranking did not mention.
+    let mut queue: Vec<&crate::schema::TableRef> = Vec::with_capacity(tables.len());
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for name in order {
+        if let Some(t) = tables.iter().find(|t| t.name == *name) {
+            if seen.insert(t.name.as_str()) {
+                queue.push(t);
+            }
+        }
+    }
     for t in tables {
+        if seen.insert(t.name.as_str()) {
+            queue.push(t);
+        }
+    }
+
+    let mut entries: HashMap<&str, Entry> = HashMap::with_capacity(queue.len());
+    let mut elided: Vec<String> = Vec::new();
+    let mut unloaded = 0usize;
+    let mut used = 0usize;
+
+    for t in queue {
         let kind = if t.kind.to_ascii_uppercase().contains("VIEW") {
             "VIEW"
         } else {
             "TABLE"
         };
-        // What the dictionary says about this one, if anything.
         let said = dictionary.and_then(|d| d.table(db, &t.name));
-        // **Charged before anything is rendered**, because the budget decides
-        // the *shape* of the entry and not merely its text: a table whose note
-        // the budget dropped must fall back to the one-line form, or losing
-        // the note would still cost the newlines and the indentation that
-        // having one buys. Its own test caught that.
-        let mut afford = |text: Option<&str>| -> Option<String> {
-            let text = text.map(str::trim).filter(|t| !t.is_empty())?;
-            let want = text.chars().count();
-            if spent + want > DICTIONARY_BUDGET_CHARS {
-                dropped += 1;
-                return None;
+        // Charged in the order they matter: what the table *is*, then how it
+        // joins, then — only if its columns fit — its columns'.
+        let note = afford(said.as_ref().and_then(|s| s.note.as_deref()), &mut spent);
+        let join = afford(said.as_ref().and_then(|s| s.join.as_deref()), &mut spent);
+
+        let cached = schema.columns.get(&t.name).filter(|c| !c.is_empty());
+        let (cols, loaded) = match cached {
+            None => {
+                unloaded += 1;
+                (None, false)
             }
-            spent += want;
-            Some(text.to_string())
+            Some(cols) => {
+                let rendered: Vec<String> = cols.iter().map(render_column).collect();
+                // **Priced on the unannotated form**, which is the stable
+                // measure of how big a table is. Notes have a budget of their
+                // own and are accounted there; pricing them here would make
+                // whether a table fits depend on how much somebody wrote
+                // about it, and a well-documented table is the last one to
+                // drop.
+                let cost = rendered
+                    .iter()
+                    .map(|c| c.chars().count() + 2)
+                    .sum::<usize>()
+                    + t.name.chars().count()
+                    + 10;
+                if used + cost > budget_chars {
+                    elided.push(t.name.clone());
+                    (None, true)
+                } else {
+                    used += cost;
+                    let with_notes = rendered
+                        .into_iter()
+                        .zip(cols.iter())
+                        .map(|(text, c)| {
+                            let said = said
+                                .as_ref()
+                                .and_then(|s| s.columns.get(&c.name.to_lowercase()))
+                                .map(String::as_str);
+                            (text, afford(said, &mut spent))
+                        })
+                        .collect();
+                    (Some(with_notes), true)
+                }
+            }
         };
 
-        match schema.columns.get(&t.name) {
-            Some(cols) if !cols.is_empty() && detailed >= detail_limit => {
-                elided += 1;
-                out.push_str(&format!("{kind} `{}`\n", t.name));
-            }
-            Some(cols) if !cols.is_empty() => {
-                detailed += 1;
+        entries.insert(
+            t.name.as_str(),
+            Entry {
+                kind,
+                name: t.name.clone(),
+                note,
+                join,
+                cols,
+                loaded,
+            },
+        );
+    }
 
-                // Charged in the order they matter: what the table *is*,
-                // then how it joins, then its columns. A dictionary that runs
-                // out of budget therefore loses detail before it loses the
-                // sentence that explains the table.
-                let table_note = afford(said.as_ref().and_then(|s| s.note.as_deref()));
-                let join = afford(said.as_ref().and_then(|s| s.join.as_deref()));
-                let notes: Vec<Option<String>> = cols
-                    .iter()
-                    .map(|c| {
-                        let said = said
-                            .as_ref()
-                            .and_then(|s| s.columns.get(&c.name.to_lowercase()))
-                            .map(String::as_str);
-                        afford(said)
-                    })
-                    .collect();
+    // Printed in the order the database reported them, which is alphabetical.
+    for t in tables {
+        let Some(e) = entries.get(t.name.as_str()) else {
+            continue;
+        };
+        let annotated = e.note.is_some()
+            || e.join.is_some()
+            || e.cols
+                .as_ref()
+                .is_some_and(|c| c.iter().any(|(_, n)| n.is_some()));
 
-                let annotated =
-                    table_note.is_some() || join.is_some() || notes.iter().any(Option::is_some);
-
-                let rendered: Vec<String> = cols
-                    .iter()
-                    .map(|c| {
-                        let mut s = format!("{} {}", c.name, c.data_type);
-                        if !c.nullable {
-                            s.push_str(" NOT NULL");
-                        }
-                        match c.key.as_deref() {
-                            Some("PRI") => s.push_str(" PK"),
-                            Some("UNI") => s.push_str(" UNIQUE"),
-                            Some("MUL") => s.push_str(" INDEX"),
-                            _ => {}
-                        }
-                        s
-                    })
-                    .collect();
-
-                if !annotated {
-                    // **Byte for byte what this printed before the dictionary
-                    // existed.** Nobody without one pays anything for it.
-                    out.push_str(&format!("{kind} `{}` (", t.name));
-                    out.push_str(&rendered.join(", "));
-                    out.push_str(")\n");
-                    continue;
-                }
-
-                out.push_str(&format!("{kind} `{}`", t.name));
-                if let Some(note) = &table_note {
+        match &e.cols {
+            // Named alone: the budget ran out, or nothing has loaded them.
+            None => {
+                let tail = if e.loaded {
+                    ""
+                } else {
+                    " (columns not loaded)"
+                };
+                out.push_str(&format!("{} `{}`{tail}", e.kind, e.name));
+                if let Some(note) = &e.note {
                     out.push_str(&format!(" -- {note}"));
                 }
                 out.push('\n');
-                if let Some(join) = &join {
+                if let Some(join) = &e.join {
                     out.push_str(&format!("  -- joins: {join}\n"));
                 }
-                for (i, col) in rendered.iter().enumerate() {
+            }
+            Some(cols) if !annotated => {
+                // **Byte for byte what this printed before the dictionary
+                // existed.** Nobody without one pays anything for it.
+                out.push_str(&format!("{} `{}` (", e.kind, e.name));
+                out.push_str(
+                    &cols
+                        .iter()
+                        .map(|(c, _)| c.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                out.push_str(")\n");
+            }
+            Some(cols) => {
+                out.push_str(&format!("{} `{}`", e.kind, e.name));
+                if let Some(note) = &e.note {
+                    out.push_str(&format!(" -- {note}"));
+                }
+                out.push('\n');
+                if let Some(join) = &e.join {
+                    out.push_str(&format!("  -- joins: {join}\n"));
+                }
+                for (i, (col, note)) in cols.iter().enumerate() {
                     let open = if i == 0 { "  (" } else { "   " };
-                    let close = if i + 1 == rendered.len() { ")" } else { "," };
-                    match &notes[i] {
+                    let close = if i + 1 == cols.len() { ")" } else { "," };
+                    match note {
                         Some(note) => out.push_str(&format!("{open}{col}{close} -- {note}\n")),
                         None => out.push_str(&format!("{open}{col}{close}\n")),
                     }
                 }
             }
-            // Columns are loaded lazily by expanding the tree. Saying "not
-            // loaded" beats listing nothing, which reads as "no columns".
-            _ => {
-                let note = afford(said.as_ref().and_then(|s| s.note.as_deref()));
-                match note {
-                    Some(note) => out.push_str(&format!(
-                        "{kind} `{}` (columns not loaded) -- {note}\n",
-                        t.name
-                    )),
-                    None => out.push_str(&format!("{kind} `{}` (columns not loaded)\n", t.name)),
-                }
-            }
         }
     }
-    if elided > 0 {
+
+    if !elided.is_empty() {
+        let detailed = tables.len() - elided.len() - unloaded;
         out.push_str(&format!(
-            "(Columns are listed for the first {detailed} tables only, to keep this short; \
-             the {elided} tables named without them do have columns. Ask the user for a \
-             table's columns rather than guessing them.)\n"
+            "(Columns are listed for the {detailed} tables most likely to be relevant, to keep \
+             this short; the {} tables named without them do have columns. Ask the user for a \
+             table's columns rather than guessing them.)\n",
+            elided.len()
         ));
     }
     if dropped > 0 {
@@ -346,7 +601,11 @@ pub fn render_schema(
             ));
         }
     }
-    out
+    Rendered {
+        text: out,
+        elided,
+        unloaded,
+    }
 }
 
 /// The instructions. Short on purpose — the constraint is the important part.
@@ -692,7 +951,7 @@ mod tests {
             columns: Default::default(),
             routines: None,
         };
-        let out = render_schema("", &schema, 60, None);
+        let out = schema_text("", &schema, None);
         assert!(!out.contains("``"), "{out}");
         assert!(out.starts_with("Schema"), "{out}");
     }
@@ -806,6 +1065,18 @@ mod tests {
 
     // ------------------------------------------------------------- prompting
 
+    /// The rendered text with the whole budget and no ranking — the shape every
+    /// test below was written for, before Stage 30 gave it an order and a
+    /// budget in characters. The two tests that are *about* the budget call it
+    /// directly.
+    fn schema_text(
+        db: &str,
+        schema: &DbSchema,
+        dictionary: Option<&crate::dictionary::Dictionary>,
+    ) -> String {
+        render_schema(db, schema, &[], SCHEMA_BUDGET_CHARS, dictionary).text
+    }
+
     fn schema_fixture() -> DbSchema {
         let mut columns = HashMap::new();
         columns.insert(
@@ -843,7 +1114,7 @@ mod tests {
 
     #[test]
     fn the_schema_renders_names_types_and_keys() {
-        let rendered = render_schema("poc", &schema_fixture(), 60, None);
+        let rendered = schema_text("poc", &schema_fixture(), None);
         assert!(rendered.contains("TABLE `users`"), "{rendered}");
         assert!(rendered.contains("id int NOT NULL PK"), "{rendered}");
         assert!(
@@ -857,7 +1128,7 @@ mod tests {
     /// rather than appear to have none, which would invite invented column names.
     #[test]
     fn a_table_with_no_cached_columns_says_so() {
-        let rendered = render_schema("poc", &schema_fixture(), 60, None);
+        let rendered = schema_text("poc", &schema_fixture(), None);
         assert!(
             rendered.contains("`user_totals` (columns not loaded)"),
             "{rendered}"
@@ -867,12 +1138,12 @@ mod tests {
     /// The cache can hold every column of a large database; the prompt must not.
     #[test]
     fn past_the_limit_tables_are_named_and_the_prompt_says_why() {
-        let rendered = render_schema("poc", &schema_fixture(), 0, None);
+        let rendered = render_schema("poc", &schema_fixture(), &[], 0, None).text;
         assert!(!rendered.contains("id int"), "{rendered}");
         assert!(rendered.contains("TABLE `users`\n"), "{rendered}");
         assert!(rendered.contains("do have columns"), "{rendered}");
 
-        let full = render_schema("poc", &schema_fixture(), 60, None);
+        let full = schema_text("poc", &schema_fixture(), None);
         assert!(!full.contains("do have columns"), "{full}");
     }
 
@@ -900,7 +1171,7 @@ mod tests {
     /// because this is the promise the UI makes on the feature's behalf.
     #[test]
     fn the_prompt_carries_no_row_data() {
-        let rendered = render_schema("poc", &schema_fixture(), 60, None);
+        let rendered = schema_text("poc", &schema_fixture(), None);
         assert!(
             !rendered.contains("@"),
             "an email address reached the prompt"
@@ -1175,13 +1446,10 @@ mod tests {
     /// this function produced before any of this existed.
     #[test]
     fn a_table_nobody_described_renders_exactly_as_before() {
-        let before = render_schema("poc", &schema_fixture(), 60, None);
+        let before = schema_text("poc", &schema_fixture(), None);
 
         let empty = dict("version = 1");
-        assert_eq!(
-            render_schema("poc", &schema_fixture(), 60, Some(&empty)),
-            before
-        );
+        assert_eq!(schema_text("poc", &schema_fixture(), Some(&empty)), before);
 
         let elsewhere = dict(
             r#"
@@ -1191,7 +1459,7 @@ mod tests {
             "#,
         );
         assert_eq!(
-            render_schema("poc", &schema_fixture(), 60, Some(&elsewhere)),
+            schema_text("poc", &schema_fixture(), Some(&elsewhere)),
             before,
             "a dictionary about other tables must not change this one's bytes"
         );
@@ -1209,7 +1477,7 @@ mod tests {
             columns.email = "Lower-cased by the app, never by the database."
             "#,
         );
-        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+        let out = schema_text("poc", &schema_fixture(), Some(&d));
 
         assert!(
             out.contains("TABLE `users` -- One row per sign-in identity.\n"),
@@ -1247,7 +1515,7 @@ mod tests {
             note = "Per-user rollup, rebuilt nightly."
             "#,
         );
-        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+        let out = schema_text("poc", &schema_fixture(), Some(&d));
         assert!(
             out.contains(
                 "VIEW `user_totals` (columns not loaded) -- Per-user rollup, rebuilt nightly.\n"
@@ -1282,7 +1550,7 @@ mod tests {
             columns.email = "and so is this"
             "#,
         );
-        let out = render_schema("poc", &schema, 60, Some(&d));
+        let out = schema_text("poc", &schema, Some(&d));
         assert!(out.contains("TABLE `Users` -- found anyway"), "{out}");
         assert!(out.contains("-- and so is this"), "{out}");
     }
@@ -1321,7 +1589,7 @@ mod tests {
             routines: None,
         };
 
-        let out = render_schema("poc", &schema, 60, Some(&dict(&toml)));
+        let out = schema_text("poc", &schema, Some(&dict(&toml)));
         let spent: usize = out.matches(&long).count();
         assert_eq!(spent, 20, "exactly the budget, not one note more: {spent}");
         assert!(
@@ -1333,11 +1601,350 @@ mod tests {
         assert!(out.contains("TABLE `t39` (id int NOT NULL)"), "{out}");
     }
 
+    // ------------------------------- Stage 30: measuring against a real one
+
+    /// What the diagnostics dialog prints per cached database, so the cost of
+    /// a real schema can be read off without asking a question and paying for
+    /// it.
+    #[test]
+    fn the_reckoning_says_what_fits_and_what_does_not() {
+        let line = reckoning("poc", &four_tables());
+        assert!(line.contains("chars to describe whole"), "{line}");
+        assert!(line.contains("tokens"), "{line}");
+        // Four small tables fit everything.
+        assert!(line.contains("4 of 4 fit a request"), "{line}");
+        assert!(line.contains("4 fit a kept session"), "{line}");
+        // One line, so a report of twelve databases stays readable.
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    /// The case it is for: more schema than a request can carry. A request
+    /// describes fewer than a kept session, and both are said, because the two
+    /// paths really do send different prompts.
+    #[test]
+    fn the_reckoning_tells_a_request_apart_from_a_session() {
+        let mut columns = HashMap::new();
+        let mut tables = Vec::new();
+        for i in 0..900 {
+            let name = format!("ledger_{i:04}");
+            tables.push(TableRef {
+                name: name.clone(),
+                kind: "BASE TABLE".into(),
+            });
+            columns.insert(
+                name,
+                (0..12)
+                    .map(|c| ColumnInfo {
+                        name: format!("some_column_{c}"),
+                        data_type: "decimal(12,2)".into(),
+                        nullable: true,
+                        key: None,
+                    })
+                    .collect(),
+            );
+        }
+        let schema = DbSchema {
+            tables: Some(tables),
+            columns,
+            routines: None,
+        };
+        let line = reckoning("big", &schema);
+        let n = |after: &str| -> usize {
+            let at = line.find(after).expect(after);
+            line[..at]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .find(|p| !p.is_empty())
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let request = n(" of 900 fit a request");
+        let session = n(" fit a kept session");
+        assert!(request < 900, "a request must not fit all 900: {line}");
+        assert!(
+            session > request,
+            "a kept session pays once and must fit more: {line}"
+        );
+    }
+
+    #[test]
+    fn a_database_with_no_tables_reckons_nothing() {
+        let empty = DbSchema::default();
+        assert_eq!(reckoning("poc", &empty), "nothing to describe\n");
+    }
+
+    /// The per-question line. Its job is to be pasted into an issue, so what
+    /// matters is that every number needed to judge the ranking is in it.
+    #[test]
+    fn the_log_line_carries_what_is_needed_to_judge_the_ranking() {
+        let order: Vec<String> = ["delta", "charlie", "bravo", "alpha"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = render_schema("poc", &four_tables(), &order, one_table_budget(), None);
+        let line = ranked_note(
+            "poc",
+            &["reserve".to_string(), "balance".to_string()],
+            3,
+            &order,
+            &out,
+            std::time::Duration::from_millis(4),
+        );
+        assert!(
+            line.contains("poc: 1 of 4 tables described, 3 by name"),
+            "{line}"
+        );
+        assert!(line.contains("ranked in 4ms"), "{line}");
+        assert!(line.contains("matched [reserve balance]"), "{line}");
+        assert!(line.contains("3 word(s) it does not have"), "{line}");
+        assert!(line.contains("first [delta charlie bravo alpha]"), "{line}");
+        assert!(line.contains("cut at [charlie bravo alpha]"), "{line}");
+        // One line: the logbook is read down the page.
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    /// A 400-table server must not put 400 names in one log line.
+    #[test]
+    fn the_log_line_stays_readable_on_a_big_schema() {
+        let order: Vec<String> = (0..400).map(|i| format!("ledger_{i:04}")).collect();
+        let out = Rendered {
+            text: String::new(),
+            elided: order.clone(),
+            unloaded: 0,
+        };
+        let line = ranked_note("big", &[], 0, &order, &out, std::time::Duration::ZERO);
+        assert!(line.contains("+388 more"), "{line}");
+        assert!(line.contains("+395 more"), "{line}");
+        assert!(line.len() < 400, "a log line this long is not read: {line}");
+    }
+
+    /// An engine with no namespaces describes itself under the empty one, and
+    /// "`: 3 of 4`" reads as a line whose first field went missing.
+    #[test]
+    fn a_nameless_namespace_is_called_schema_in_the_log() {
+        let out = render_schema("", &four_tables(), &[], 1 << 20, None);
+        let line = ranked_note("", &[], 0, &[], &out, std::time::Duration::ZERO);
+        assert!(line.starts_with("schema:"), "{line}");
+    }
+
+    /// The scrubber is the second line of defence and it must not have to be
+    /// the first. An ordinary line has to survive it, or every measurement is
+    /// replaced by "an entry was dropped".
+    #[test]
+    fn an_ordinary_log_line_is_not_mistaken_for_a_secret() {
+        let order: Vec<String> = ["alpha", "bravo"].iter().map(|s| s.to_string()).collect();
+        let out = render_schema("poc", &four_tables(), &order, 1 << 20, None);
+        let line = ranked_note(
+            "poc",
+            &["reserve".to_string(), "balance".to_string()],
+            2,
+            &order,
+            &out,
+            std::time::Duration::from_millis(1),
+        );
+        assert!(
+            !crate::logbook::looks_like_a_secret(&line),
+            "the scrubber would drop every measurement: {line}"
+        );
+    }
+
+    // ------------------------- Stage 30: the budget, and the order it spends
+
+    /// Four tables with columns of a known width, so a budget can be set to
+    /// admit a chosen number of them.
+    fn four_tables() -> DbSchema {
+        let mut columns = HashMap::new();
+        let mut tables = Vec::new();
+        for name in ["alpha", "bravo", "charlie", "delta"] {
+            tables.push(TableRef {
+                name: name.into(),
+                kind: "BASE TABLE".into(),
+            });
+            columns.insert(
+                name.to_string(),
+                vec![
+                    ColumnInfo {
+                        name: "id".into(),
+                        data_type: "int".into(),
+                        nullable: false,
+                        key: Some("PRI".into()),
+                    },
+                    ColumnInfo {
+                        name: "reserve_balance".into(),
+                        data_type: "decimal(12,2)".into(),
+                        nullable: true,
+                        key: None,
+                    },
+                ],
+            );
+        }
+        DbSchema {
+            tables: Some(tables),
+            columns,
+            routines: None,
+        }
+    }
+
+    /// The smallest budget that describes exactly one table of `four_tables`.
+    ///
+    /// **Asked rather than written down.** A number here would be a second
+    /// copy of the cost formula, free to be right when it was written and
+    /// wrong after the fixture grew a column — and these tests would then be
+    /// about whatever the budget happened to admit.
+    fn one_table_budget() -> usize {
+        (1..1000)
+            .find(|b| {
+                render_schema("poc", &four_tables(), &[], *b, None)
+                    .elided
+                    .len()
+                    == 3
+            })
+            .expect("no budget describes exactly one of four equal tables")
+    }
+
+    /// The budget is spent down the ranking, not down the alphabet.
+    #[test]
+    fn the_order_decides_who_gets_columns() {
+        let schema = four_tables();
+        let one = render_schema("poc", &schema, &[], 1 << 20, None)
+            .text
+            .matches("reserve_balance")
+            .count();
+        assert_eq!(one, 4, "the whole budget must describe all four");
+
+        let out = render_schema(
+            "poc",
+            &schema,
+            &["delta".to_string()],
+            one_table_budget(),
+            None,
+        );
+        assert!(
+            out.text
+                .contains("TABLE `delta` (id int NOT NULL PK, reserve_balance decimal(12,2))"),
+            "the ranked table did not get the budget: {}",
+            out.text
+        );
+        assert_eq!(out.elided, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    /// Spent in relevance order, **printed alphabetically.** A schema whose
+    /// sequence moved with the question would read as though the sequence meant
+    /// something, and would reshuffle wholesale between two questions.
+    #[test]
+    fn the_block_is_printed_in_the_databases_own_order() {
+        let out = render_schema(
+            "poc",
+            &four_tables(),
+            &["delta".to_string(), "charlie".to_string()],
+            1 << 20,
+            None,
+        );
+        let at = |name: &str| out.text.find(name).unwrap();
+        assert!(at("alpha") < at("bravo"));
+        assert!(at("bravo") < at("charlie"));
+        assert!(at("charlie") < at("delta"));
+    }
+
+    /// **M4, and the heart of the field report.** A table past the budget used
+    /// to take a branch that never charged for its note, so the 340 tables
+    /// sent by name alone lost every note they had — including the one that
+    /// said `enrolled_party.status_id` points at `party_status` rather than
+    /// at the similarly named `statuses`. A name with no note is a name; a
+    /// name with one is a reason to pick it.
+    #[test]
+    fn a_note_and_a_join_survive_the_column_budget() {
+        let d = dict(
+            "[tables.alpha]\n\
+             note = \"one row per enrolment\"\n\
+             join = \"alpha.status_id = bravo.id\"\n",
+        );
+        // Budget enough for exactly one table, given to `delta`.
+        let out = render_schema(
+            "poc",
+            &four_tables(),
+            &["delta".to_string()],
+            one_table_budget(),
+            Some(&d),
+        );
+        assert!(
+            out.elided.contains(&"alpha".to_string()),
+            "{:?}",
+            out.elided
+        );
+        assert!(
+            !out.text.contains("reserve_balance decimal(12,2))\n   (id"),
+            "alpha must not have got its columns: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("TABLE `alpha` -- one row per enrolment"),
+            "the note did not survive the budget: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("-- joins: alpha.status_id = bravo.id"),
+            "the join did not survive the budget: {}",
+            out.text
+        );
+    }
+
+    /// The other branch that dropped one: a table nobody has loaded kept its
+    /// note and has never rendered its `join` at all.
+    #[test]
+    fn an_unloaded_table_carries_its_join_too() {
+        let d = dict(
+            "[tables.user_totals]\n\
+             note = \"a view over users\"\n\
+             join = \"user_totals.user_id = users.id\"\n",
+        );
+        let out = schema_text("poc", &schema_fixture(), Some(&d));
+        assert!(
+            out.contains("`user_totals` (columns not loaded) -- a view over users"),
+            "{out}"
+        );
+        assert!(
+            out.contains("-- joins: user_totals.user_id = users.id"),
+            "{out}"
+        );
+    }
+
+    /// Named alone is not the same answer as not loaded, and the prompt must
+    /// not say the one when it means the other — a model told "columns not
+    /// loaded" asks the user to open a tree; one told the budget ran out asks
+    /// a narrower question.
+    #[test]
+    fn a_table_over_budget_is_not_called_unloaded() {
+        let out = render_schema("poc", &four_tables(), &[], 0, None);
+        assert!(!out.text.contains("columns not loaded"), "{}", out.text);
+        assert_eq!(out.unloaded, 0);
+        assert_eq!(out.elided.len(), 4);
+        assert!(out.text.contains("do have columns"), "{}", out.text);
+    }
+
+    /// What the chat tells the person is counted here, so the sentence and the
+    /// number cannot disagree.
+    #[test]
+    fn the_elided_tables_are_reported_most_relevant_first() {
+        let out = render_schema(
+            "poc",
+            &four_tables(),
+            &[
+                "delta".to_string(),
+                "charlie".to_string(),
+                "bravo".to_string(),
+            ],
+            one_table_budget(),
+            None,
+        );
+        assert_eq!(out.elided, vec!["charlie", "bravo", "alpha"]);
+    }
+
     /// Nothing is said about notes when there were none to leave out.
     #[test]
     fn a_dictionary_within_budget_says_nothing_about_budgets() {
         let d = dict("[tables.users]\nnote = \"short\"");
-        let out = render_schema("poc", &schema_fixture(), 60, Some(&d));
+        let out = schema_text("poc", &schema_fixture(), Some(&d));
         assert!(!out.contains("left out"), "{out}");
     }
 
