@@ -4277,11 +4277,54 @@ window.addEventListener("keydown", (e) => {
     void files.openViaDialog();
   } else if (e.key === "s" || e.key === "S") {
     e.preventDefault();
-    const t = tabs.active();
-    if (!t || t.kind !== "sql") return;
-    void (e.shiftKey ? files.saveAs(t) : files.save(t));
+    void saveActive(e.shiftKey);
   }
 });
+
+/**
+ * Save the active tab, whichever kind it is.
+ *
+ * # Why this is a function and not two lines in the keymap
+ *
+ * It used to be two lines in the keymap, and they read
+ * `if (!t || t.kind !== "sql") return;`. **Ctrl+S is the only save path in
+ * this app** — there is no File menu and no Save button — so a dictionary tab
+ * could not be saved at all. Every note an MCP client wrote into it was
+ * unreachable, and the assistant and MCP both read the *file*, so the whole
+ * `put_notes` flow dead-ended one keystroke before the end.
+ *
+ * Stage 25 said it worked. Its §4 describes the dictionary as "an ordinary
+ * file-backed tab — same `OpenedFile`, so Ctrl+S, the modification-time guard,
+ * the line endings and the BOM are the ones `files.rs` already has", and
+ * milestone D7 is "the file opens in a tab, **saves with Ctrl+S**". All of that
+ * was true of `files.save`, which has never looked at a tab's kind; none of it
+ * was true of the guard in front of it. Every Ctrl+S test in the suite is on a
+ * SQL tab, so nothing held the claim. Stage 30 §8.
+ */
+async function saveActive(saveAs: boolean) {
+  const tab = tabs.active();
+  if (!tab) return;
+
+  if (tab.kind === "dictionary" && saveAs) {
+    // **Refused rather than allowed.** `markSaved` repoints the tab at
+    // whatever was written, while the connection's profile still names the old
+    // file — so a copy made to be safe would quietly become the file Ctrl+S
+    // writes, and the dictionary the assistant reads would stop receiving
+    // edits with nothing on screen saying so.
+    showNote(
+      "A dictionary is saved in place: its path belongs to the connection, not to this tab. " +
+        "Copy the file outside db-query if you want one.",
+    );
+    return;
+  }
+
+  const saved = saveAs ? await files.saveAs(tab) : await files.save(tab);
+  // A saved dictionary is a different dictionary. `refreshNote` already took
+  // the tree's dots and the band — see `refreshFileNote` — and this is the one
+  // thing outside the editor pane that was describing the buffer: the chat's
+  // standing promise about what is sent.
+  if (saved && tab.kind === "dictionary") assistant.refreshNote();
+}
 
 els.btnCloseResults.onclick = () => {
   const tab = tabs.active();

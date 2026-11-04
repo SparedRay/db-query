@@ -525,3 +525,72 @@ prefix now, and `onDocChanged` rebuilds it.
   a real 400-table server. The ranking is the part where that matters: a test
   can say the right tables came first for a question somebody wrote down, not
   that it feels right on the twentieth question of a working afternoon.
+
+## 8. Found in use: the dictionary could not be saved at all — 2026-11-04
+
+Reported the moment this went in front of somebody: an MCP agent wrote notes
+into the dictionary tab, and **Ctrl+S did nothing.**
+
+Ctrl+S is the only save path in this app. There is no File menu and no Save
+button, and the keymap read:
+
+```ts
+} else if (e.key === "s" || e.key === "S") {
+  e.preventDefault();
+  const t = tabs.active();
+  if (!t || t.kind !== "sql") return;      // <- a dictionary is not "sql"
+  void (e.shiftKey ? files.saveAs(t) : files.save(t));
+}
+```
+
+So a dictionary tab could not be saved **by any means**. And since the
+assistant and MCP both read the *file* — deliberately, §4.5 — every note
+`put_notes` wrote was unreachable: the whole flow dead-ended one keystroke
+before the end. `e.preventDefault()` ran first, so there was not even a browser
+save to fall back on. It did nothing, silently, which is the third time in this
+stage that the bug was *something true with nowhere to appear*.
+
+### Stage 25 said it worked
+
+Its §4 describes the dictionary as "an ordinary file-backed tab — same
+`OpenedFile`, so Ctrl+S, the modification-time guard, the line endings and the
+BOM are the ones `files.rs` already has", and milestone **D7** is "the file
+opens in a tab, **saves with Ctrl+S**, and offers no Run". D7 is ticked.
+
+Every word of that is true of `files.save`, which has never looked at a tab's
+kind and needed no change here. None of it was true of the guard in front of
+it. **Every Ctrl+S test in the suite is on a SQL tab**, so nothing held the
+claim — the same shape as Stage 28 §8, where reviewing a stage against its own
+document found four settled claims no test held. A milestone that says "saves
+with Ctrl+S" and is checked by hand once is a milestone that stops being true
+the next time somebody touches the keymap.
+
+### Save As is refused rather than allowed
+
+`markSaved` repoints the tab at whatever was written, while the connection's
+profile still names the old file. So a copy made to be safe would quietly
+become the file Ctrl+S writes from then on, and the dictionary the assistant
+reads would stop receiving edits with nothing on screen saying so. Ctrl+Shift+S
+on a dictionary says it is saved in place and does nothing else.
+
+### Tests
+
+Four, all of which should have existed since Stage 25, and four falsifications:
+
+- Ctrl+S writes the buffer to the dictionary's own path, and the tab stops
+  being dirty.
+- A save re-reads what the file describes, so the tree's dots follow. (The
+  first version of this test asserted on a tree with nothing expanded, where
+  there are no dots to repaint and `dictionary_marks` is never called — the
+  test was wrong, not the code.)
+- A save withdraws the chat's "unsaved dictionary edits" clause.
+- Ctrl+Shift+S explains itself and calls no save dialog.
+
+### Left open
+
+**A dictionary's path cannot be changed once set.** The rail's menu offers
+"Add an AI dictionary…" only while there is none, the connection dialog carries
+the field forward rather than editing it (Stage 25 §3.3, so a port change
+cannot drop it), and Save As is now refused. Pointing a connection at a
+different file means editing `connections.json` by hand. Nobody has asked for
+it; it is written down here because this fix is the third door to close.

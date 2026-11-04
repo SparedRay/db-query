@@ -501,3 +501,103 @@ test("the chat admits that unsaved dictionary edits are not sent", async ({ page
   await page.click("#btn-assistant");
   await expect(page.locator("#chat-note")).toContainText("Unsaved dictionary edits");
 });
+
+// ------------------------------- Stage 30 §8: it could not be saved at all
+
+/**
+ * **The bug Stage 25's D7 claimed was fixed.** Ctrl+S is the only save path in
+ * the app — no File menu, no Save button — and the keymap refused anything but
+ * a `sql` tab. So a dictionary could not be saved, and since the assistant and
+ * MCP both read the *file*, every note `put_notes` wrote into the tab was
+ * unreachable: the whole flow dead-ended one keystroke before the end.
+ *
+ * `files.save` has never looked at a tab's kind. Only the guard in front of it
+ * did, and every Ctrl+S test in the suite was on a SQL tab, so nothing held
+ * the claim.
+ */
+test("Ctrl+S saves a dictionary", async ({ page }) => {
+  await live(page, {
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+  await openDict(page);
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type('\nnote = "mine"\n');
+  await expect(page.locator("#script-tabs .stab.dirty")).toHaveCount(1);
+  await expect(page.locator("#file-note")).toContainText("unsaved");
+
+  await page.keyboard.press("Control+s");
+
+  await expect(page.locator("#script-tabs .stab.dirty")).toHaveCount(0);
+  await expect(page.locator("#file-note")).not.toContainText("unsaved");
+  const save = (await calls(page)).filter((c) => c.cmd === "save_file").pop();
+  expect(save?.args.path).toBe(DICT_PATH);
+  expect(String(save?.args.contents)).toContain('note = "mine"');
+});
+
+/**
+ * The dots describe the **file**, so a save is the moment they can change —
+ * and the backend's own copy of the dictionary is keyed on the file's size and
+ * modification time, both of which a save moves.
+ */
+test("saving a dictionary re-reads what the file describes", async ({ page }) => {
+  await live(page, {
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+  // The tree has to be showing the database: the dots are its nodes, and with
+  // nothing expanded there is nothing to repaint and nothing to ask about.
+  await openDatabase(page);
+  await openDict(page);
+  const before = (await calls(page)).filter((c) => c.cmd === "dictionary_marks").length;
+  expect(before).toBeGreaterThan(0);
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type('\nnote = "mine"\n');
+  await page.keyboard.press("Control+s");
+  await expect(page.locator("#script-tabs .stab.dirty")).toHaveCount(0);
+
+  await expect
+    .poll(async () => (await calls(page)).filter((c) => c.cmd === "dictionary_marks").length)
+    .toBeGreaterThan(before);
+});
+
+/** And the chat's promise lets go of the clause it was holding. */
+test("saving a dictionary withdraws the unsaved warning in the chat", async ({ page }) => {
+  await live(page, {
+    assistant_status: () => ({ hasKey: true, ready: true, local: false }),
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+  await openDict(page);
+  await page.click("#btn-assistant");
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type('\nnote = "mine"\n');
+  await expect(page.locator("#chat-note")).toContainText("Unsaved dictionary edits");
+
+  await page.keyboard.press("Control+s");
+  await expect(page.locator("#chat-note")).not.toContainText("Unsaved");
+  await expect(page.locator("#chat-note")).toContainText("the dictionary you attached");
+});
+
+/**
+ * **Save As is refused, not allowed.** `markSaved` repoints the tab at
+ * whatever was written while the connection's profile still names the old
+ * file, so a copy made to be safe would quietly become the file Ctrl+S writes
+ * — and the dictionary the assistant reads would stop receiving edits with
+ * nothing on screen saying so.
+ */
+test("Ctrl+Shift+S on a dictionary explains itself instead of making a copy", async ({ page }) => {
+  await live(page, {
+    save_file: () => ({ type: "saved", mtimeMs: 1_700_000_001_000 }),
+  });
+  await openDict(page);
+  await page.locator(".cm-content").click();
+  await page.keyboard.type('\nnote = "mine"\n');
+
+  await page.keyboard.press("Control+Shift+s");
+
+  await expect(page.locator("#result-note")).toContainText("saved in place");
+  expect(await commandNames(page)).not.toContain("save_file_dialog");
+  // Still dirty, and still pointed at the real file.
+  await expect(page.locator("#script-tabs .stab.dirty")).toHaveCount(1);
+});
