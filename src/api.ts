@@ -356,6 +356,10 @@ export interface Capabilities {
    *  namespace costs one each. The gate on autocomplete's prefetch: engines
    *  without it get table names prefetched and their columns on demand. */
   bulkColumns: boolean;
+  /** The server keeps counters about its own workload that can be read as
+   *  tables. The gate on the performance panel (Stage 31) — a capability, not
+   *  a check on `engine`. */
+  workloadDigests: boolean;
 }
 
 export interface ConnInfo {
@@ -1138,6 +1142,142 @@ export interface Diagnostic {
 }
 
 
+/**
+ * What kind of problem a query shape is (Stage 31).
+ *
+ * Only `missingIndex` leads to a proposed statement. The rest are refusals,
+ * and four of them exist because an advisor that offers an index for every
+ * slow query gets the expensive cases exactly wrong.
+ */
+export type WorkloadVerdict =
+  | "missingIndex"
+  | "noIndexWillHelp"
+  | "viewBlocksFilter"
+  | "rowByRowLoop"
+  | "waitingNotReading"
+  | "driverChatter"
+  | "platformInternal"
+  | "unclassified";
+
+/** Which of the three lists a shape belongs to. */
+export type WorkloadClass = "application" | "chatter" | "platform";
+
+export interface WorkloadShape {
+  digest: string;
+  /** The normalised statement. Holds no literal values — see `workload.rs`. */
+  text: string;
+  database: string | null;
+  verdict: WorkloadVerdict;
+  class: WorkloadClass;
+  /** Only names the connected schema has. Safe to show. */
+  tables: string[];
+  execs: number;
+  totalSecs: number;
+  avgMillis: number;
+  /** MySQL 8.0 only. */
+  p95Millis: number | null;
+  rowsSent: number;
+  rowsExamined: number;
+  /** `null` when nothing was returned, which is every write. */
+  ratio: number | null;
+  noIndex: number;
+  scans: number;
+  sortScans: number;
+  tmpDisk: number;
+  errors: number;
+  lockSecs: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface WorkloadLoop {
+  table: string;
+  digests: string[];
+  execsLow: number;
+  execsHigh: number;
+  spread: number;
+  firstSeenSpreadUs: number;
+  totalSecs: number;
+}
+
+export interface WorkloadReport {
+  shapes: WorkloadShape[];
+  loops: WorkloadLoop[];
+  /** Table name to writes over the window — what prices an index. */
+  writes: Record<string, number>;
+  totalShapes: number;
+  applicationShapes: number;
+  chatterShapes: number;
+  platformShapes: number;
+  applicationSecs: number;
+  chatterSecs: number;
+  platformSecs: number;
+  hasQuantiles: boolean;
+}
+
+/** What the six diagnostic queries said. Every one can fail separately. */
+export interface WorkloadReadings {
+  enabled: boolean | null;
+  digestConsumer: boolean | null;
+  statementInstruments: number | null;
+  uptimeSecs: number | null;
+  digestsLost: number | null;
+  digestsPresent: number | null;
+}
+
+export interface WorkloadDiagnosis {
+  usable: boolean;
+  /** One sentence, and never "no data". */
+  headline: string;
+  detail: string;
+  readings: WorkloadReadings;
+}
+
+/** Why an index is being questioned (Stage 31). */
+export type IndexFault = "neverRead" | "redundant" | "unindexedForeignKey";
+
+export interface IndexFinding {
+  fault: IndexFault;
+  database: string;
+  table: string;
+  name: string;
+  columns: string[];
+  /** For `redundant`: the index that already covers this one. */
+  coveredBy: string | null;
+  /** Writes on this table over the window — what the index costs. `null`
+   *  when the workload never mentioned the table. */
+  writes: number | null;
+  /** The statement to run. Nothing here runs it. */
+  statement: string;
+}
+
+export interface IndexInventory {
+  findings: IndexFinding[];
+  /** `false` when performance_schema refused, so the never-read list is
+   *  **absent rather than empty** — a different claim. */
+  usageAvailable: boolean;
+  indexesSeen: number;
+  databases: string[];
+}
+
+export interface WorkloadPanel {
+  /** `null` whenever `diagnosis.usable` is false. */
+  report: WorkloadReport | null;
+  diagnosis: WorkloadDiagnosis;
+  knownTables: number;
+  databases: string[];
+  /** Unix seconds when a baseline was taken, if one was. */
+  baselineAt: number | null;
+  /** `true` when this report is a window rather than the whole lifetime. */
+  windowed: boolean;
+  /** Digests absent from the baseline — the one attribution that survives a
+   *  server shared with other traffic. */
+  newShapes: string[];
+  /** A counter went backwards, so the baseline describes a different
+   *  lifetime and the lifetime view is being shown instead. */
+  baselineVoid: boolean;
+}
+
 export const api = {
   // --- saved profiles. No password ever comes back out of these.
   listProfiles: () => invoke<ProfileList>("list_profiles"),
@@ -1615,4 +1755,18 @@ export const api = {
   /** Minted on first read and kept in the OS keychain. */
   mcpToken: () => invoke<string>("mcp_token"),
   mcpRegenerateToken: () => invoke<string>("mcp_regenerate_token"),
+
+  // --- the server's own workload counters (Stage 31). One query against
+  // performance_schema, plus the six-query diagnosis that explains an empty
+  // one. Never runs DDL: everything it finds ends in a statement you execute.
+  workloadRead: (connectionId: string, sinceBaseline = false) =>
+    invoke<WorkloadPanel>("workload_read", { connectionId, sinceBaseline }),
+  /** Take a reading and keep it. Returns when it was taken, in unix seconds. */
+  workloadBaselineSet: (connectionId: string) =>
+    invoke<number>("workload_baseline_set", { connectionId }),
+  workloadBaselineClear: (connectionId: string) =>
+    invoke<void>("workload_baseline_clear", { connectionId }),
+  /** Three more queries, so it is asked for rather than assumed. */
+  workloadIndexes: (connectionId: string, databases: string[]) =>
+    invoke<IndexInventory>("workload_indexes", { connectionId, databases }),
 };

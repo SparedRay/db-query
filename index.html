@@ -10,8 +10,14 @@
     <!-- `chat-closed` from the first byte: the class is what zeroes the two
          right-hand grid tracks, and adding it from script would paint one
          frame with a 380px gap in it. `mig-shut` likewise: the migrations
-         panel starts shut (Stage 28). -->
-    <div id="app" class="chat-closed mig-shut">
+         panel starts shut (Stage 28), and `wl-shut` the performance panel
+         (Stage 31).
+
+         Every dock needs its class here, not just for the one frame: leaving
+         `wl-shut` off took 527px out of the window from boot and pushed the
+         migrations seam beyond the right edge, which twelve migrations tests
+         noticed immediately. -->
+    <div id="app" class="chat-closed mig-shut wl-shut">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
         <!-- Icons are injected from src/icons.ts, so the drawings live in one
@@ -25,6 +31,13 @@
           <span id="mig-pending" class="rail-badge" hidden></span>
         </button>
         <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
+        <!-- Stage 31. Reads the server's own workload counters. The fourth
+             dock: not a tab, because `tabs.ts` says no tab is anything but an
+             editor, and not a modal, because Stage 21 §2 already recorded
+             what a modal does to a panel that hands you a statement. -->
+        <button id="btn-workload" class="rail-cog" type="button"
+                title="Where the server's time goes" aria-pressed="false"
+                aria-controls="wl-pane"></button>
         <button id="btn-schema" class="rail-cog" type="button"
                 title="Show or hide the schema (Ctrl+B)" aria-pressed="true"></button>
         <!-- Stage 23. `Ctrl+Shift+B` rather than `Ctrl+B`: that one has
@@ -297,6 +310,92 @@
           <textarea id="chat-input" rows="3"
                     placeholder="Ask about your schema, or describe the query you want&hellip;"></textarea>
           <button type="button" id="chat-send" class="primary">Send</button>
+        </div>
+      </section>
+
+      <!-- Stage 31: where the server's time goes.
+
+           A dock and not a modal. The first cut of this was a `<dialog>`
+           opened with `showModal()`, and Stage 21 §2 had already written down
+           why that is wrong for a panel whose whole job is to hand you a
+           statement: everything behind a modal is inert, so the moment a
+           proposal appears you cannot look at the table it names or the rows
+           you already have — and using it has to close it, which throws away
+           what produced it. Stage 28 moved migrations the same way. See §4.12.
+
+           Read-only throughout. Every finding ends in a statement the user
+           runs themselves, which is the contract the assistant has had since
+           Stage 10 — so there is no Run button anywhere in here, and on a
+           connection marked read-only the statement is refused even if it is
+           pasted. -->
+      <div id="wlsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+      <section id="wl-pane" class="wl-pane" aria-label="Performance" hidden>
+        <div class="wl-head">
+          <strong class="wl-title">Where the time goes</strong>
+          <span class="grow"></span>
+          <button type="button" id="wl-refresh" class="mini">Refresh</button>
+          <button type="button" id="wl-close" class="mini" title="Shut this panel">Close</button>
+        </div>
+        <div class="wl-head wl-head-2">
+          <!-- The counters are cumulative and carry no timestamps, so one
+               reading is the server's whole lifetime. Two subtracted is a
+               window — the only way to ask what *your* change did. -->
+          <div class="seg" id="wl-windows" role="group" aria-label="Window">
+            <button type="button" class="seg-btn" data-window="start" aria-pressed="true">
+              Lifetime
+            </button>
+            <button type="button" class="seg-btn" data-window="baseline" aria-pressed="false" disabled>
+              Since baseline
+            </button>
+          </div>
+          <button type="button" id="wl-baseline" class="mini">Set baseline</button>
+        </div>
+        <span id="wl-scope" class="wl-scope"></span>
+
+        <div id="wl-pane-body" class="wl-pane-body">
+          <!-- The diagnosis. Shown whenever it has something to say, which
+               includes the usable-but-overflowed case — not only on failure. -->
+          <div id="wl-diagnosis" class="wl-diagnosis" hidden>
+            <strong id="wl-headline"></strong>
+            <span id="wl-detail"></span>
+          </div>
+
+          <div id="wl-body" class="wl-body" hidden>
+            <div id="wl-tiles" class="wl-tiles"></div>
+            <div id="wl-loops" class="wl-loops" hidden></div>
+            <div class="wl-controls">
+              <div class="seg" id="wl-classes" role="group" aria-label="Which shapes">
+                <button type="button" class="seg-btn" data-class="application" aria-pressed="true">
+                  App<span class="seg-count" id="wl-count-application"></span>
+                </button>
+                <button type="button" class="seg-btn" data-class="chatter" aria-pressed="false">
+                  Driver<span class="seg-count" id="wl-count-chatter"></span>
+                </button>
+                <button type="button" class="seg-btn" data-class="platform" aria-pressed="false">
+                  Platform<span class="seg-count" id="wl-count-platform"></span>
+                </button>
+              </div>
+              <div class="seg" id="wl-sorts" role="group" aria-label="Order">
+                <button type="button" class="seg-btn" data-sort="time" aria-pressed="true">Time</button>
+                <button type="button" class="seg-btn" data-sort="examined" aria-pressed="false">Examined</button>
+                <button type="button" class="seg-btn" data-sort="execs" aria-pressed="false">Execs</button>
+              </div>
+            </div>
+            <span id="wl-known" class="wl-known"></span>
+            <div id="wl-list" class="wl-list" tabindex="-1"></div>
+
+            <!-- The index inventory: three more queries, so it is asked for.
+                 Nothing here runs DDL either — every row ends in a statement. -->
+            <div class="wl-inv-head">
+              <button type="button" id="wl-inv-run" class="mini">Read the index inventory</button>
+            </div>
+            <span id="wl-inv-note" class="wl-known"></span>
+            <div id="wl-inv" class="wl-list" hidden tabindex="-1"></div>
+          </div>
+
+          <p class="hint" id="wl-note">
+            A digest holds no literal values, so no parameter data can appear here.
+          </p>
         </div>
       </section>
     </div>
@@ -799,6 +898,7 @@
         <button type="button" id="hist-close" class="primary">Close</button>
       </menu>
     </dialog>
+
 
     <script type="module" src="/src/boot.ts"></script>
   </body>

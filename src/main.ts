@@ -67,6 +67,7 @@ import {
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
 import { createHistory } from "./history";
+import { createWorkload } from "./workload";
 import { cliLabel, createAssistant } from "./assistant";
 import { createExportDialog } from "./exportschema";
 import { listen } from "@tauri-apps/api/event";
@@ -153,6 +154,30 @@ const els = {
   btnUpdate: $<HTMLButtonElement>("btn-update"),
   btnSettings: $<HTMLButtonElement>("btn-settings"),
   btnHistory: $<HTMLButtonElement>("btn-history"),
+  btnWorkload: $<HTMLButtonElement>("btn-workload"),
+  wlPane: $<HTMLElement>("wl-pane"),
+  wlsplit: $<HTMLElement>("wlsplit"),
+  wlScope: $<HTMLElement>("wl-scope"),
+  wlRefresh: $<HTMLButtonElement>("wl-refresh"),
+  wlClose: $<HTMLButtonElement>("wl-close"),
+  wlDiagnosis: $<HTMLElement>("wl-diagnosis"),
+  wlHeadline: $<HTMLElement>("wl-headline"),
+  wlDetail: $<HTMLElement>("wl-detail"),
+  wlBody: $<HTMLElement>("wl-body"),
+  wlTiles: $<HTMLElement>("wl-tiles"),
+  wlLoops: $<HTMLElement>("wl-loops"),
+  wlClasses: $<HTMLElement>("wl-classes"),
+  wlSorts: $<HTMLElement>("wl-sorts"),
+  wlCountApplication: $<HTMLElement>("wl-count-application"),
+  wlCountChatter: $<HTMLElement>("wl-count-chatter"),
+  wlCountPlatform: $<HTMLElement>("wl-count-platform"),
+  wlKnown: $<HTMLElement>("wl-known"),
+  wlList: $<HTMLElement>("wl-list"),
+  wlWindows: $<HTMLElement>("wl-windows"),
+  wlBaseline: $<HTMLButtonElement>("wl-baseline"),
+  wlInvRun: $<HTMLButtonElement>("wl-inv-run"),
+  wlInvNote: $<HTMLElement>("wl-inv-note"),
+  wlInv: $<HTMLElement>("wl-inv"),
   btnAssistant: $<HTMLButtonElement>("btn-assistant"),
   app: $<HTMLElement>("app"),
   chatPane: $<HTMLElement>("chat-pane"),
@@ -601,6 +626,9 @@ function syncBusy() {
  */
 function syncConnLabel() {
   const active = conns?.active();
+  // The performance panel is offered per connection, so it follows the same
+  // signal as everything else here rather than being switched on at boot.
+  syncWorkloadButton();
   // The button has always disconnected when there was something to disconnect;
   // it just never said so. A control that does the opposite of its label is
   // worse than one that is missing.
@@ -1108,6 +1136,7 @@ for (const [el, name] of [
   [els.btnAssistant, "assistant"],
   [els.btnMigrations, "migrations"],
   [els.btnHistory, "history"],
+  [els.btnWorkload, "workload"],
   [els.btnSchema, "sidebar"],
   [els.btnSqlfiles, "run-files"],
   [els.btnSettings, "settings"],
@@ -2511,7 +2540,7 @@ els.btnCancel.onclick = async () => {
  * origin. Measuring it the same way as the schema would make the panel shrink
  * as you dragged it wider.
  */
-function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "y") {
+function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "x-wl" | "y") {
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     handle.classList.add("dragging");
@@ -2526,6 +2555,13 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "y") {
         const from = window.innerWidth - ev.clientX;
         const w = Math.min(Math.max(260, from), Math.max(260, window.innerWidth - 420));
         document.documentElement.style.setProperty("--chat-w-set", `${w}px`);
+      } else if (axis === "x-wl") {
+        // Measured from the window's right edge: this is the outermost dock,
+        // so nothing sits beyond it. The floor keeps a verdict chip and its
+        // counters on one line; the ceiling leaves the editor usable.
+        const from = window.innerWidth - ev.clientX;
+        const w = Math.min(Math.max(360, from), Math.max(360, window.innerWidth - 420));
+        document.documentElement.style.setProperty("--wl-w-set", `${w}px`);
       } else if (axis === "x-mig") {
         // Measured from the panel's own right edge, not the window's: the
         // assistant may be open beyond it. The floor keeps Apply, Repair and
@@ -2557,6 +2593,7 @@ draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
 draggable(els.msplit, "x-end");
 draggable(els.migsplit, "x-mig");
+draggable(els.wlsplit, "x-wl");
 
 // ------------------------------------------------- the result pane's header
 //
@@ -3521,6 +3558,93 @@ function sayCopied(sql: string) {
 }
 
 els.btnHistory.onclick = () => void history.open();
+
+const workload = createWorkload({
+  scope: els.wlScope,
+  refresh: els.wlRefresh,
+  close: els.wlClose,
+  diagnosis: els.wlDiagnosis,
+  headline: els.wlHeadline,
+  detail: els.wlDetail,
+  body: els.wlBody,
+  tiles: els.wlTiles,
+  loops: els.wlLoops,
+  classes: els.wlClasses,
+  sorts: els.wlSorts,
+  counts: {
+    application: els.wlCountApplication,
+    chatter: els.wlCountChatter,
+    platform: els.wlCountPlatform,
+  },
+  known: els.wlKnown,
+  list: els.wlList,
+  windows: els.wlWindows,
+  baseline: els.wlBaseline,
+  invRun: els.wlInvRun,
+  invNote: els.wlInvNote,
+  inv: els.wlInv,
+  activeConnection: () => conns.active()?.profile.id ?? null,
+  connectionLabel: () => conns.active()?.profile.name ?? "No connection",
+  openInTab: (sql) => {
+    if (!tabs.activeConnection()) {
+      results.setMessage("Open a connection first — a script tab belongs to one.");
+      return;
+    }
+    // The panel **stays open**. That is the whole reason this is a dock: the
+    // reading that produced the statement is what you compare the tab's
+    // output against, and the first cut of this threw it away on every use.
+    tabs.create({ contents: sql });
+  },
+  setOpen: setWorkloadOpen,
+  isOpen: () => workloadOpen,
+  // Composed here, sent by the assistant, pressed by the person. The panel
+  // knows what is wrong with a shape and nothing about what to do with it,
+  // which is the other panel's whole subject.
+  ask: (question) => void assistant.prefill(question),
+});
+
+els.btnWorkload.onclick = () => void workload.toggle();
+
+/**
+ * Open the performance panel, or shut it (Stage 31).
+ *
+ * The fourth dock, and the same shape as `setMigOpen`: a class that zeroes the
+ * track, `hidden` as well as zero-width so a shut pane cannot take Tab, and a
+ * width in `--wl-w-set` that shutting leaves alone.
+ */
+let workloadOpen = false;
+function setWorkloadOpen(open: boolean) {
+  workloadOpen = open;
+  // **It shares the side.** An earlier cut shut the assistant and migrations
+  // when this opened, to stop three docks driving the main column to zero
+  // width on a narrow window. That was the wrong fix twice over: explaining a
+  // shape is the assistant's job, so the one pairing it forbade was the one
+  // worth having — and the app already permits the editor to reach zero, since
+  // the assistant and migrations together do it on anything under about
+  // 1,100px. The width is the user's choice and `Ctrl+B` buys back 260px of
+  // it.
+  els.app.classList.toggle("wl-shut", !open);
+  els.wlPane.hidden = !open;
+  els.wlsplit.hidden = !open;
+  els.btnWorkload.setAttribute("aria-pressed", String(open));
+  els.btnWorkload.classList.toggle("on", open);
+}
+
+/**
+ * Offer the panel only where the server keeps counters to read.
+ *
+ * A capability and not a check on the engine's name, so a third engine that
+ * grows one is an addition here and nothing else. Hidden rather than disabled:
+ * a disabled button invites a click and then explains itself, and there is
+ * nothing to explain on a connection that was never going to have this.
+ */
+function syncWorkloadButton() {
+  const caps = conns.active()?.capabilities ?? null;
+  els.btnWorkload.hidden = !caps?.workloadDigests;
+  // Shut it if the connection that could answer has gone: a dock left open
+  // over a connection with no counters is a panel that can only apologise.
+  if (els.btnWorkload.hidden && workloadOpen) setWorkloadOpen(false);
+}
 
 /**
  * Open and close the assistant dock.

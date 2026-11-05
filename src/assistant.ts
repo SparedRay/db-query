@@ -542,6 +542,27 @@ export function createAssistant(deps: AssistantDeps) {
 
   return {
     /**
+     * Put a question in the box and open the panel, **without sending it**.
+     *
+     * For the performance panel (Stage 31), which can say precisely what is
+     * wrong with a shape and nothing about what to do with it. Composing the
+     * question there and sending it from here keeps one place that talks to a
+     * model.
+     *
+     * Deliberately not sent: a model call nobody pressed Send on is a cost
+     * nobody chose, and the question is worth reading before it goes — this
+     * app proposes and the person executes, which is as true of a question as
+     * of a statement.
+     */
+    async prefill(question: string) {
+      deps.input.value = question;
+      await this.open();
+      deps.input.focus();
+      // The caret at the end, not at the start: the thing somebody is most
+      // likely to do is add a sentence of their own.
+      deps.input.setSelectionRange(question.length, question.length);
+    },
+    /**
      * Repaint the standing note, because what is sent has changed.
      *
      * Called when a dictionary tab is edited: the assistant reads the file, so

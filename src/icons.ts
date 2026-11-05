@@ -37,6 +37,11 @@ export type IconName =
   // in it. A database cylinder here would say "connection", which is what the
   // rail above it already means.
   | "sidebar"
+  // The performance panel's rail button: a trace with one spike in it, which
+  // is what a workload looks like when one shape costs eighty hours and the
+  // rest cost minutes. A gauge or a stopwatch would say "how long", and the
+  // question this panel answers is "where".
+  | "workload"
   // A tab that arrived from an MCP client: an arrow coming down into a tray.
   // It replaced a bare `\u2197`, which was read as decoration rather than as
   // a direction, and which said nothing about *where* from.
@@ -146,6 +151,7 @@ const PATHS: Record<IconName, string> = {
   history: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.6V8l2.4 1.6"/>',
   assistant:
     '<path d="M8 2.2l1.5 3.6 3.6 1.5-3.6 1.5L8 12.4 6.5 8.8 2.9 7.3l3.6-1.5z"/>',
+  workload: '<path d="M1.6 9.6h2.6l2-6 2.2 8.8 1.8-4.4 1.4 1.6h2.8"/>',
   sidebar:
     '<rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.6"/>' +
     '<path d="M6.4 3.2v9.6"/>',

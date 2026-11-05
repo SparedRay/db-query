@@ -63,6 +63,11 @@ pub fn capabilities() -> Capabilities {
         // cluster of three hundred indices, describing them all up front is
         // three hundred requests nobody asked for.
         bulk_columns: false,
+        // A cluster does keep workload statistics, but they live behind
+        // `GET /_nodes/stats` and `GET /_stats`, and this engine speaks only
+        // `POST /_sql`. Reaching them is a transport change rather than a
+        // feature, so the panel is not offered here — see Stage 31 §2.
+        workload_digests: false,
     }
 }
 

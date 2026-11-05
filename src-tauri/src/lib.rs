@@ -3,6 +3,7 @@
 pub mod acp;
 pub mod agentcli;
 pub mod assistant;
+pub mod baseline;
 pub mod decode;
 pub mod dictionary;
 pub mod dump;
@@ -35,6 +36,7 @@ pub mod sqlfmt;
 pub mod sqlgen;
 pub mod update;
 pub mod windowstate;
+pub mod workload;
 pub mod workspace;
 
 use tauri::State;
@@ -1298,6 +1300,245 @@ pub struct DictionaryMarks {
     /// Notes with nothing to attach to, for the one warning worth showing in
     /// the tree.
     pub unmatched: Vec<dictionary::Unmatched>,
+}
+
+/// Everything the performance panel needs for one connection.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadPanel {
+    /// `None` when the engine has no workload counters to read.
+    pub report: Option<workload::Report>,
+    pub diagnosis: workload::Diagnosis,
+    /// How many table names were available to classify against.
+    ///
+    /// Reported rather than assumed: the view verdict and the loop detector
+    /// both need names, and on a connection whose schema cache is cold they
+    /// degrade quietly. The panel says so instead.
+    pub known_tables: usize,
+    /// Databases whose names were warmed for this read.
+    pub databases: Vec<String>,
+    /// Unix seconds when a baseline was taken for this connection, if one was.
+    pub baseline_at: Option<i64>,
+    /// `true` when this report is a window rather than the whole lifetime.
+    pub windowed: bool,
+    /// Digests that were not in the baseline at all, so never ran on this
+    /// server before the window opened — the one attribution that survives a
+    /// server shared with other traffic.
+    pub new_shapes: Vec<String>,
+    /// The baseline described a different lifetime: a counter went backwards,
+    /// so the server restarted or the table was truncated.
+    pub baseline_void: bool,
+}
+
+/// Databases that belong to the server rather than to anybody's application.
+const SYSTEM_SCHEMAS: &[&str] = &["mysql", "information_schema", "performance_schema", "sys"];
+
+/// Read the server's own workload counters.
+///
+/// The schema cache is warmed for **only the databases the digests actually
+/// mention**, which on the server this was built against is two queries rather
+/// than one per schema on the instance. A name is needed to tell a view from a
+/// table and to group a loop; nothing else here costs a round trip.
+#[tauri::command]
+async fn workload_read(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+    // `true` asks for the window since the baseline rather than the whole
+    // lifetime of the counters.
+    since_baseline: bool,
+) -> Result<WorkloadPanel, String> {
+    let server = session::server(&state, &connection_id).await?;
+
+    if !server.engine.capabilities().workload_digests {
+        return Ok(WorkloadPanel {
+            report: None,
+            diagnosis: workload::Diagnosis {
+                usable: false,
+                headline: format!(
+                    "{} does not expose its workload as tables.",
+                    server.engine.capabilities().engine
+                ),
+                detail: "This panel reads MySQL's performance_schema digests. The engine on \
+                         this connection keeps statistics of its own, but not behind the \
+                         endpoint db-query speaks to it through."
+                    .into(),
+                readings: Default::default(),
+            },
+            known_tables: 0,
+            databases: Vec::new(),
+            baseline_at: None,
+            windowed: false,
+            new_shapes: Vec::new(),
+            baseline_void: false,
+        });
+    }
+
+    let readings = workload::mysql_diagnose(&server).await;
+    let diagnosis = workload::diagnose(&readings);
+    if !diagnosis.usable {
+        return Ok(WorkloadPanel {
+            report: None,
+            diagnosis,
+            known_tables: 0,
+            databases: Vec::new(),
+            baseline_at: None,
+            windowed: false,
+            new_shapes: Vec::new(),
+            baseline_void: false,
+        });
+    }
+
+    let rows = server.engine.workload(&server).await?;
+
+    let mut databases: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.schema.clone())
+        .filter(|d| !SYSTEM_SCHEMAS.contains(&d.to_lowercase().as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Tolerant on purpose: a database the workload names but this user cannot
+    // list costs the names from that one schema, not the whole panel.
+    for db in &databases {
+        let _ = schema::list_tables(&state, &connection_id, db).await;
+    }
+
+    let known = {
+        let cache = server.schema_cache.lock().await;
+        workload::known_tables(cache.values())
+    };
+
+    // The window, if one was asked for and one exists.
+    //
+    // The databases above are collected from the *whole* reading rather than
+    // the window, deliberately: a schema whose only traffic predates the
+    // baseline still has to have its table names warmed, or the verdicts for
+    // the shapes that did move inside the window lose their view detection.
+    let stored = baseline::load(&config_dir(&app)?, &connection_id);
+    let baseline_at = stored.as_ref().map(|b| b.taken_at);
+
+    let (rows_shown, new_shapes, baseline_void, windowed) = match (&stored, since_baseline) {
+        (Some(base), true) => {
+            let delta = baseline::subtract(&rows, base);
+            // A void baseline shows the lifetime, because showing nothing
+            // would hide a working server behind a stale file.
+            let windowed = !delta.reset;
+            (delta.rows, delta.new_shapes, delta.reset, windowed)
+        }
+        _ => (rows, Vec::new(), false, false),
+    };
+
+    let report = workload::report(&rows_shown, &known);
+    databases.retain(|d| !d.is_empty());
+
+    Ok(WorkloadPanel {
+        known_tables: known.len(),
+        databases,
+        report: Some(report),
+        diagnosis,
+        baseline_at,
+        windowed,
+        new_shapes,
+        baseline_void,
+    })
+}
+
+/// Take a reading and keep it, so a later one can be subtracted.
+#[tauri::command]
+async fn workload_baseline_set(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<i64, String> {
+    let server = session::server(&state, &connection_id).await?;
+    if !server.engine.capabilities().workload_digests {
+        return Err("This engine has no workload counters to baseline.".into());
+    }
+    let rows = server.engine.workload(&server).await?;
+    let base = baseline::Baseline::of(&rows);
+    baseline::save(&config_dir(&app)?, &connection_id, &base)?;
+    Ok(base.taken_at)
+}
+
+#[tauri::command]
+fn workload_baseline_clear(app: tauri::AppHandle, connection_id: String) -> Result<(), String> {
+    baseline::clear(&config_dir(&app)?, &connection_id)
+}
+
+/// The index inventory: what to drop, and what is missing.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInventory {
+    pub findings: Vec<workload::IndexFinding>,
+    /// `false` when `performance_schema` refused. The never-read list is then
+    /// **absent rather than empty**, which is a different claim.
+    pub usage_available: bool,
+    pub indexes_seen: usize,
+    pub databases: Vec<String>,
+}
+
+/// Read the index inventory.
+///
+/// A separate command from [`workload_read`] because it costs three more
+/// queries and nobody needs them to answer "where is the time going". The
+/// panel asks for it when the person asks for it.
+///
+/// Priced by re-reading the digests: that table is in memory, so a second read
+/// is cheap, and a self-contained command beats round-tripping a write-count
+/// map back through the frontend to save it.
+#[tauri::command]
+async fn workload_indexes(
+    state: State<'_, AppState>,
+    connection_id: String,
+    databases: Vec<String>,
+) -> Result<IndexInventory, String> {
+    let server = session::server(&state, &connection_id).await?;
+    if !server.engine.capabilities().workload_digests {
+        return Err("This engine has no index statistics to read.".into());
+    }
+
+    // The caller passes what the workload named. On a connection whose
+    // digests could not be read there is nothing to pass, and the structural
+    // half still works — so fall back to the server's own list.
+    let mut dbs: Vec<String> = databases
+        .into_iter()
+        .filter(|d| !SYSTEM_SCHEMAS.contains(&d.to_lowercase().as_str()))
+        .collect();
+    if dbs.is_empty() {
+        dbs = server
+            .engine
+            .namespaces(&server)
+            .await?
+            .into_iter()
+            .filter(|d| !SYSTEM_SCHEMAS.contains(&d.to_lowercase().as_str()))
+            .collect();
+    }
+
+    let scan = server.engine.index_scan(&server, &dbs).await?;
+
+    // Unpriced rather than unread if the digests refuse: a finding with no
+    // write count is still a finding.
+    let writes = match server.engine.workload(&server).await {
+        Ok(rows) => {
+            let known = {
+                let cache = server.schema_cache.lock().await;
+                workload::known_tables(cache.values())
+            };
+            workload::write_pressure(&rows, &known)
+        }
+        Err(_) => Default::default(),
+    };
+
+    let unindexed = workload::unindexed_foreign_keys(&scan.foreign_keys, &scan.indexes);
+
+    Ok(IndexInventory {
+        findings: workload::index_findings(&scan.indexes, &scan.uses, &unindexed, &writes),
+        usage_available: scan.usage_available,
+        indexes_seen: scan.indexes.len(),
+        databases: dbs,
+    })
 }
 
 #[tauri::command]
@@ -3045,6 +3286,10 @@ pub fn run() {
             mcp_regenerate_token,
             log_notes,
             diagnostics,
+            workload_read,
+            workload_indexes,
+            workload_baseline_set,
+            workload_baseline_clear,
         ])
         // Where the window was last time.
         //

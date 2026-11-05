@@ -99,6 +99,16 @@ pub struct Capabilities {
     /// Mirrors [`Engine::all_columns`] answering `Some`. Stated rather than
     /// probed, because the answer has to be known before anything is asked.
     pub bulk_columns: bool,
+    /// The server keeps counters about its own workload that can be read as
+    /// tables — MySQL's `performance_schema.events_statements_summary_by_digest`.
+    ///
+    /// The gate on the performance panel (Stage 31). A capability rather than a
+    /// check on the engine's name: Elasticsearch has node and index stats, but
+    /// they arrive over `GET /_nodes/stats` and this app's Elasticsearch
+    /// transport speaks exactly one endpoint, `POST /_sql`. So the answer there
+    /// is "not through this door", which is a transport fact and not a claim
+    /// that the data does not exist.
+    pub workload_digests: bool,
 }
 
 impl Capabilities {
@@ -122,6 +132,7 @@ impl Capabilities {
             row_cap: RowCap::ClientLimit,
             namespace_label: "database".into(),
             bulk_columns: true,
+            workload_digests: true,
         }
     }
 
@@ -195,6 +206,34 @@ pub trait Engine: Send + Sync {
         _ns: &str,
     ) -> Result<Option<crate::schema::BulkColumns>, String> {
         Ok(None)
+    }
+
+    /// Every shape the server has counted, most expensive first.
+    ///
+    /// Engines without workload counters return an **empty list rather than an
+    /// error**: the panel is gated on
+    /// [`workload_digests`](Capabilities::workload_digests) and so never calls
+    /// this, and an error here would be a second way of saying no that could
+    /// drift out of agreement with the first.
+    async fn workload(
+        &self,
+        _server: &crate::session::ServerConn,
+    ) -> Result<Vec<crate::workload::DigestRow>, String> {
+        Ok(Vec::new())
+    }
+
+    /// What indexes exist, which have ever been read, and which foreign keys
+    /// have none — the other half of the performance panel.
+    ///
+    /// Empty by default, for the same reason as [`Engine::workload`]: the
+    /// panel is gated on a capability and never asks an engine that has not
+    /// got this.
+    async fn index_scan(
+        &self,
+        _server: &crate::session::ServerConn,
+        _dbs: &[String],
+    ) -> Result<crate::workload::IndexScan, String> {
+        Ok(Default::default())
     }
 
     /// Engines without stored routines return an empty list rather than an
@@ -429,6 +468,7 @@ mod tests {
             row_cap: RowCap::ServerPageSize,
             namespace_label: "catalog".into(),
             bulk_columns: false,
+            workload_digests: false,
         }
     }
 

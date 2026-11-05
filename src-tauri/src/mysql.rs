@@ -68,6 +68,21 @@ impl Engine for MysqlEngine {
         schema::mysql_list_routines(server, ns).await
     }
 
+    async fn workload(
+        &self,
+        server: &ServerConn,
+    ) -> Result<Vec<crate::workload::DigestRow>, String> {
+        crate::workload::mysql_workload(server).await
+    }
+
+    async fn index_scan(
+        &self,
+        server: &ServerConn,
+        dbs: &[String],
+    ) -> Result<crate::workload::IndexScan, String> {
+        crate::workload::mysql_index_scan(server, dbs).await
+    }
+
     async fn table_ddl(
         &self,
         server: &ServerConn,

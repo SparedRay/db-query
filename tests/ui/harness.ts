@@ -402,6 +402,7 @@ export const MYSQL_CAPS = {
   rowCap: "clientLimit",
   namespaceLabel: "database",
   bulkColumns: true,
+  workloadDigests: true,
 };
 
 /** A read-only engine, for testing what the UI must not offer. */
@@ -423,6 +424,9 @@ export const READ_ONLY_CAPS = {
   namespaceLabel: "catalog",
   // No cross-index column query, so autocomplete prefetches names only.
   bulkColumns: false,
+  // `POST /_sql` is the only endpoint this engine speaks, and node stats are
+  // not behind it — so the performance panel must not be offered (Stage 31).
+  workloadDigests: false,
 };
 
 export const CONN_INFO = {
