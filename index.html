@@ -17,7 +17,10 @@
          `wl-shut` off took 527px out of the window from boot and pushed the
          migrations seam beyond the right edge, which twelve migrations tests
          noticed immediately. -->
-    <div id="app" class="chat-closed mig-shut wl-shut batch-shut hist-shut">
+    <!-- `data-offline` is set here, not by script: nothing is connected at
+         launch, so the connection screen is what the first paint shows and
+         `main.ts` only ever takes the attribute away. -->
+    <div id="app" class="chat-closed mig-shut wl-shut batch-shut hist-shut" data-offline>
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
         <!-- Icons are injected from src/icons.ts, so the drawings live in one
@@ -108,7 +111,34 @@
               <input type="number" id="num-timeout" class="num" value="0" min="0" max="3600" />s
             </label>
           </div>
-          <div id="editor"></div>
+          <!-- Stage 32 §2. The editor and the no-connection page occupy the
+               same cell of a one-cell grid, stacked, rather than one replacing
+               the other in the flow. `#editor` therefore keeps a real box of
+               the right size at all times: CodeMirror measures itself against
+               that box, and an editor built inside a `display: none` host
+               comes back with the wrong line heights until something provokes
+               a re-measure. Hidden, not removed. -->
+          <div class="editor-stack">
+            <div id="editor"></div>
+            <!-- What the window shows while the workspace has no live
+                 connection behind it: at launch, and after a disconnect. Its
+                 three pieces of text are written by `paintConnectionState`,
+                 because "nothing is connected yet" and "the connection you
+                 were on has gone" want different words and different buttons —
+                 the second one's useful action is to connect it again. -->
+            <div id="blank-page" class="blank-page">
+              <div class="blank-card">
+                <h2 id="blank-title">No connection</h2>
+                <p id="blank-body">
+                  Nothing is open. Pick a saved connection from the rail on the
+                  left, or set up a new one.
+                </p>
+                <button type="button" id="blank-connect" class="mini">
+                  New connection…
+                </button>
+              </div>
+            </div>
+          </div>
         </section>
 
         <div id="hsplit" class="splitter splitter-h" title="Drag to resize"></div>

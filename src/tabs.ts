@@ -203,14 +203,6 @@ export interface TabHooks {
   /** A tab was created; register it with the backend. */
   onCreated: (tab: ScriptTab) => void;
   /**
-   * The connection's colour, so the tab strip carries it too.
-   *
-   * Only one connection's tabs are visible at a time, so without this the tab
-   * bar looks identical whichever server you are on — which is exactly the
-   * moment you want to be sure.
-   */
-  colourFor?: (connectionId: string) => string;
-  /**
    * Which SQL dialect a new tab should be written in — the active connection's
    * engine. Optional, so a `TabManager` in a test needs no connection at all.
    */
@@ -730,13 +722,12 @@ export class TabManager {
   }
 
   render() {
-    // Carry the active connection's colour into the strip, so the accent on the
-    // selected tab matches the rail icon you clicked to get here.
-    const colour = this.activeConnectionId
-      ? this.hooks.colourFor?.(this.activeConnectionId)
-      : undefined;
-    this.bar.style.setProperty("--conn-colour", colour ?? "var(--accent)");
-
+    // The connection's colour is **not** set here any more. It was read from
+    // the profile, which says what colour a connection *is* and nothing about
+    // whether it is up, so a disconnected workspace kept wearing the last
+    // server's accent. It is one property on `#app` now, painted from the
+    // live connection, and this strip inherits it along with everything else
+    // that marks which server is on screen. See `paintConnectionAccent`.
     const nodes = this.visible().map((tab) => {
       const el = document.createElement("div");
       el.className =

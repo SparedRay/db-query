@@ -88,6 +88,9 @@ const els = {
   connLabel: $<HTMLSpanElement>("conn-label"),
   connDot: $<HTMLSpanElement>("conn-dot"),
   btnConnect: $<HTMLButtonElement>("btn-connect"),
+  blankConnect: $<HTMLButtonElement>("blank-connect"),
+  blankTitle: $<HTMLElement>("blank-title"),
+  blankBody: $<HTMLElement>("blank-body"),
   btnRun: $<HTMLButtonElement>("btn-run"),
   btnRunAll: $<HTMLButtonElement>("btn-run-all"),
   btnCancel: $<HTMLButtonElement>("btn-cancel"),
@@ -641,6 +644,72 @@ function syncBusy() {
 }
 
 /**
+ * Everything that follows from one fact: whether the workspace on screen has a
+ * live connection behind it.
+ *
+ * **Connected, not merely active.** The colour is stored on the profile, so it
+ * is available whether or not we are talking to the server — which is why the
+ * tab strip used to keep the last server's colour after a disconnect. A colour
+ * on the chrome claims a live connection; the rail has said so since Stage 7
+ * by draining an offline item, and this is the same rule applied to the rest
+ * of the window.
+ *
+ * **The accent and the page are the same predicate**, deliberately, in one
+ * function. They were split for an afternoon — the colour keyed off the
+ * connection, the page off an empty tab strip — and the two states promptly
+ * disagreed: a disconnect drained the colour but left an editor on screen for
+ * a server that had gone, because the tabs were still there and the strip was
+ * not empty. Computing it twice is what let it be computed differently.
+ *
+ * The token goes on `#app` so everything inside inherits it and `styles.css`
+ * needs no per-element plumbing — the strip, the result tabs and the switches
+ * each just read it. It replaced `TabHooks.colourFor`, which could only ever
+ * reach the one element it was given.
+ */
+function paintConnectionState() {
+  const active = conns?.active() ?? null;
+  const live = !!active?.connected;
+
+  if (live) {
+    els.app.style.setProperty("--conn-colour", active.profile.colour);
+  } else {
+    // Removed rather than set to the accent: the fallback belongs in one place,
+    // `:root`, where it also applies before this ever runs.
+    els.app.style.removeProperty("--conn-colour");
+  }
+
+  els.app.toggleAttribute("data-offline", !live);
+  if (!live) paintBlankPage(active);
+}
+
+/**
+ * What the connection screen says, which depends on how you got to it.
+ *
+ * Two states, and the difference is the whole point of writing the text from
+ * here rather than leaving it in the HTML. Nothing connected yet is an
+ * invitation; a connection you have just left is a thing to pick back up, and
+ * offering "New connection…" there would answer a question nobody asked while
+ * hiding the one action that is wanted. The button then does exactly what
+ * clicking the rail icon does, including asking for a password it does not
+ * remember.
+ */
+function paintBlankPage(active: ConnectionEntry | null) {
+  if (active) {
+    els.blankTitle.textContent = `${active.profile.name} is not connected`;
+    els.blankBody.textContent =
+      "Your tabs are kept — connect again to pick them up where you left " +
+      "off, or choose another connection from the rail on the left.";
+    els.blankConnect.textContent = `Connect to ${active.profile.name}`;
+  } else {
+    els.blankTitle.textContent = "No connection";
+    els.blankBody.textContent =
+      "Nothing is open. Pick a saved connection from the rail on the left, " +
+      "or set up a new one.";
+    els.blankConnect.textContent = "New connection…";
+  }
+}
+
+/**
  * Connection label doubles as the cross-tab indicator: how many tabs are
  * running right now, and how many connections we hold.
  *
@@ -652,6 +721,11 @@ function syncConnLabel() {
   // The performance panel is offered per connection, so it follows the same
   // signal as everything else here rather than being switched on at boot.
   syncWorkloadButton();
+  // Same signal, same place. Every path that changes which connection is on
+  // screen, or whether it is up, already ends here — connect, disconnect,
+  // activate, remove — so hanging the accent and the connection screen off
+  // this is what keeps them from needing a call site of their own in each.
+  paintConnectionState();
   // The button has always disconnected when there was something to disconnect;
   // it just never said so. A control that does the opposite of its label is
   // worse than one that is missing.
@@ -672,9 +746,12 @@ function syncConnLabel() {
   }
 
   // The colour dot is the cheap half of environment safety: it answers "which
-  // server am I on" without reading anything.
+  // server am I on" without reading anything. A ring rather than a disc when
+  // the connection is down, by the same rule as the rest of the chrome: a
+  // filled colour is a claim that we are connected to it.
   els.connDot.hidden = false;
-  els.connDot.style.background = active.profile.colour;
+  els.connDot.classList.toggle("offline", !isLive);
+  els.connDot.style.background = isLive ? active.profile.colour : "";
 
   if (!active.connected) {
     els.connLabel.textContent = `${active.profile.name} — not connected`;
@@ -816,6 +893,17 @@ els.btnConnect.onclick = () => {
   const active = conns.active();
   if (active?.connected) void conns.disconnect(active);
   else openConnectionEditor(active ?? undefined);
+};
+
+// The connection screen's one action, and it is the rail icon's, not the
+// Connect button's: `btnConnect` is also the Disconnect button, so borrowing
+// it would make this depend on a state the page it sits on rules out.
+// `conns.connect` opens a saved connection whose password we hold and falls
+// back to the editor when it needs one, which is what clicking the icon does.
+els.blankConnect.onclick = () => {
+  const active = conns.active();
+  if (active) void conns.connect(active);
+  else openConnectionEditor();
 };
 
 els.connCancel.onclick = () => els.dialog.close();
@@ -3106,7 +3194,6 @@ conns = new ConnectionManager($("rail"), {
 }, openConnectionEditor);
 
 tabs = new TabManager($("script-tabs"), view, {
-  colourFor: (connectionId) => conns.get(connectionId)?.profile.colour ?? "var(--accent)",
   // Capabilities come from the server on connect, so a tab opened before any
   // connection falls back to MySQL — which is also what the field used to say
   // unconditionally.

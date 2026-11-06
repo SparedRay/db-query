@@ -1066,7 +1066,12 @@ test("the environment picker shuts on Escape and on a click elsewhere", async ({
   await expect(page.locator("#mig-picker")).toHaveAttribute("aria-expanded", "false");
 
   await picker(page);
-  await page.locator("#editor .cm-content").click();
+  // The click-away target is the no-connection page, not the editor: this
+  // panel needs no connection — it reads a repository, not a server — so with
+  // nothing connected there is no tab, and §2's page is what occupies the
+  // editor pane. Any click outside the popover will do; this is the one that
+  // is actually on screen here.
+  await page.locator("#blank-page").click();
   await expect(page.locator("#mig-picker-pop")).toBeHidden();
 });
 

@@ -101,7 +101,9 @@ test("switching tabs restores each one's own text", async ({ page }) => {
 /** Colour is identification, not decoration: it answers "which server am I on". */
 test("tabs carry the active connection's colour", async ({ page }) => {
   await connect(page);
-  // The colour is set once on the bar and inherited, rather than per tab.
+  // Set once on `#app` and inherited by every surface that marks the
+  // connection, rather than on this strip alone — `connection-accent.spec.ts`
+  // owns the rest of that behaviour, including what happens on a disconnect.
   const colour = await page
     .locator("#script-tabs")
     .evaluate((el) => getComputedStyle(el).getPropertyValue("--conn-colour").trim());

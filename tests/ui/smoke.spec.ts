@@ -7,12 +7,29 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("boots, mounts the editor, and asks the backend for its defaults", async ({ page }) => {
+/**
+ * **Mounted, not on screen.** With no connection there is no tab, so what the
+ * window shows is the no-connection page (Stage 32 §2) and the editor is
+ * hidden behind it. It is still built, and still has the box it will be shown
+ * at: the two share one grid cell precisely so that CodeMirror never measures
+ * itself against nothing, and an editor that came back with the wrong line
+ * heights after its first reveal is the failure this asserts against.
+ */
+test("boots, mounts the editor behind the blank page, and asks for its defaults", async ({
+  page,
+}) => {
   await installBackend(page);
   await visit(page);
 
   await expect(page.locator("#rail")).toHaveCount(1);
-  await expect(page.locator("#editor .cm-editor")).toBeVisible();
+  await expect(page.locator("#blank-page")).toBeVisible();
+
+  const box = await page.locator("#editor .cm-editor").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height) };
+  });
+  expect(box.w).toBeGreaterThan(100);
+  expect(box.h).toBeGreaterThan(50);
 
   const cmds = (await calls(page)).map((c) => c.cmd);
   // The browse limit and the row ceiling are owned by Rust; the UI must ask
