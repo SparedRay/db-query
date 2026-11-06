@@ -94,6 +94,13 @@ const els = {
   btnSchema: $<HTMLButtonElement>("btn-schema"),
   btnSqlfiles: $<HTMLButtonElement>("btn-sqlfiles"),
   jobReport: $<HTMLElement>("job-report"),
+  batchPane: $<HTMLElement>("batch-pane"),
+  batchsplit: $<HTMLElement>("batchsplit"),
+  batchBody: $<HTMLElement>("batch-body"),
+  batchEmpty: $<HTMLElement>("batch-empty"),
+  batchExpand: $<HTMLButtonElement>("batch-expand"),
+  batchClose: $<HTMLButtonElement>("batch-close"),
+  batchRun: $<HTMLButtonElement>("batch-run"),
   sfDialog: $<HTMLDialogElement>("sqlfiles-dialog"),
   sfConnection: $<HTMLSelectElement>("sf-connection"),
   sfDatabase: $<HTMLSelectElement>("sf-database"),
@@ -117,6 +124,7 @@ const els = {
   migsplit: $<HTMLElement>("migsplit"),
   btnMigrations: $<HTMLButtonElement>("btn-migrations"),
   migClose: $<HTMLButtonElement>("mig-close"),
+  migExpand: $<HTMLButtonElement>("mig-expand"),
   migPending: $("mig-pending"),
   migPicker: $<HTMLButtonElement>("mig-picker"),
   migPickerLabel: $("mig-picker-label"),
@@ -164,14 +172,18 @@ const els = {
   wlHeadline: $<HTMLElement>("wl-headline"),
   wlDetail: $<HTMLElement>("wl-detail"),
   wlBody: $<HTMLElement>("wl-body"),
-  wlTiles: $<HTMLElement>("wl-tiles"),
-  wlLoops: $<HTMLElement>("wl-loops"),
+  wlLead: $<HTMLElement>("wl-lead"),
+  wlLeadSub: $<HTMLElement>("wl-lead-sub"),
+  wlViews: $<HTMLElement>("wl-views"),
+  wlNWorkload: $<HTMLElement>("wl-n-workload"),
+  wlNIndexes: $<HTMLElement>("wl-n-indexes"),
+  wlPanes: $<HTMLElement>("wl-panes"),
+  wlExpand: $<HTMLButtonElement>("wl-expand"),
   wlClasses: $<HTMLElement>("wl-classes"),
-  wlSorts: $<HTMLElement>("wl-sorts"),
+  wlSort: $<HTMLSelectElement>("wl-sort"),
   wlCountApplication: $<HTMLElement>("wl-count-application"),
   wlCountChatter: $<HTMLElement>("wl-count-chatter"),
   wlCountPlatform: $<HTMLElement>("wl-count-platform"),
-  wlKnown: $<HTMLElement>("wl-known"),
   wlList: $<HTMLElement>("wl-list"),
   wlWindows: $<HTMLElement>("wl-windows"),
   wlBaseline: $<HTMLButtonElement>("wl-baseline"),
@@ -187,6 +199,7 @@ const els = {
   chatSend: $<HTMLButtonElement>("chat-send"),
   chatClear: $<HTMLButtonElement>("chat-clear"),
   chatClose: $<HTMLButtonElement>("chat-close"),
+  chatExpand: $<HTMLButtonElement>("chat-expand"),
   chatNote: $<HTMLElement>("chat-note"),
   setAiPreset: $<HTMLSelectElement>("set-ai-preset"),
   setAiBase: $<HTMLInputElement>("set-ai-base"),
@@ -240,7 +253,9 @@ const els = {
   status: $("status"),
   grid: $("grid"),
   resultTabs: $<HTMLElement>("tabs"),
-  historyDialog: $<HTMLDialogElement>("history-dialog"),
+  histPane: $<HTMLElement>("hist-pane"),
+  histsplit: $<HTMLElement>("histsplit"),
+  histExpand: $<HTMLButtonElement>("hist-expand"),
   histSearch: $<HTMLInputElement>("hist-search"),
   histThisConn: $<HTMLInputElement>("hist-this-conn"),
   histList: $<HTMLElement>("hist-list"),
@@ -334,6 +349,14 @@ let tabs!: TabManager;
 let files!: FileUx;
 
 let conns!: ConnectionManager;
+
+/**
+ * Declared up here rather than where it is built, because the connection
+ * label syncs the performance panel and the first of those syncs happens
+ * while `ConnectionManager` is still in its constructor — long before the
+ * panel exists. Same shape, and the same reason, as `tabs` and `conns`.
+ */
+let workload!: ReturnType<typeof createWorkload>;
 
 /**
  * The open tabs, remembered across restarts. Restore happens per connection, on
@@ -1140,6 +1163,31 @@ for (const [el, name] of [
   [els.btnSchema, "sidebar"],
   [els.btnSqlfiles, "run-files"],
   [els.btnSettings, "settings"],
+] as const) {
+  el.append(icon(name));
+}
+
+// And every control in a dock head (§6.16). The same table, for the same
+// reason: the drawing lives in `icons.ts`, the markup is an empty button, and
+// nothing here can drift from the rail above — a dock's close control and the
+// result grid's are one `close`.
+//
+// `chevrons` is appended pointing right and rotated by CSS while the dock is
+// collapsed, so "which way does it point" is one fact in one place rather
+// than a drawing per state and a line of TypeScript choosing between them.
+for (const [el, name] of [
+  [els.migExpand, "chevrons"],
+  [els.migClose, "close"],
+  [els.chatClear, "trash"],
+  [els.chatExpand, "chevrons"],
+  [els.chatClose, "close"],
+  [els.wlRefresh, "refresh"],
+  [els.wlExpand, "chevrons"],
+  [els.wlClose, "close"],
+  [els.batchExpand, "chevrons"],
+  [els.batchClose, "close"],
+  [els.histExpand, "chevrons"],
+  [els.histClose, "close"],
 ] as const) {
   el.append(icon(name));
 }
@@ -2540,7 +2588,38 @@ els.btnCancel.onclick = async () => {
  * origin. Measuring it the same way as the schema would make the panel shrink
  * as you dragged it wider.
  */
-function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "x-wl" | "y") {
+/**
+ * One right-hand dock's seam: the pane it sizes, the variable it writes, how
+ * narrow it may get, and how much it must leave to its left.
+ *
+ * **Measured from the pane's own right edge, never the window's** (§6.18).
+ * There were four branches doing this, and three of them measured from the
+ * window because each was the outermost dock on the day it was written. The
+ * migrations seam already had the right version, and `migrations.spec.ts`
+ * already had the test that says why: dragged rightwards from a window
+ * measurement it grows instead of shrinking, "because the measurement would
+ * be 387px too wide". A fifth dock makes that wrong for three seams at once.
+ */
+interface DockSeam {
+  pane: () => HTMLElement;
+  prop: string;
+  min: number;
+}
+
+/**
+ * How much editor a dock may never take, in px.
+ *
+ * The ceiling belongs to the **editor**, not to the dock. Each seam used to
+ * carry its own version of it -- `window.innerWidth - 420` for three of them
+ * and `right - 560` for migrations -- and both forms are the same wish
+ * ("leave the editor usable") written as an arithmetic about whichever panes
+ * happened to exist at the time. Measured off `#main` it is one number, it is
+ * true wherever a dock sits and whatever is open beyond it, and a dock that is
+ * already starving the editor can still be dragged *narrower* and not wider.
+ */
+const EDITOR_KEEPS = 420;
+
+function draggable(handle: HTMLElement, axis: "x" | "x-dock" | "y", seam?: DockSeam) {
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     handle.classList.add("dragging");
@@ -2548,27 +2627,24 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "x-wl" |
       if (axis === "x") {
         const w = Math.min(Math.max(140, ev.clientX), window.innerWidth - 260);
         document.documentElement.style.setProperty("--sidebar-w", `${w}px`);
-      } else if (axis === "x-end") {
-        // The floor is the four buttons of a SQL block's action row; the
-        // ceiling leaves the editor usable rather than letting the chat eat
-        // the window.
-        const from = window.innerWidth - ev.clientX;
-        const w = Math.min(Math.max(260, from), Math.max(260, window.innerWidth - 420));
-        document.documentElement.style.setProperty("--chat-w-set", `${w}px`);
-      } else if (axis === "x-wl") {
-        // Measured from the window's right edge: this is the outermost dock,
-        // so nothing sits beyond it. The floor keeps a verdict chip and its
-        // counters on one line; the ceiling leaves the editor usable.
-        const from = window.innerWidth - ev.clientX;
-        const w = Math.min(Math.max(360, from), Math.max(360, window.innerWidth - 420));
-        document.documentElement.style.setProperty("--wl-w-set", `${w}px`);
-      } else if (axis === "x-mig") {
-        // Measured from the panel's own right edge, not the window's: the
-        // assistant may be open beyond it. The floor keeps Apply, Repair and
-        // Refresh on one line; the ceiling leaves the editor usable.
-        const right = els.migPane.getBoundingClientRect().right;
-        const w = Math.min(Math.max(300, right - ev.clientX), Math.max(300, right - 560));
-        document.documentElement.style.setProperty("--mig-w-set", `${w}px`);
+      } else if (axis === "x-dock" && seam) {
+        // The pane's own right edge, because another dock may be open beyond
+        // this one. Each seam brings its own floor -- what its narrowest row
+        // needs to stay on one line -- and its own `keep`, which is how much
+        // has to be left to its left for the editor to remain usable.
+        const box = seam.pane().getBoundingClientRect();
+        // How much the editor can spare, floored at zero: this is a licence to
+        // **grow**, so an editor already narrower than `EDITOR_KEEPS` grants
+        // none and still allows the pane to be dragged narrower. Without that
+        // floor the ceiling drops below the pane's current width and the
+        // panel jumps inwards on a drag that asked it to narrow by less --
+        // which is the clamp two seam tests measured as "40px, not 60".
+        const spare = Math.max(0, els.main.getBoundingClientRect().width - EDITOR_KEEPS);
+        const w = Math.min(
+          Math.max(seam.min, box.right - ev.clientX),
+          Math.max(seam.min, box.width + spare),
+        );
+        document.documentElement.style.setProperty(seam.prop, `${w}px`);
       } else {
         // A seam dragged while the pane is shut opens it and sizes it in one
         // gesture. The alternative is a handle that looks draggable and does
@@ -2591,9 +2667,34 @@ function draggable(handle: HTMLElement, axis: "x" | "x-end" | "x-mig" | "x-wl" |
 
 draggable(els.vsplit, "x");
 draggable(els.hsplit, "y");
-draggable(els.msplit, "x-end");
-draggable(els.migsplit, "x-mig");
-draggable(els.wlsplit, "x-wl");
+// The five docks' seams. The floors are what each panel's narrowest row needs:
+// a SQL block's four buttons; Apply, Repair and Refresh; a verdict chip with
+// its counters; a file name with three numbers; two lines of clamped SQL.
+draggable(els.msplit, "x-dock", {
+  pane: () => els.chatPane,
+  prop: "--chat-w-set",
+  min: 260,
+});
+draggable(els.migsplit, "x-dock", {
+  pane: () => els.migPane,
+  prop: "--mig-w-set",
+  min: 300,
+});
+draggable(els.wlsplit, "x-dock", {
+  pane: () => els.wlPane,
+  prop: "--wl-w-set",
+  min: 360,
+});
+draggable(els.batchsplit, "x-dock", {
+  pane: () => els.batchPane,
+  prop: "--batch-w-set",
+  min: 360,
+});
+draggable(els.histsplit, "x-dock", {
+  pane: () => els.histPane,
+  prop: "--hist-w-set",
+  min: 360,
+});
 
 // ------------------------------------------------- the result pane's header
 //
@@ -3516,7 +3617,7 @@ els.setClose.onclick = () => els.settingsDialog.close();
  * stops there, like every other generated-SQL path in this app.
  */
 const history = createHistory({
-  dialog: els.historyDialog,
+  pane: els.histPane,
   search: els.histSearch,
   thisConnectionOnly: els.histThisConn,
   list: els.histList,
@@ -3538,7 +3639,28 @@ const history = createHistory({
   },
   copy: (sql) => sayCopied(sql),
   notify: (m) => results.setMessage(m),
+  setOpen: setHistOpen,
+  isOpen: () => histOpen,
 });
+
+/**
+ * Open the query history dock, or shut it (§6.18).
+ *
+ * The fifth of these, and the same five lines as the other four: a class that
+ * zeroes the track, `hidden` as well as zero-width so a shut pane cannot take
+ * Tab or hold focus, a width in `--hist-w-set` that shutting leaves alone, and
+ * no shut-and-expanded state.
+ */
+let histOpen = false;
+function setHistOpen(open: boolean) {
+  histOpen = open;
+  els.app.classList.toggle("hist-shut", !open);
+  if (!open) setDockFull("hist", false);
+  els.histPane.hidden = !open;
+  els.histsplit.hidden = !open;
+  els.btnHistory.setAttribute("aria-pressed", String(open));
+  els.btnHistory.classList.toggle("on", open);
+}
 
 /**
  * Copy from the history list, and say so **inside the dialog**.
@@ -3557,9 +3679,9 @@ function sayCopied(sql: string) {
   });
 }
 
-els.btnHistory.onclick = () => void history.open();
+els.btnHistory.onclick = () => void history.toggle();
 
-const workload = createWorkload({
+workload = createWorkload({
   scope: els.wlScope,
   refresh: els.wlRefresh,
   close: els.wlClose,
@@ -3567,16 +3689,18 @@ const workload = createWorkload({
   headline: els.wlHeadline,
   detail: els.wlDetail,
   body: els.wlBody,
-  tiles: els.wlTiles,
-  loops: els.wlLoops,
+  lead: els.wlLead,
+  leadSub: els.wlLeadSub,
+  views: els.wlViews,
+  viewCounts: { workload: els.wlNWorkload, indexes: els.wlNIndexes },
+  panes: els.wlPanes,
   classes: els.wlClasses,
-  sorts: els.wlSorts,
+  sort: els.wlSort,
   counts: {
     application: els.wlCountApplication,
     chatter: els.wlCountChatter,
     platform: els.wlCountPlatform,
   },
-  known: els.wlKnown,
   list: els.wlList,
   windows: els.wlWindows,
   baseline: els.wlBaseline,
@@ -3624,10 +3748,180 @@ function setWorkloadOpen(open: boolean) {
   // 1,100px. The width is the user's choice and `Ctrl+B` buys back 260px of
   // it.
   els.app.classList.toggle("wl-shut", !open);
+  // The invariant, kept here rather than at each call site: there is no such
+  // thing as a shut panel that is also expanded. That state hides the editor
+  // behind a pane that is not on screen to bring it back.
+  if (!open) setDockFull("wl", false);
   els.wlPane.hidden = !open;
   els.wlsplit.hidden = !open;
   els.btnWorkload.setAttribute("aria-pressed", String(open));
   els.btnWorkload.classList.toggle("on", open);
+}
+
+/**
+ * The batch dock: open or shut, and one report per connection (§6.15).
+ *
+ * The report was a band in the output pane, outside the tab system so a tab
+ * switch left it alone. That was right about tabs and silent about
+ * connections — a run picks its own connection in its own dialog, so a report
+ * from UAT sat on screen under QA with nothing saying which it came from.
+ *
+ * Kept in a `Map` rather than cleared on a switch, because "one batch per
+ * connection" is what it is: switching away hides it, switching back brings it
+ * back, and neither costs the run that produced it. The CSVs on disk are the
+ * deliverable, and the report is how you find them.
+ */
+const batchReports = new Map<string, import("./api").SqlRunOutcome>();
+let batchOpen = false;
+
+function setBatchOpen(open: boolean) {
+  batchOpen = open;
+  els.app.classList.toggle("batch-shut", !open);
+  // Same invariant as the performance dock: no shut-and-expanded state, which
+  // would hide the editor behind a pane that cannot bring it back.
+  if (!open) setDockFull("batch", false);
+  els.batchPane.hidden = !open;
+  els.batchsplit.hidden = !open;
+  els.btnSqlfiles.setAttribute("aria-pressed", String(open));
+  els.btnSqlfiles.classList.toggle("on", open);
+  if (open) paintBatchReport();
+}
+
+/** Whose report is on screen, if anybody's. */
+function paintBatchReport() {
+  const id = conns?.active()?.profile.id ?? null;
+  const outcome = id ? batchReports.get(id) : undefined;
+  if (outcome) {
+    showJobReport(outcome);
+    els.batchEmpty.hidden = true;
+    return;
+  }
+  els.jobReport.hidden = true;
+  els.jobReport.replaceChildren();
+  els.batchEmpty.hidden = false;
+  els.batchEmpty.textContent = id
+    ? "No folder has been run against this connection yet."
+    : "No connection is open. A folder run belongs to one.";
+}
+
+/**
+ * Which dock, if any, has the whole window (Stage 31 §6.14).
+ *
+ * The second tier of one design, not a second design: a dock is for a glance,
+ * expanded is for the study. Generalised out of the performance panel, which
+ * had it first, so a dock added later gets it by registering rather than by
+ * growing another copy of these rules.
+ *
+ * **One value, not a flag per dock.** §6.5 settled that two docks may be open
+ * at once, so "expanded" cannot be something each one holds independently —
+ * exactly one can have the window, and the others go away while it does.
+ *
+ * It is deliberately not reachable by dragging. Each `draggable` arm clamps
+ * its seam so the editor always keeps a column, which is the right rule for a
+ * seam and the wrong one for a mode.
+ *
+ * The hidden panes keep their state. The editor is `display: none`, not
+ * unmounted — its tabs, text, selection and undo history are all still there,
+ * which is what each dock's head says in so many words, because a mode that
+ * *looked* like it had closed your editor would be worth distrusting.
+ */
+type DockName = "mig" | "chat" | "wl" | "batch" | "hist";
+
+/**
+ * Every dock, with the pane to expand and the control that asks for it.
+ *
+ * All four, as of §6.16 — the mechanism was general from the start and only
+ * two docks were wired to it, which is a different thing from being general.
+ * Migrations and the assistant are the two that most want the width: a list of
+ * versions with their descriptions, and a conversation.
+ *
+ * `isOpen` reads the pane rather than the module's own flag. Three of these
+ * flags are declared further down this file than `setDockFull` is called from,
+ * and a `let` read before its declaration runs throws; `hidden` is set by the
+ * same four functions that set the flags and cannot disagree with them.
+ */
+const EXPANDABLE: Record<DockName, { pane: () => HTMLElement; expand: () => HTMLButtonElement }> = {
+  mig: { pane: () => els.migPane, expand: () => els.migExpand },
+  chat: { pane: () => els.chatPane, expand: () => els.chatExpand },
+  wl: { pane: () => els.wlPane, expand: () => els.wlExpand },
+  batch: { pane: () => els.batchPane, expand: () => els.batchExpand },
+  hist: { pane: () => els.histPane, expand: () => els.histExpand },
+};
+
+const DOCKS = Object.keys(EXPANDABLE) as DockName[];
+
+let fullDock: DockName | null = null;
+
+/** The dock with the window, or null. Read by each dock's own control. */
+function dockFull(dock: DockName): boolean {
+  return fullDock === dock;
+}
+
+function setDockFull(dock: DockName, full: boolean) {
+  // Nothing to expand into if the dock is shut, and no way back out of it.
+  if (full && EXPANDABLE[dock].pane().hidden) return;
+  if (!full && fullDock !== dock) return;
+
+  // The class goes on exactly one pane, because the CSS selects "the expanded
+  // pane" rather than "the pane named by the attribute" — which CSS cannot do.
+  for (const name of DOCKS) {
+    EXPANDABLE[name].pane().classList.toggle("dock-full", full && name === dock);
+  }
+  fullDock = full ? dock : null;
+  if (fullDock) els.app.dataset.full = fullDock;
+  else delete els.app.dataset.full;
+  syncExpandControls();
+
+  // Both viewports just changed between nothing and full height, and both
+  // paint only the rows theirs can show — the same reason `setOutputView`
+  // does this.
+  results.relayout();
+  sequenceView.relayout();
+}
+
+/**
+ * Every dock's expand control agrees with the mode, whoever changed it.
+ *
+ * One function rather than one per dock. There were two, near-identical, and
+ * `Esc` had to call both by name — which is how the third and fourth docks
+ * would have arrived with controls that went out of step with the key that
+ * undoes them.
+ *
+ * The chevrons point the way the pane is about to move: left, across the
+ * editor, while it is collapsed; right, giving the editor back, while it has
+ * the window. That turn is CSS reading `aria-pressed`, so the drawing cannot
+ * disagree with the state. The words are in `aria-label`, which is also the
+ * tooltip's subject, because an unlabelled glyph is a guess.
+ */
+function syncExpandControls() {
+  for (const name of DOCKS) {
+    const btn = EXPANDABLE[name].expand();
+    const full = fullDock === name;
+    // `aria-pressed` is the state, and it is also what the CSS reads to point
+    // the chevrons at the edge the pane is about to move towards.
+    btn.setAttribute("aria-pressed", String(full));
+    btn.setAttribute("aria-label", full ? "Collapse" : "Expand");
+    btn.title = full
+      ? "Show the editor again (Esc)"
+      : "Hide the editor and use the whole window (Esc comes back)";
+  }
+}
+
+for (const name of DOCKS) {
+  const dock = name;
+  EXPANDABLE[dock].expand().onclick = () => setDockFull(dock, !dockFull(dock));
+}
+
+/**
+ * Leave the expanded view, whichever dock is in it.
+ *
+ * Returns whether there was one to leave, so an `Esc` handler can tell a key
+ * it consumed from one it should pass on.
+ */
+function collapseFullDock(): boolean {
+  if (!fullDock) return false;
+  setDockFull(fullDock, false);
+  return true;
 }
 
 /**
@@ -3644,6 +3938,17 @@ function syncWorkloadButton() {
   // Shut it if the connection that could answer has gone: a dock left open
   // over a connection with no counters is a panel that can only apologise.
   if (els.btnWorkload.hidden && workloadOpen) setWorkloadOpen(false);
+  // And re-read if the connection changed under an open one. Every number in
+  // that panel belongs to one server, so the switch has to reach it — it
+  // cannot be told apart from a repaint by looking at the DOM. The panel owns
+  // the identity check, so calling this on every sync costs nothing.
+  workload?.connectionChanged();
+  // Same rule, same reason: a dock outlives the switch, and a list scoped
+  // to "this connection" would go on showing the old one's statements.
+  history.connectionChanged();
+  // One report per connection: switching hides the other server's and brings
+  // this one's back, rather than destroying either.
+  if (batchOpen) paintBatchReport();
 }
 
 /**
@@ -3664,6 +3969,8 @@ let chatOpen = false;
 function toggleChat(open: boolean) {
   chatOpen = open;
   els.app.classList.toggle("chat-closed", !open);
+  // Same invariant as every other dock: see `setMigOpen`.
+  if (!open) setDockFull("chat", false);
   els.chatPane.hidden = !open;
   els.msplit.hidden = !open;
   els.btnAssistant.setAttribute("aria-pressed", String(open));
@@ -3803,6 +4110,10 @@ function cliNote(recipe: Recipe, status: CliStatus | null): string {
   return `${cliLabel(recipe)} is installed and signed in.`;
 }
 
+/** What the rail calls this feature, in one place: the markup has the same
+ *  string, and `paintAssistantButton` puts it back after every probe. */
+const ASSISTANT_TIP = "Ask the AI assistant (Ctrl+K)";
+
 /**
  * The assistant button's state.
  *
@@ -3818,7 +4129,7 @@ function paintAssistantButton() {
   els.btnAssistant.classList.remove("not-ready");
   if (!recipe) {
     spinner?.remove();
-    els.btnAssistant.title = "Ask the assistant (Ctrl+K)";
+    els.btnAssistant.title = ASSISTANT_TIP;
     return;
   }
 
@@ -3837,8 +4148,15 @@ function paintAssistantButton() {
   spinner?.remove();
   const ready = status?.installed === true && status?.signedIn === true;
   els.btnAssistant.classList.toggle("not-ready", !ready);
+  // **The button is named for what it does, and the provider is the second
+  // line.** It used to read "Ask Claude Code" or "Ask Copilot CLI", which
+  // named the program we happen to shell out to rather than the feature the
+  // rail is offering — and which disagreed with the same button's own
+  // tooltip on an HTTP provider, with the dock head it opens ("Assistant"),
+  // and with Ctrl+K's entry in the shortcut list. Which CLI answers is still
+  // worth knowing with two of them installed, so it stays, below.
   els.btnAssistant.title = ready
-    ? `Ask ${cliLabel(recipe)} (Ctrl+K)`
+    ? `${ASSISTANT_TIP}\nAnswered by ${cliLabel(recipe)}`
     : `${cliNote(recipe, status ?? null)} (Ctrl+K)`;
 }
 
@@ -4334,6 +4652,24 @@ window.addEventListener("unhandledrejection", (e) => {
   note("error", "ui", `unhandled rejection: ${text}`, true);
 });
 
+/**
+ * Escape leaves the expanded panel.
+ *
+ * A mode that hides your editor needs a way out that is not a button you have
+ * to go and find, which is why `Expand`'s own tooltip names this key. It is a
+ * separate listener from the shortcut map below because that one returns
+ * immediately unless Ctrl or Meta is held.
+ *
+ * It cannot swallow an Escape meant for anything else: it answers only while
+ * some dock is actually expanded, and says so by returning whether it acted.
+ */
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  if (els.dialog.open || els.settingsDialog.open) return;
+  if (collapseFullDock()) e.preventDefault();
+});
+
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   // Any open dialog owns the keyboard. Ctrl+T inside the connection form should
@@ -4344,7 +4680,9 @@ window.addEventListener("keydown", (e) => {
   // working while you are reading a proposed query, which is the whole point
   // of it not being a modal. Its own textarea stops `Enter` from reaching
   // anything else, and that is the only key it needs.
-  if (els.dialog.open || els.settingsDialog.open || els.historyDialog.open) {
+  // Query history is absent from this list on purpose: it is a dock now, not
+  // a dialog, and `Ctrl+T` while you are reading it should open a tab.
+  if (els.dialog.open || els.settingsDialog.open) {
     return;
   }
 
@@ -4361,7 +4699,12 @@ window.addEventListener("keydown", (e) => {
     // since Stage 12, so Stage 23 took the modifier rather than the letter —
     // and this branch has to read `shiftKey`, because it matches both cases of
     // the letter and would otherwise answer both shortcuts.
-    if (e.shiftKey) openSqlFiles();
+    if (e.shiftKey) {
+      // Asking to run a folder is asking to see the report it produces, so
+      // the dock comes with it — the same move `Ctrl+P` makes for the schema.
+      setBatchOpen(true);
+      openSqlFiles();
+    }
     else toggleSchema(!schemaOpen);
   } else if (e.key === "k" || e.key === "K") {
     e.preventDefault();
@@ -4382,7 +4725,9 @@ window.addEventListener("keydown", (e) => {
     setMigOpen(!migOpen);
   } else if (e.key === "h" || e.key === "H") {
     e.preventDefault();
-    void history.open();
+    // A toggle, like `Ctrl+K` and `Ctrl+Shift+M`: the panel takes width while
+    // it is open, so the shortcut that opens it has to give the width back.
+    void history.toggle();
   } else if (e.key === "t" || e.key === "T") {
     e.preventDefault();
     tabs.create();
@@ -4630,6 +4975,10 @@ let migOpen = false;
 function setMigOpen(open: boolean) {
   migOpen = open;
   els.app.classList.toggle("mig-shut", !open);
+  // The invariant every dock keeps: nothing is shut and expanded at once, or
+  // the editor stays hidden behind a pane that is not on screen to bring it
+  // back.
+  if (!open) setDockFull("mig", false);
   els.migPane.hidden = !open;
   els.migsplit.hidden = !open;
   els.btnMigrations.setAttribute("aria-pressed", String(open));
@@ -5284,8 +5633,17 @@ function openSqlFiles(preselect: { connectionId?: string | null; database?: stri
   sqlFilesDialog.open(preselect);
 }
 
-els.btnSqlfiles.onclick = () => openSqlFiles();
-
+/**
+ * The rail button opens the dock, not the dialog (§6.15).
+ *
+ * Every other rail button toggles a pane; this one jumped straight to a modal,
+ * which meant a finished report had no home to go back to once the band had
+ * been dismissed. Starting a run is a button inside the dock now, as
+ * Migrations' actions are inside Migrations.
+ */
+els.btnSqlfiles.onclick = () => setBatchOpen(!batchOpen);
+els.batchClose.onclick = () => setBatchOpen(false);
+els.batchRun.onclick = () => openSqlFiles();
 async function runSqlFiles(plan: SqlFilesPlan) {
   if (jobRunning !== null) {
     results.setMessage(`${jobRunning} is already running.`);
@@ -5302,7 +5660,9 @@ async function runSqlFiles(plan: SqlFilesPlan) {
   // reaches *this* run rather than whichever was last.
   const id = `sfr-${Date.now().toString(36)}`;
   jobRunning = "A SQL file run";
-  hideJobReport();
+  // This run's report replaces whatever the same connection had before it.
+  batchReports.delete(plan.connectionId);
+  paintBatchReport();
   const strip = jobShow("Running SQL files", () => void api.sqlfilesRunCancel(id));
 
   try {
@@ -5332,7 +5692,11 @@ async function runSqlFiles(plan: SqlFilesPlan) {
         }
       },
     );
-    showJobReport(outcome);
+    // Keyed by the connection the run was *given*, which its dialog chose and
+    // which need not be the active one.
+    batchReports.set(plan.connectionId, outcome);
+    setBatchOpen(true);
+    paintBatchReport();
   } catch (err) {
     results.setMessage(String(err));
   } finally {
@@ -5381,11 +5745,14 @@ async function confirmWrites(plan: SqlFilesPlan): Promise<boolean> {
 }
 
 /**
- * The report, in a band that outlives the tab you were on.
+ * Build the report into the batch dock.
  *
  * Not `results.setMessage`, which is how the schema export reports and which
  * `onActivate` repaints per tab — switch tabs and it is gone. For a batch run
- * the report *is* the deliverable, so it goes outside the tab system (§3.3).
+ * the report *is* the deliverable, so it is not in the tab system at all
+ * (§3.3). It was a band in the output pane until §6.15; the dock is the same
+ * argument carried one step further, because a report also belongs to a
+ * connection and a band had nowhere to say which.
  */
 function showJobReport(outcome: import("./api").SqlRunOutcome) {
   const el = els.jobReport;
@@ -5424,7 +5791,13 @@ function showJobReport(outcome: import("./api").SqlRunOutcome) {
   const copyReport = elem("button", "mini", "Copy report") as HTMLButtonElement;
   wireCopyButton(copyReport, () => reportText(outcome));
   const hide = elem("button", "mini", "Hide") as HTMLButtonElement;
-  hide.onclick = hideJobReport;
+  hide.onclick = () => {
+    // The dock has its own Close, so Hide can only sensibly mean "discard
+    // this one" — otherwise the two controls would look like the same thing.
+    const id = conns?.active()?.profile.id;
+    if (id) batchReports.delete(id);
+    paintBatchReport();
+  };
   where.append(path, copyPath, copyReport, hide);
 
   const list = elem("div", "job-report-list");
@@ -5489,10 +5862,7 @@ async function confirmQuitWithJob(): Promise<boolean> {
   return pick === "quit";
 }
 
-function hideJobReport() {
-  els.jobReport.hidden = true;
-  els.jobReport.replaceChildren();
-}
+
 
 /** The report as text, for Copy. */
 function reportText(outcome: import("./api").SqlRunOutcome): string {

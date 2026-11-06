@@ -63,6 +63,16 @@ export type IconName =
   // Chrome, for the same reason as the tree: `✦` and `↺` and `◴` are glyphs
   // with thin font coverage, and a missing one renders as a hollow box.
   | "chevron"
+  // The dock heads' width control (§6.16). A *double* chevron, because one
+  // chevron is already the schema tree's twisty and the picker's caret: those
+  // open something, this moves an edge. Drawn pointing right and rotated
+  // 180° by CSS while the dock is collapsed, so the two directions cannot
+  // drift apart the way two drawings would.
+  | "chevrons"
+  // "Clear this conversation". A bin rather than a cross, which is already
+  // `close`, and rather than a word, which is what every other control in
+  // these heads stopped being.
+  | "trash"
   | "refresh"
   | "settings"
   | "history"
@@ -137,6 +147,13 @@ const PATHS: Record<IconName, string> = {
   // Points right; CSS rotates it 90° when its node is open, so the open and
   // closed states cannot drift apart the way two separate glyphs can.
   chevron: '<path d="M6.2 3.8L10.4 8l-4.2 4.2"/>',
+  chevrons: '<path d="M3.4 4.3L7.1 8l-3.7 3.7"/><path d="M8.5 4.3L12.2 8l-3.7 3.7"/>',
+  // Lid, handle, tapered body. No ribs down the front: at 16px three more
+  // strokes inside a 7px box close into a grey block.
+  trash:
+    '<path d="M3.3 5.3h9.4"/>' +
+    '<path d="M6.3 5.3V4a.9.9 0 0 1 .9-.9h1.6a.9.9 0 0 1 .9.9v1.3"/>' +
+    '<path d="M4.8 5.3l.5 7.1a1 1 0 0 0 1 .9h3.4a1 1 0 0 0 1-.9l.5-7.1"/>',
   refresh:
     '<path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7"/><path d="M13.4 2.9v3.3h-3.3"/>',
   // Sliders, not a cog. A cog's teeth need more pixels than 16 to read as

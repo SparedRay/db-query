@@ -59,12 +59,17 @@ export interface WorkloadDeps {
   headline: HTMLElement;
   detail: HTMLElement;
   body: HTMLElement;
-  tiles: HTMLElement;
-  loops: HTMLElement;
+  /** The finding, in a sentence, and the line under it. */
+  lead: HTMLElement;
+  leadSub: HTMLElement;
+  /** The Workload / Indexes tabs, and the counts on them. */
+  views: HTMLElement;
+  viewCounts: { workload: HTMLElement; indexes: HTMLElement };
+  /** Carries `data-view`; CSS decides which list is on screen. */
+  panes: HTMLElement;
   classes: HTMLElement;
-  sorts: HTMLElement;
+  sort: HTMLSelectElement;
   counts: Record<WorkloadClass, HTMLElement>;
-  known: HTMLElement;
   list: HTMLElement;
   invRun: HTMLButtonElement;
   invNote: HTMLElement;
@@ -91,6 +96,7 @@ type Sort = "time" | "examined" | "execs";
 /** What each verdict is called, and whether it proposes anything. */
 const VERDICTS: Record<WorkloadVerdict, string> = {
   missingIndex: "missing index",
+  predicateNotIndexable: "predicate cannot be indexed",
   noIndexWillHelp: "no index will help",
   viewBlocksFilter: "view blocks the filter",
   rowByRowLoop: "row-by-row loop",
@@ -104,6 +110,10 @@ const VERDICTS: Record<WorkloadVerdict, string> = {
 const WHY: Record<WorkloadVerdict, string> = {
   missingIndex:
     "It reads far more than it returns, and some executions found no index to use.",
+  predicateNotIndexable:
+    "The filter wraps a column in a function, so no b-tree index applies to it — and across " +
+    "an OR, MySQL cannot merge an unindexable branch with an indexable one either. " +
+    "Rewriting the predicate comes before any index.",
   noIndexWillHelp:
     "It returns everything it reads, so a scan is the right plan and no index can shrink it. " +
     "The fix is to ask for less, in the caller.",
@@ -164,6 +174,14 @@ function quoteIdent(name: string): string {
 
 export function createWorkload(deps: WorkloadDeps) {
   let panel: WorkloadPanel | null = null;
+  /**
+   * Which list is on screen in the dock.
+   *
+   * Meaningless when the panel is expanded, where both are side by side — so
+   * it is written to `data-view` and a single CSS rule stops honouring it,
+   * rather than this module having to know which mode it is in.
+   */
+  let view: "workload" | "indexes" = "workload";
   let only: WorkloadClass = "application";
   let sort: Sort = "time";
   let expanded: string | null = null;
@@ -172,6 +190,14 @@ export function createWorkload(deps: WorkloadDeps) {
   let wanted: "start" | "baseline" = "start";
   /** Bumped per request so a slow read cannot overwrite a newer one. */
   let generation = 0;
+  /**
+   * Whose counters are on screen.
+   *
+   * Every number in this panel belongs to one server, and nothing about the
+   * reading says which. Held so `connectionChanged` can tell a switch from the
+   * dozens of other reasons the connection label repaints.
+   */
+  let readFor: string | null = null;
 
   function shapes(): WorkloadShape[] {
     const all = panel?.report?.shapes ?? [];
@@ -184,90 +210,131 @@ export function createWorkload(deps: WorkloadDeps) {
     return [...mine].sort((a, b) => by[sort](b) - by[sort](a));
   }
 
-  function tile(label: string, value: string, note: string, tone = ""): HTMLElement {
-    const box = document.createElement("div");
-    box.className = "wl-tile";
-    const l = document.createElement("div");
-    l.className = "wl-tile-label";
-    l.textContent = label;
-    const v = document.createElement("div");
-    v.className = "wl-tile-value" + (tone ? ` ${tone}` : "");
-    v.textContent = value;
-    const n = document.createElement("div");
-    n.className = "wl-tile-note";
-    n.textContent = note;
-    box.append(l, v, n);
-    return box;
+  /** The period the counters cover, as a phrase that fits mid-sentence. */
+  function windowPhrase(p: WorkloadPanel): string {
+    if (p.windowed && p.baselineAt != null) {
+      const since = Math.max(0, Date.now() / 1000 - p.baselineAt);
+      return `the ${duration(since)} since your baseline`;
+    }
+    const uptime = p.diagnosis.readings.uptimeSecs;
+    if (!uptime) return "the window these counters cover";
+    const days = Math.floor(uptime / 86400);
+    return days >= 1 ? `the last ${days} days` : `the last ${duration(uptime)}`;
   }
 
-  function paintTiles() {
-    deps.tiles.replaceChildren();
+  /** How the lead sentence ends, which is the verdict said as a consequence. */
+  const CONSEQUENCE: Record<WorkloadVerdict, string> = {
+    missingIndex: "and an index would help it",
+    predicateNotIndexable: "and no index can help it",
+    noIndexWillHelp: "and no index can shrink it",
+    viewBlocksFilter: "and the index it wants cannot exist on that name",
+    rowByRowLoop: "and the caller runs it once per row",
+    waitingNotReading: "and it spends that time blocked, not reading",
+    driverChatter: "and none of it is application work",
+    platformInternal: "and none of it is yours to change",
+    unclassified: "and none of the rules explain it",
+  };
+
+  /**
+   * The finding, in a sentence, before any control.
+   *
+   * What this replaces is four tiles — worst shape, rows examined, wants an
+   * index, filtered as chatter — which named every number in the sentence and
+   * left the reader to write it, with the verdict that explains them three
+   * bands further down and smaller than the SQL beside it.
+   */
+  function paintLead() {
     const report = panel?.report;
-    if (!report) return;
+    deps.lead.replaceChildren();
+    deps.leadSub.textContent = "";
+    if (!report || !panel) return;
 
     const app = report.shapes.filter((s) => s.class === "application");
     const worst = app.reduce<WorkloadShape | null>(
       (best, s) => (!best || s.totalSecs > best.totalSecs ? s : best),
       null,
     );
-    const readiest = app.reduce<WorkloadShape | null>(
-      (best, s) => (!best || s.rowsExamined > best.rowsExamined ? s : best),
-      null,
-    );
-    const wantsIndex = app.filter((s) => s.verdict === "missingIndex").length;
 
-    deps.tiles.append(
-      tile(
-        "Worst shape, total time",
-        worst ? duration(worst.totalSecs) : "—",
-        worst ? `${compact(worst.execs)} executions` : "nothing to rank",
-        "bad",
-      ),
-      tile(
-        "Rows examined, that shape",
-        readiest ? compact(readiest.rowsExamined) : "—",
-        readiest
-          ? `to return ${compact(readiest.rowsSent)} · ${ratioText(readiest.ratio)}`
-          : "nothing to rank",
-        "warn",
-      ),
-      tile(
-        "Wants an index",
-        String(wantsIndex),
-        `of ${report.applicationShapes} application shapes`,
-        "num",
-      ),
-      tile(
-        "Filtered as chatter",
-        duration(report.chatterSecs + report.platformSecs),
-        `${report.chatterShapes + report.platformShapes} shapes, hidden by default`,
-      ),
+    if (!worst) {
+      deps.lead.textContent =
+        "Nothing in this reading is application work — every shape the server " +
+        "counted is driver or platform traffic.";
+      deps.leadSub.textContent =
+        `${duration(report.chatterSecs + report.platformSecs)} across ` +
+        `${report.chatterShapes + report.platformShapes} shapes. Switch the filter to see them.`;
+      return;
+    }
+
+    // Built from nodes, not innerHTML: `table` is a server-supplied name.
+    const hot = document.createElement("span");
+    hot.className = "wl-hot";
+    hot.textContent = duration(worst.totalSecs);
+
+    const where = document.createElement("span");
+    where.className = "wl-obj";
+    where.textContent = worst.tables[0] ?? "an unnamed target";
+
+    deps.lead.append(
+      hot,
+      document.createTextNode(` of ${windowPhrase(panel)} went into one shape on `),
+      where,
+      document.createTextNode(`, ${CONSEQUENCE[worst.verdict]}.`),
     );
+
+    const wantsIndex = app.filter((s) => s.verdict === "missingIndex").length;
+    const others = Math.max(0, report.applicationShapes - 1);
+    const sub = document.createElement("span");
+    const n = document.createElement("b");
+    n.textContent = String(wantsIndex);
+    sub.append(n, document.createTextNode(` of the other ${others} application shapes do want one.`));
+
+    const chatterSecs = report.chatterSecs + report.platformSecs;
+    const chatterShapes = report.chatterShapes + report.platformShapes;
+    deps.leadSub.replaceChildren(sub);
+    if (chatterShapes > 0) {
+      const t = document.createElement("b");
+      t.textContent = duration(chatterSecs);
+      deps.leadSub.append(
+        document.createTextNode(" "),
+        t,
+        document.createTextNode(
+          ` was driver and platform chatter across ${chatterShapes} shapes, kept out of the list.`,
+        ),
+      );
+    }
   }
 
-  function paintLoops() {
-    const found = panel?.report?.loops ?? [];
-    deps.loops.replaceChildren();
-    deps.loops.hidden = found.length === 0 || only !== "application";
-    for (const loop of found) {
-      const box = document.createElement("div");
-      box.className = "wl-loop";
+  /**
+   * The loop this shape is part of, if any.
+   *
+   * A loop is a finding *across* rows, which is why it used to sit in a strip
+   * of its own above the list. But it is still a finding *about* particular
+   * rows, and up there it sat above whichever shape happened to sort first —
+   * so the one row it was actually about got no mark at all. Attached to its
+   * own row it says the same thing in the place it applies.
+   */
+  function loopFor(shape: WorkloadShape): HTMLElement | null {
+    const loop = (panel?.report?.loops ?? []).find((l) => l.digests.includes(shape.digest));
+    if (!loop) return null;
 
-      const lead = document.createElement("b");
-      lead.textContent = `${loop.digests.length} shapes on ${loop.table} ran the same number of times`;
+    const box = document.createElement("div");
+    box.className = "wl-loop";
 
-      const body = document.createElement("div");
-      const spread = (loop.spread * 100).toFixed(3);
-      const ms = Math.round(loop.firstSeenSpreadUs / 1000);
-      body.textContent =
-        `${loop.execsHigh.toLocaleString()} down to ${loop.execsLow.toLocaleString()}` +
-        ` — a spread of ${spread}%, first seen ${ms} ms apart.` +
-        ` ${duration(loop.totalSecs)} of server time between them.` +
-        " An index helps the read; only the caller can stop the loop.";
+    const lead = document.createElement("b");
+    lead.textContent = "In a loop.";
 
-      box.append(lead, body);
-      deps.loops.append(box);
-    }
+    const body = document.createElement("div");
+    const spread = (loop.spread * 100).toFixed(3);
+    const ms = Math.round(loop.firstSeenSpreadUs / 1000);
+    body.textContent =
+      `${loop.digests.length} shapes on ${loop.table} ran` +
+      ` ${loop.execsHigh.toLocaleString()} down to ${loop.execsLow.toLocaleString()} times` +
+      ` — a spread of ${spread}%, first seen ${ms} ms apart.` +
+      ` ${duration(loop.totalSecs)} of server time between them.` +
+      " An index helps the read; only the caller can stop the loop.";
+
+    box.append(lead, body);
+    return box;
   }
 
   function cell(text: string, cls: string): HTMLElement {
@@ -294,9 +361,8 @@ export function createWorkload(deps: WorkloadDeps) {
     const box = document.createElement("div");
     box.className = "wl-detail";
 
-    const why = document.createElement("p");
-    why.className = "wl-why";
-    why.textContent = WHY[shape.verdict];
+    // No reason paragraph here any more: it is in the row, visible without a
+    // click, which is the point of the row leading with its verdict.
 
     // textContent, never innerHTML: this is a statement from a server.
     const text = document.createElement("pre");
@@ -322,7 +388,10 @@ export function createWorkload(deps: WorkloadDeps) {
     if (shape.firstSeen) bits.push(`first seen ${shape.firstSeen}`);
     facts.textContent = bits.join(" · ");
 
-    box.append(why, facts, text);
+    box.append(facts, text);
+
+    const loop = loopFor(shape);
+    if (loop) box.append(loop);
 
     // What an index would cost, from the same digests. This is the half an
     // index advisor usually skips, and it is free here.
@@ -491,17 +560,29 @@ export function createWorkload(deps: WorkloadDeps) {
       row.setAttribute("aria-expanded", String(expanded === shape.digest));
       row.title = shape.text;
 
+      // Verdict, then what it cost, then why, then the evidence. The shipped
+      // order was the other way up — statement first, verdict last and
+      // smallest — which made every row look alike until it was opened.
+      const top = document.createElement("div");
+      top.className = "wl-row-top";
+
+      const verdict = document.createElement("span");
+      verdict.className = `wl-verdict ${shape.verdict}`;
+      verdict.textContent = VERDICTS[shape.verdict];
+
+      const total = document.createElement("b");
+      total.className = "wl-total";
+      total.textContent = duration(shape.totalSecs);
+
+      top.append(verdict, total);
+      row.append(top);
+
+      row.append(cell(WHY[shape.verdict], "wl-reason"));
       row.append(cell(shape.text, "wl-shape"));
 
       const facts = document.createElement("div");
       facts.className = "wl-facts-line";
 
-      const verdict = document.createElement("span");
-      verdict.className = `wl-verdict ${shape.verdict}`;
-      verdict.textContent = VERDICTS[shape.verdict];
-      facts.append(verdict);
-
-      facts.append(fact("total", duration(shape.totalSecs), "strong"));
       facts.append(fact("execs", compact(shape.execs)));
       facts.append(fact("examined", compact(shape.rowsExamined), "num"));
       facts.append(
@@ -537,9 +618,12 @@ export function createWorkload(deps: WorkloadDeps) {
 
     const findings = inventory.findings;
     // "Absent" and "none" are different claims and must not read the same.
+    // And neither does "the server would not let us" read the same as "we
+    // sent it something it could not parse" — the reason comes from the
+    // server now rather than being assumed to be a permission.
     const missing = inventory.usageAvailable
       ? ""
-      : " · performance_schema refused, so never-read indexes are not listed";
+      : ` · never-read indexes are not listed: ${inventory.usageRefusal ?? "the usage read did not answer"}`;
     deps.invNote.textContent =
       `${inventory.indexesSeen.toLocaleString()} indexes across ` +
       `${inventory.databases.length} database${inventory.databases.length === 1 ? "" : "s"}` +
@@ -550,7 +634,7 @@ export function createWorkload(deps: WorkloadDeps) {
       empty.className = "wl-empty";
       empty.textContent = inventory.usageAvailable
         ? "Nothing to question: no unread index, no redundant one, no foreign key without support."
-        : "No redundant index and no unsupported foreign key. Whether any index goes unread cannot be read on this connection.";
+        : "No redundant index and no unsupported foreign key. Whether any index goes unread could not be read — see the reason above.";
       deps.inv.append(empty);
       return;
     }
@@ -631,8 +715,22 @@ export function createWorkload(deps: WorkloadDeps) {
     for (const btn of deps.classes.querySelectorAll<HTMLButtonElement>(".seg-btn")) {
       btn.setAttribute("aria-pressed", String(btn.dataset.class === only));
     }
-    for (const btn of deps.sorts.querySelectorAll<HTMLButtonElement>(".seg-btn")) {
-      btn.setAttribute("aria-pressed", String(btn.dataset.sort === sort));
+    deps.sort.value = sort;
+
+    // The counts on the tabs. The index one is the inventory's, which is read
+    // separately — so it is blank until it has been, rather than claiming a
+    // zero that would read as "this server has no indexes".
+    deps.viewCounts.workload.textContent = report ? String(report.shapes.length) : "";
+    deps.viewCounts.indexes.textContent = inventory
+      ? String(inventory.indexesSeen)
+      : "";
+  }
+
+  /** Which list the dock shows. Does nothing when both are on screen. */
+  function paintViews() {
+    deps.panes.dataset.view = view;
+    for (const tab of deps.views.querySelectorAll<HTMLButtonElement>(".wl-view-tab")) {
+      tab.setAttribute("aria-selected", String(tab.dataset.view === view));
     }
   }
 
@@ -686,13 +784,10 @@ export function createWorkload(deps: WorkloadDeps) {
       deps.invNote.textContent = "";
     }
 
+    paintViews();
+
     if (panel?.report) {
-      deps.known.textContent =
-        panel.knownTables > 0
-          ? `${panel.knownTables.toLocaleString()} table names known`
-          : "no schema warmed — views and loops cannot be identified";
-      paintTiles();
-      paintLoops();
+      paintLead();
       paintCounts();
       paintWindows();
       paintList();
@@ -729,11 +824,21 @@ export function createWorkload(deps: WorkloadDeps) {
       );
     }
     if (p.databases.length > 0) bits.push(p.databases.join(", "));
+    // This had a line of its own under the controls. It is the same kind of
+    // fact as the rest of this line — what the reading covers — and it is the
+    // caveat behind two verdicts, so it belongs with them and not above the
+    // list it qualifies.
+    bits.push(
+      p.knownTables > 0
+        ? `${p.knownTables.toLocaleString()} table names known`
+        : "no schema warmed, so views and loops cannot be identified",
+    );
     return bits.join(" · ");
   }
 
   async function load() {
     const connectionId = deps.activeConnection();
+    readFor = connectionId;
     if (!connectionId) {
       panel = null;
       deps.body.hidden = true;
@@ -770,7 +875,15 @@ export function createWorkload(deps: WorkloadDeps) {
     }
   }
 
-  deps.close.onclick = () => deps.setOpen(false);
+  /** Shutting the panel leaves the expanded view first — otherwise the editor
+   *  stays hidden with nothing on screen that could bring it back. Which
+   *  `setOpen` does, for every dock, since §6.16: expanding is the app's
+   *  mechanism and not this panel's. */
+  function shut() {
+    deps.setOpen(false);
+  }
+
+  deps.close.onclick = shut;
   deps.refresh.onclick = () => void load();
   deps.invRun.onclick = () => void loadInventory();
 
@@ -812,13 +925,20 @@ export function createWorkload(deps: WorkloadDeps) {
     paint();
   });
 
-  deps.sorts.addEventListener("click", (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".seg-btn");
-    const next = btn?.dataset.sort as Sort | undefined;
-    if (!next || next === sort) return;
+  deps.sort.addEventListener("change", () => {
+    const next = deps.sort.value as Sort;
+    if (next === sort) return;
     sort = next;
     expanded = null;
     paint();
+  });
+
+  deps.views.addEventListener("click", (e) => {
+    const tab = (e.target as HTMLElement).closest<HTMLButtonElement>(".wl-view-tab");
+    const next = tab?.dataset.view as "workload" | "indexes" | undefined;
+    if (!next || next === view) return;
+    view = next;
+    paintViews();
   });
 
   return {
@@ -830,12 +950,33 @@ export function createWorkload(deps: WorkloadDeps) {
       await load();
     },
     close() {
-      deps.setOpen(false);
+      shut();
+    },
+    /**
+     * Re-read when the active connection changes under an open panel.
+     *
+     * Called from the same place every other per-connection control is
+     * synced, so it fires on far more than a switch — hence the identity
+     * check, which makes it free on every call that changed nothing. Without
+     * it the panel kept showing the server you had left, with a scope line
+     * naming the one you had arrived at.
+     *
+     * A shut panel is left alone: `open` reads unconditionally, so there is
+     * nothing to keep fresh and no reason to spend the queries.
+     */
+    connectionChanged() {
+      if (deps.activeConnection() === readFor) return;
+      if (!deps.isOpen()) return;
+      // The baseline is stored per connection, so "since the baseline" meant
+      // the server being left. Asking for it again here would silently fall
+      // back to the lifetime; asking for the lifetime says so.
+      wanted = "start";
+      void load();
     },
     /** Toggle, for the rail button — which is how every other dock behaves. */
     async toggle() {
       if (deps.isOpen()) {
-        deps.setOpen(false);
+        shut();
         return;
       }
       deps.setOpen(true);

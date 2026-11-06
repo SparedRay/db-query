@@ -1,5 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { calls, connect, CONN_INFO, installBackend, READ_ONLY_CAPS, visit } from "./harness";
+import {
+  type Backend,
+  calls,
+  connect,
+  CONN_INFO,
+  installBackend,
+  MYSQL_CAPS,
+  READ_ONLY_CAPS,
+  visit,
+} from "./harness";
 
 /**
  * Where the server's time goes (Stage 31).
@@ -211,7 +220,7 @@ test("sorting by rows examined reorders without asking the server again", async 
   await open(page);
   const before = (await calls(page)).filter((c) => c.cmd === "workload_read").length;
 
-  await page.click('#wl-sorts .seg-btn[data-sort="execs"]');
+  await page.selectOption("#wl-sort", "execs");
   const rows = page.locator("#wl-list .wl-row");
   // 40.7 M executions beats 3,621, which is the other way round from time.
   await expect(rows.nth(0).locator(".wl-shape")).toContainText("Supplier");
@@ -224,11 +233,17 @@ test("sorting by rows examined reorders without asking the server again", async 
 
 test("a query that returns what it reads is never offered an index", async ({ page }) => {
   await open(page);
-  await page.click("#wl-list .wl-row >> nth=1");
 
+  // The reason is **in the row**, before any click. The shipped panel put the
+  // verdict last and smallest on each row and its reason one click inside, so
+  // every row looked alike until it was opened.
+  const row = page.locator("#wl-list .wl-row").nth(1);
+  await expect(row.locator(".wl-verdict")).toHaveText("no index will help");
+  await expect(row.locator(".wl-reason")).toContainText("returns everything it reads");
+
+  await row.click();
   const detail = page.locator(".wl-detail");
   await expect(detail).toBeVisible();
-  await expect(detail).toContainText("returns everything it reads");
   await expect(detail).not.toContainText("CREATE INDEX");
 });
 
@@ -263,12 +278,186 @@ test("a loop is reported across shapes, not as one row's verdict", async ({ page
     }),
   );
 
-  const loop = page.locator("#wl-loops .wl-loop");
+  // A loop is a finding across rows, but it is *about* particular rows. In a
+  // strip of its own above the list it sat over whichever shape happened to
+  // sort first, and the one row it was actually about carried no mark.
+  const row = page.locator("#wl-list .wl-row").nth(0);
+  await expect(row.locator(".wl-shape")).toContainText("Supplier");
+  await row.click();
+
+  const loop = page.locator(".wl-detail .wl-loop");
   await expect(loop).toBeVisible();
-  await expect(loop).toContainText("3 shapes on supplier ran the same number of times");
+  await expect(loop).toContainText("3 shapes on supplier ran 40,668,477 down to 40,666,497 times");
   await expect(loop).toContainText("140 ms apart");
   await expect(loop).toContainText("82h 53m");
   await expect(loop).toContainText("only the caller can stop the loop");
+
+  // And it is not on the shape it is not about.
+  await row.click();
+  await page.locator("#wl-list .wl-row").nth(1).click();
+  await expect(page.locator(".wl-detail")).toBeVisible();
+  await expect(page.locator(".wl-detail .wl-loop")).toHaveCount(0);
+});
+
+// ------------------------------------------------- the lead, and the tiers
+
+test("the finding is a sentence, above every control", async ({ page }) => {
+  await open(page);
+
+  // What this replaces: four tiles naming a worst shape, a row count, an
+  // index count and a chatter total, with the verdict that explains them
+  // three bands further down. Every number was on screen and the reader had
+  // to write the sentence themselves.
+  const lead = page.locator("#wl-lead");
+  await expect(lead).toContainText("79h 24m");
+  await expect(lead).toContainText("the last 54 days");
+  // The table, from `tables[0]`, which is a server-supplied name — appended as
+  // a text node, never interpolated into markup.
+  await expect(lead).toContainText("one shape on supplier");
+  await expect(lead).toContainText("an index would help it");
+
+  await expect(page.locator("#wl-lead-sub")).toContainText("application shapes do want one");
+
+  // Above the controls, not merely present: a panel that offers you a filter
+  // before it tells you anything has answered the wrong question first.
+  const leadY = (await lead.boundingBox())!.y;
+  const controlY = (await page.locator("#wl-classes").boundingBox())!.y;
+  expect(leadY).toBeLessThan(controlY);
+});
+
+test("a shape whose predicate cannot be indexed says so, and proposes nothing", async ({
+  page,
+}) => {
+  await open(
+    page,
+    panel({
+      report: {
+        ...panel().report,
+        shapes: [
+          {
+            ...CREDITOR_SELECT,
+            verdict: "predicateNotIndexable",
+            text:
+              "SELECT `SupplierId` FROM `Supplier` WHERE `tenant_sub_id` = ? AND ( NAME = ? " +
+              "OR `JSON_CONTAINS` ( `LOWER` ( COALESCE ( ALIAS , ? ) ) , ? ) )",
+          },
+        ],
+        applicationShapes: 1,
+      },
+    }),
+  );
+
+  const row = page.locator("#wl-list .wl-row").nth(0);
+  await expect(row.locator(".wl-verdict")).toHaveText("predicate cannot be indexed");
+  await expect(row.locator(".wl-reason")).toContainText("wraps a column in a function");
+  // The sentence has to carry the consequence, not just the label.
+  await expect(page.locator("#wl-lead")).toContainText("no index can help it");
+
+  // And the scaffold must not go looking for columns to index.
+  await row.click();
+  await page.click(".wl-open");
+  const sql = await page.locator("#editor .cm-content").innerText();
+  expect(sql).toContain("predicate cannot be indexed");
+  expect(sql).not.toContain("CREATE INDEX");
+});
+
+test("expanding hides the editor, and Escape gives it back", async ({ page }) => {
+  await open(page);
+  await expect(page.locator("#main")).toBeVisible();
+
+  await page.click("#wl-expand");
+  await expect(page.locator("#app")).toHaveAttribute("data-full", "wl");
+  await expect(page.locator("#main")).not.toBeVisible();
+  await expect(page.locator("#sidebar")).not.toBeVisible();
+  // The seam has nothing left to drag against.
+  await expect(page.locator("#wlsplit")).not.toBeVisible();
+  // The control stays on screen and says what it will do now. Its drawing is
+  // one icon turned by `aria-pressed`, so the state is what the test asserts;
+  // the words are the accessible name, which the tooltip reads from too.
+  await expect(page.locator("#wl-expand")).toHaveAttribute("aria-label", "Collapse");
+  await expect(page.locator("#wl-expand")).toHaveAttribute("aria-pressed", "true");
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#app")).not.toHaveAttribute("data-full", /.*/);
+  await expect(page.locator("#main")).toBeVisible();
+  await expect(page.locator("#wl-expand")).toHaveAttribute("aria-label", "Expand");
+  await expect(page.locator("#wl-expand")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("the editor is hidden, not closed — its text survives the round trip", async ({ page }) => {
+  await open(page);
+
+  await page.click("#editor .cm-content");
+  await page.keyboard.type("SELECT 1 FROM dual");
+  await expect(page.locator("#editor .cm-content")).toContainText("SELECT 1 FROM dual");
+
+  await page.click("#wl-expand");
+  await expect(page.locator("#main")).not.toBeVisible();
+  await page.keyboard.press("Escape");
+
+  // The head says "with your tabs and text intact", which is a promise about
+  // `display: none` rather than unmounting. CodeMirror re-measures itself on
+  // the way back in — checked against @codemirror/view 6.43.11.
+  await expect(page.locator("#main")).toBeVisible();
+  await expect(page.locator("#editor .cm-content")).toContainText("SELECT 1 FROM dual");
+});
+
+test("expanded, the two lists are siblings and the tabs go away", async ({ page }) => {
+  await connect(page, {
+    workload_read: () => panel(),
+    workload_indexes: () => inventory(),
+  });
+  await page.click("#btn-workload");
+  await expect(page.locator("#wl-pane")).toBeVisible();
+
+  // In the dock one of the two is on screen at a time.
+  await expect(page.locator("#wl-views")).toBeVisible();
+  await expect(page.locator("#wl-workload")).toBeVisible();
+  await expect(page.locator("#wl-indexes")).not.toBeVisible();
+
+  await page.click("#wl-expand");
+  // Nothing is competing for the width, so there is nothing left to switch.
+  await expect(page.locator("#wl-views")).not.toBeVisible();
+  await expect(page.locator("#wl-workload")).toBeVisible();
+  await expect(page.locator("#wl-indexes")).toBeVisible();
+
+  // And the inventory can be read from where it is, without a tab to find.
+  await page.click("#wl-inv-run");
+  await expect(page.locator("#wl-inv .wl-inv-row").first()).toBeVisible();
+  await expect(page.locator("#wl-list .wl-row").first()).toBeVisible();
+});
+
+test("shutting the panel while expanded does not leave the editor hidden", async ({ page }) => {
+  await open(page);
+  await page.click("#wl-expand");
+  await expect(page.locator("#main")).not.toBeVisible();
+
+  // The state this guards against is a shut panel that is also expanded: the
+  // editor hidden behind a pane that is no longer on screen to bring it back.
+  await page.click("#wl-close");
+  await expect(page.locator("#wl-pane")).not.toBeVisible();
+  await expect(page.locator("#app")).not.toHaveAttribute("data-full", /.*/);
+  await expect(page.locator("#main")).toBeVisible();
+});
+
+test("the rail button also leaves the expanded view", async ({ page }) => {
+  await open(page);
+  await page.click("#wl-expand");
+  await expect(page.locator("#main")).not.toBeVisible();
+
+  await page.click("#btn-workload");
+  await expect(page.locator("#wl-pane")).not.toBeVisible();
+  await expect(page.locator("#main")).toBeVisible();
+});
+
+test("Escape with nothing expanded is left for everything else", async ({ page }) => {
+  await open(page);
+  // The handler answers only while the panel is expanded, so it cannot
+  // swallow an Escape meant for a pane behind it.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#wl-pane")).toBeVisible();
+  await expect(page.locator("#main")).toBeVisible();
+  await expect(page.locator("#app")).not.toHaveAttribute("data-full", /.*/);
 });
 
 // ---------------------------------------------------------- never runs DDL
@@ -341,7 +530,9 @@ test("a healthy server does not nag, but an overflowed ring says so", async ({ p
 
 test("a cold schema cache is admitted rather than quietly degrading", async ({ page }) => {
   await open(page, panel({ knownTables: 0 }));
-  await expect(page.locator("#wl-known")).toContainText("no schema warmed");
+  // It had a line of its own under the controls; it is the same kind of fact
+  // as the rest of the scope line, and it is the caveat behind two verdicts.
+  await expect(page.locator("#wl-scope")).toContainText("no schema warmed");
 });
 
 test("the scope line says how much history the counters cover", async ({ page }) => {
@@ -390,6 +581,7 @@ test("with no connection the panel says so rather than failing", async ({ page }
 
 function inventory(over: Record<string, unknown> = {}) {
   return {
+    usageRefusal: null,
     findings: [
       {
         fault: "neverRead",
@@ -437,6 +629,9 @@ async function readInventory(page: Page, result: unknown = inventory()) {
   });
   await page.click("#btn-workload");
   await expect(page.locator("#wl-pane")).toBeVisible();
+  // The inventory is a sibling list now, not a second scroller stacked under
+  // the first one where a 420px column kept it below the fold.
+  await page.click('#wl-views .wl-view-tab[data-view="indexes"]');
   await page.click("#wl-inv-run");
 }
 
@@ -472,16 +667,36 @@ test("an unindexed foreign key proposes a CREATE, and is left unpriced", async (
   await expect(fk.locator(".wl-num")).toHaveText("—");
 });
 
-test("a refused performance_schema leaves never-read absent, not empty", async ({ page }) => {
+test("a refused usage read leaves never-read absent, not empty", async ({ page }) => {
   await readInventory(
     page,
     inventory({
       usageAvailable: false,
+      usageRefusal: "SELECT command denied to user 'app'@'%' for table 'table_io_waits_summary_by_index_usage'",
       findings: [inventory().findings[1]],
     }),
   );
-  await expect(page.locator("#wl-inv-note")).toContainText("performance_schema refused");
-  await expect(page.locator("#wl-inv-note")).toContainText("never-read indexes are not listed");
+  const note = page.locator("#wl-inv-note");
+  await expect(note).toContainText("never-read indexes are not listed");
+  // **What the server said, not what we assumed.** This printed
+  // "performance_schema refused" for every cause, including a malformed query
+  // of our own — which is how a bug in this module gets filed against
+  // somebody's database permissions.
+  await expect(note).toContainText("SELECT command denied");
+});
+
+test("a usage read that failed for our own reasons says so, not 'refused'", async ({ page }) => {
+  await readInventory(
+    page,
+    inventory({
+      usageAvailable: false,
+      usageRefusal: "You have an error in your SQL syntax near 'reads'",
+      findings: [],
+    }),
+  );
+  const note = page.locator("#wl-inv-note");
+  await expect(note).toContainText("error in your SQL syntax");
+  await expect(note).not.toContainText("performance_schema refused");
 });
 
 test("a clean inventory says which of the two claims it is making", async ({ page }) => {
@@ -489,9 +704,12 @@ test("a clean inventory says which of the two claims it is making", async ({ pag
   await expect(page.locator("#wl-inv .wl-empty")).toContainText("Nothing to question");
 
   await page.click("#wl-close");
-  await readInventory(page, inventory({ findings: [], usageAvailable: false }));
+  await readInventory(
+    page,
+    inventory({ findings: [], usageAvailable: false, usageRefusal: "Deadline exceeded" }),
+  );
   await expect(page.locator("#wl-inv .wl-empty")).toContainText(
-    "cannot be read on this connection",
+    "could not be read — see the reason above",
   );
 });
 
@@ -787,4 +1005,161 @@ test("the question names the refusal when there is nothing to index", async ({ p
   expect(asked).toContain("1,511,063,716 rows to return 1,511,063,716");
   // The closing instruction has to leave room for "it is not an index".
   expect(asked).toContain("If it is not, say that instead");
+});
+
+// ------------------------------------------------- it follows the connection
+
+/**
+ * Every number in this panel belongs to one server, and nothing in a reading
+ * says which — so a dock left open across a switch showed the server you had
+ * just left, under a scope line naming the one you had arrived at. Worse than
+ * stale: wrong, and confidently.
+ *
+ * Two saved connections, both connected, so the switch is the real path
+ * (`onActivate` → `syncBusy` → `syncConnLabel`) rather than a poke at the
+ * panel's own entry point.
+ */
+const TWO_SAVED = [
+  {
+    id: "uat",
+    name: "uat",
+    colour: "#22c55e",
+    host: "uat.example.com",
+    port: 3306,
+    user: "app",
+    database: "appdata",
+    allowInvalidCerts: false,
+    rememberPassword: true,
+  },
+  {
+    id: "qa",
+    name: "qa",
+    colour: "#f59e0b",
+    host: "qa.example.com",
+    port: 3306,
+    user: "app",
+    database: "appdata",
+    allowInvalidCerts: false,
+    rememberPassword: true,
+  },
+];
+
+/**
+ * The QA reading: the same server software, a ring nobody has filled.
+ *
+ * `report: null` because that is what the command returns when the diagnosis
+ * is unusable — there is nothing to report on, and an empty report would be
+ * the different claim that the server is idle.
+ */
+function emptyPanel() {
+  return panel({
+    report: null,
+    knownTables: 0,
+    databases: [],
+    diagnosis: {
+      usable: false,
+      headline: "The digest table is empty.",
+      detail:
+        "performance_schema is on and the consumer is enabled, but nothing has been recorded.",
+      readings: { ...READINGS, digestsPresent: 0 },
+    },
+  });
+}
+
+async function twoConnections(page: Page, extra: Backend = {}) {
+  await installBackend(page, {
+    list_profiles: () => ({ profiles: TWO_SAVED, warning: null }),
+    connect_saved: (a) => ({
+      id: a.id as string,
+      serverVersion: "8.4.0",
+      databases: ["appdata"],
+      currentDatabase: "appdata",
+      capabilities: MYSQL_CAPS,
+    }),
+    list_tables: () => [],
+    list_columns: () => [],
+    list_routines: () => [],
+    schema_names: () => ({}),
+    // The panel's whole subject, served per connection. Keyed off the argument
+    // rather than a call counter, so an extra read cannot make this pass.
+    workload_read: (a) => (a.connectionId === "qa" ? emptyPanel() : panel()),
+    ...extra,
+  });
+  await visit(page);
+}
+
+test("switching connection re-reads the panel instead of showing the old server", async ({
+  page,
+}) => {
+  await twoConnections(page);
+
+  await page.locator('.rail-item[title^="uat"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await page.click("#btn-workload");
+  await expect(page.locator("#wl-list .wl-row")).toHaveCount(2);
+  await expect(page.locator("#wl-scope")).toContainText("appdata");
+
+  await page.locator('.rail-item[title^="qa"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(2);
+
+  // No refresh pressed. The dock stays open — shutting it would be a second
+  // way of being wrong — and what is in it is now QA's reading.
+  await expect(page.locator("#wl-pane")).toBeVisible();
+  await expect(page.locator("#wl-headline")).toContainText("The digest table is empty");
+  await expect(page.locator("#wl-body")).toBeHidden();
+  const reads = (await calls(page)).filter((c) => c.cmd === "workload_read");
+  expect(reads.map((c) => (c.args as { connectionId: string }).connectionId)).toEqual([
+    "uat",
+    "qa",
+  ]);
+});
+
+test("a shut dock spends nothing on a switch", async ({ page }) => {
+  await twoConnections(page);
+
+  await page.locator('.rail-item[title^="uat"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await page.locator('.rail-item[title^="qa"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(2);
+
+  // Opening reads unconditionally, so there is nothing for a shut panel to
+  // keep fresh — and the sync that notices the switch runs on far more than
+  // a switch.
+  expect((await calls(page)).filter((c) => c.cmd === "workload_read")).toHaveLength(0);
+
+  await page.click("#btn-workload");
+  await expect(page.locator("#wl-headline")).toContainText("The digest table is empty");
+});
+
+test("switching connection forgets the other server's baseline window", async ({ page }) => {
+  const TAKEN = Math.floor(Date.now() / 1000) - 600;
+  await twoConnections(page, {
+    workload_baseline_set: () => TAKEN,
+    workload_read: (a) =>
+      a.connectionId === "qa"
+        ? emptyPanel()
+        : panel({ baselineAt: TAKEN, windowed: a.sinceBaseline === true }),
+  });
+
+  await page.locator('.rail-item[title^="uat"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await page.click("#btn-workload");
+  // Taking it is what selects the window, so this is the state a switch has
+  // to clear rather than one the test sets by hand.
+  await page.click("#wl-baseline");
+  await expect(page.locator('#wl-windows .seg-btn[data-window="baseline"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // A baseline is stored per connection, so asking for "since the baseline"
+  // after a switch asks about a server you are no longer on — and the answer
+  // would quietly be the lifetime anyway. Asking for the lifetime says so.
+  await page.locator('.rail-item[title^="qa"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(2);
+
+  const reads = (await calls(page)).filter((c) => c.cmd === "workload_read");
+  const last = reads[reads.length - 1].args as { connectionId: string; sinceBaseline: boolean };
+  expect(last.connectionId).toBe("qa");
+  expect(last.sinceBaseline).toBe(false);
 });

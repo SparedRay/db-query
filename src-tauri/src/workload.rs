@@ -192,6 +192,18 @@ pub enum Verdict {
     /// Reads far more than it returns, and at least some executions found no
     /// index. The only verdict that proposes an index.
     MissingIndex,
+    /// Reads far more than it returns, and would be [`Verdict::MissingIndex`]
+    /// except that the filter wraps a column in a function call. No b-tree
+    /// index can serve that, so this proposes nothing.
+    ///
+    /// **This verdict exists because the panel was wrong.** The most
+    /// expensive shape on the UAT server -- 41M executions, 79h 24m, 2,599
+    /// rows read per row returned -- was reported as a missing index on
+    /// 2026-11-05, and its filter is
+    /// `NAME = ? OR JSON_CONTAINS(LOWER(COALESCE(ALIAS, ?)), ...)`. Any index
+    /// built on that advice would have gone unused, on the one statement
+    /// where the cost of being wrong was highest.
+    PredicateNotIndexable,
     /// Returns everything it reads. A full scan is not a mistake here.
     NoIndexWillHelp,
     /// The target is a view, so the predicate cannot reach the base tables.
@@ -446,6 +458,180 @@ pub fn classify(row: &DigestRow, known: &KnownTables) -> Finding {
     }
 }
 
+/// Functions that make the thing inside them unreachable by a b-tree index.
+///
+/// Not "every function MySQL has": only the ones that turn a column into a
+/// computed value. An index stores the column, so a predicate on
+/// `LOWER(col)` cannot use it -- MySQL would have to compute `LOWER` for
+/// every row first, which is the scan this panel is trying to explain.
+///
+/// Deliberately a list and not a parser. This app does not parse SQL, and
+/// §6.2 is the record of how badly verdict ordering goes when a rule reaches
+/// past what it can actually see.
+const WRAPPERS: &[&str] = &[
+    "abs",
+    "cast",
+    "ceil",
+    "ceiling",
+    "char_length",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "convert",
+    "date",
+    "date_format",
+    "day",
+    "floor",
+    "hex",
+    "if",
+    "ifnull",
+    "json_contains",
+    "json_extract",
+    "json_overlaps",
+    "json_search",
+    "json_unquote",
+    "left",
+    "length",
+    "lower",
+    "lpad",
+    "ltrim",
+    "md5",
+    "month",
+    "nullif",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "sha1",
+    "sha2",
+    "soundex",
+    "substr",
+    "substring",
+    "trim",
+    "unhex",
+    "upper",
+    "year",
+];
+
+/// Words that look like identifiers but name no column.
+const NOT_A_COLUMN: &[&str] = &[
+    "and", "as", "binary", "between", "case", "char", "datetime", "decimal", "distinct", "div",
+    "else", "end", "escape", "false", "in", "integer", "interval", "is", "like", "mod", "not",
+    "null", "or", "regexp", "rlike", "signed", "then", "time", "true", "unsigned", "when", "xor",
+];
+
+/// The next word in `hay` at or after `from`, and where it ended.
+///
+/// Backtick-quoted names count as one word with the quotes stripped, because
+/// a digest renders both columns and function names that way:
+/// `` `JSON_CONTAINS` ( `LOWER` ( COALESCE ( ALIAS , ? ) ) ) ``.
+fn next_word(hay: &str, from: usize) -> Option<(&str, usize)> {
+    let b = hay.as_bytes();
+    let mut i = from;
+    while i < b.len() {
+        if b[i] == b'`' {
+            let close = hay[i + 1..].find('`')? + i + 1;
+            return Some((&hay[i + 1..close], close + 1));
+        }
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            return Some((&hay[start..i], i));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The text inside the parentheses that open at `open`, or `None` if they
+/// never close.
+fn balanced(hay: &str, open: usize) -> Option<&str> {
+    let b = hay.as_bytes();
+    debug_assert_eq!(b[open], b'(');
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&hay[open + 1..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether `args` names a column, as opposed to being made of placeholders,
+/// keywords and nested calls.
+///
+/// This is what tells `LOWER(COALESCE(ALIAS, ?))` -- which hides a column --
+/// from `LOWER(?)`, which hides nothing and is perfectly indexable on the
+/// other side of the comparison.
+fn mentions_a_column(args: &str) -> bool {
+    let mut at = 0;
+    while let Some((word, end)) = next_word(args, at) {
+        at = end;
+        let w = word.to_ascii_lowercase();
+        if WRAPPERS.contains(&w.as_str()) || NOT_A_COLUMN.contains(&w.as_str()) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Whether the `WHERE` clause wraps one of its own columns in a function.
+///
+/// # What it can get wrong
+///
+/// It reads the whole `WHERE` clause and does not know which side of a
+/// comparison it is on, so `WHERE col = ? AND other = LOWER(col2)` answers
+/// yes even though an index on `col` would still help. That is tolerable
+/// because of **where this is called from**: only in the branch that was
+/// about to say [`Verdict::MissingIndex`], which already requires the server
+/// to be reading a hundred rows for every one it returns *and* to have found
+/// no index on some executions. A sargable branch that was keeping the shape
+/// healthy would not leave those counters looking like that.
+///
+/// It also only looks after `WHERE`, so a wrapped column in a `JOIN ... ON`
+/// or a `HAVING` is missed. Those are false negatives: the verdict falls back
+/// to `MissingIndex`, which is what it said before this existed.
+fn wraps_a_column(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let Some(w) = lower.find(" where ") else {
+        return false;
+    };
+    let hay = &lower[w + " where ".len()..];
+
+    let mut at = 0;
+    while let Some((word, end)) = next_word(hay, at) {
+        at = end;
+        if !WRAPPERS.contains(&word) {
+            continue;
+        }
+        // The call's parenthesis, if this word is one.
+        let rest = hay[end..].trim_start();
+        if !rest.starts_with('(') {
+            continue;
+        }
+        let open = end + hay[end..].find('(').expect("just checked");
+        match balanced(hay, open) {
+            Some(args) if mentions_a_column(args) => return true,
+            _ => continue,
+        }
+    }
+    false
+}
+
 fn verdict_of(
     row: &DigestRow,
     cands: &[String],
@@ -485,9 +671,14 @@ fn verdict_of(
         }
     }
 
-    // 5. Only now.
+    // 5. Only now. And an index can only be used if the filter leaves the
+    //    column alone, so the last thing checked before proposing one is
+    //    whether a proposal could be used at all.
     if let Some(ratio) = row.ratio() {
         if ratio > RATIO_WANTS_INDEX && (row.no_index > 0 || row.scans > 0) {
+            if wraps_a_column(&row.text) {
+                return Verdict::PredicateNotIndexable;
+            }
             return Verdict::MissingIndex;
         }
     }
@@ -771,40 +962,85 @@ fn major_version(version: Option<&str>) -> u32 {
 ///
 /// `DIGEST_TEXT IS NOT NULL` drops exactly one row: the bucket the server uses
 /// when the ring overflows, which is a counter rather than a statement.
-pub(crate) async fn mysql_workload(server: &ServerConn) -> Result<Vec<DigestRow>, String> {
-    let eight = major_version(server.server_version.as_deref()) >= 8;
+/// How long a read of this panel's may take before the **server** stops it.
+///
+/// Every query in this module runs on `ServerConn::mysql_meta`, which is one
+/// connection behind one mutex, shared with the schema tree and autocomplete.
+/// A statement that never returns holds that mutex for the rest of the
+/// session, and there is no cancel path for it at all: `KILL QUERY` targets a
+/// *tab's* connection id, and this connection has none. Schema browsing and
+/// completion would simply stop working, with nothing to click.
+///
+/// So the deadline is handed to the server rather than kept here. A client-side
+/// timeout would be worse than useless: it abandons a connection mid-protocol,
+/// and this is the connection that cannot be abandoned.
+///
+/// 15 seconds is well past interactive and well short of a lunch break. The
+/// panel's own reads answer in milliseconds; this is for the ones that never
+/// answer at all.
+///
+/// **Measured, not hypothetical.** `information_schema.STATISTICS` over two
+/// schemas never returned on the UAT instance (2026-11-05). See section 6.9 of
+/// `docs/stage-31-where-the-time-goes.md`.
+const DEADLINE_MS: u32 = 15_000;
 
-    // `QUANTILE_95` arrived in MySQL 8.0 — the same version-gated column list
-    // `schema.rs` already builds for `VIEW_TABLE_USAGE`. Tail latency matters
-    // more than the mean for a shape that is usually fine and occasionally
-    // terrible, so it is taken where it exists rather than asked for and
-    // recovered from.
+/// `MAX_EXECUTION_TIME` as an optimizer hint.
+///
+/// Built from [`DEADLINE_MS`] rather than written out, so the number in the SQL
+/// and the number in the sentence shown when it fires cannot drift apart.
+fn deadline() -> String {
+    format!("/*+ MAX_EXECUTION_TIME({DEADLINE_MS}) */")
+}
+
+/// `ER_QUERY_TIMEOUT`. It can only reach us from the hint above -- nothing else
+/// in this app sets a statement deadline.
+const DEADLINE_CODE: &str = "3024";
+
+/// The digest read.
+///
+/// Pure so that the version gate and the deadline are both testable without a
+/// server — which is the half of this module that had no test at all until the
+/// probe was finally run against one.
+///
+/// `QUANTILE_95` arrived in MySQL 8.0 — the same version-gated column list
+/// `schema.rs` already builds for `VIEW_TABLE_USAGE`. Tail latency matters more
+/// than the mean for a shape that is usually fine and occasionally terrible, so
+/// it is taken where it exists rather than asked for and recovered from.
+///
+/// A server too old to understand the hint ignores it with a warning instead of
+/// failing, so unlike the quantile it needs no gate of its own.
+fn digest_sql(eight: bool) -> String {
     let quantile = if eight { "QUANTILE_95" } else { "NULL" };
-
-    let sql = format!(
-        "SELECT SCHEMA_NAME AS db, \
-                DIGEST AS digest, \
-                DIGEST_TEXT AS text, \
-                COUNT_STAR AS execs, \
-                SUM_TIMER_WAIT AS total_picos, \
-                AVG_TIMER_WAIT AS avg_picos, \
-                SUM_LOCK_TIME AS lock_picos, \
-                SUM_ERRORS AS errors, \
-                SUM_ROWS_SENT AS rows_sent, \
-                SUM_ROWS_EXAMINED AS rows_examined, \
-                SUM_NO_INDEX_USED AS no_index, \
-                SUM_SELECT_SCAN AS scans, \
-                SUM_SORT_SCAN AS sort_scans, \
-                SUM_CREATED_TMP_DISK_TABLES AS tmp_disk, \
-                {quantile} AS q95, \
-                DATE_FORMAT(FIRST_SEEN, '%Y-%m-%d %H:%i:%s') AS first_seen, \
-                DATE_FORMAT(LAST_SEEN, '%Y-%m-%d %H:%i:%s') AS last_seen, \
-                CAST(UNIX_TIMESTAMP(FIRST_SEEN) * 1000000 AS UNSIGNED) AS first_us, \
-                CAST(UNIX_TIMESTAMP(LAST_SEEN) * 1000000 AS UNSIGNED) AS last_us \
+    format!(
+        "SELECT {} \
+                SCHEMA_NAME AS `db`, \
+                DIGEST AS `digest`, \
+                DIGEST_TEXT AS `text`, \
+                COUNT_STAR AS `execs`, \
+                SUM_TIMER_WAIT AS `total_picos`, \
+                AVG_TIMER_WAIT AS `avg_picos`, \
+                SUM_LOCK_TIME AS `lock_picos`, \
+                SUM_ERRORS AS `errors`, \
+                SUM_ROWS_SENT AS `rows_sent`, \
+                SUM_ROWS_EXAMINED AS `rows_examined`, \
+                SUM_NO_INDEX_USED AS `no_index`, \
+                SUM_SELECT_SCAN AS `scans`, \
+                SUM_SORT_SCAN AS `sort_scans`, \
+                SUM_CREATED_TMP_DISK_TABLES AS `tmp_disk`, \
+                {quantile} AS `q95`, \
+                DATE_FORMAT(FIRST_SEEN, '%Y-%m-%d %H:%i:%s') AS `first_seen`, \
+                DATE_FORMAT(LAST_SEEN, '%Y-%m-%d %H:%i:%s') AS `last_seen`, \
+                CAST(UNIX_TIMESTAMP(FIRST_SEEN) * 1000000 AS UNSIGNED) AS `first_us`, \
+                CAST(UNIX_TIMESTAMP(LAST_SEEN) * 1000000 AS UNSIGNED) AS `last_us` \
            FROM performance_schema.events_statements_summary_by_digest \
           WHERE DIGEST_TEXT IS NOT NULL \
-          ORDER BY SUM_TIMER_WAIT DESC"
-    );
+          ORDER BY SUM_TIMER_WAIT DESC",
+        deadline()
+    )
+}
+
+pub(crate) async fn mysql_workload(server: &ServerConn) -> Result<Vec<DigestRow>, String> {
+    let sql = digest_sql(major_version(server.server_version.as_deref()) >= 8);
 
     let rows = {
         let mut meta = server.mysql_meta().await?;
@@ -866,8 +1102,21 @@ pub struct IndexRow {
     pub database: String,
     pub table: String,
     pub name: String,
-    /// Columns in key order.
-    pub columns: Vec<String>,
+    /// Key parts in key order. `None` is a **functional key part** -- an
+    /// expression rather than a column.
+    ///
+    /// `information_schema.STATISTICS` reports `COLUMN_NAME` as `NULL` for
+    /// one of those and does not say what the expression is. Measured on
+    /// 2026-11-06: six such parts across both servers, including
+    /// `uq_reconciliation_config_scope`, whose first two parts are
+    /// expressions and whose third is `entity_type`.
+    ///
+    /// They were silently dropped before, which cost five true redundancy
+    /// findings and described that index as leading with `entity_type` when
+    /// it does not. `None` is not "no column": it is "a key part we cannot
+    /// read", and the two rules below refuse to conclude anything that would
+    /// need to know what it is.
+    pub columns: Vec<Option<String>>,
     pub unique: bool,
 }
 
@@ -940,11 +1189,20 @@ pub fn redundant(indexes: &[IndexRow]) -> Vec<(IndexRow, String)> {
             if a.columns.len() >= b.columns.len() {
                 continue;
             }
-            let prefix = a
-                .columns
-                .iter()
-                .zip(b.columns.iter())
-                .all(|(x, y)| x.eq_ignore_ascii_case(y));
+            // **An expression is opaque, and two opaque parts are not known
+            // to be equal.** So `a` may not contain one: proposing that an
+            // index be dropped means claiming another one covers it, and that
+            // claim cannot be made about a key part whose expression
+            // `STATISTICS` does not report. An expression in `b` *beyond*
+            // `a`'s length is harmless -- nothing is being compared to it.
+            let prefix = a.columns.len() <= b.columns.len()
+                && a.columns
+                    .iter()
+                    .zip(b.columns.iter())
+                    .all(|(x, y)| match (x, y) {
+                        (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+                        _ => false,
+                    });
             if !prefix {
                 continue;
             }
@@ -974,6 +1232,12 @@ pub fn redundant(indexes: &[IndexRow]) -> Vec<(IndexRow, String)> {
 /// An index counts as support when the key's columns are its **leading
 /// prefix**, in order. A key on `(a, b)` is supported by an index on
 /// `(a, b, c)` and not by one on `(b, a)`.
+///
+/// A functional key part cannot support a column. `STATISTICS` does not say
+/// what the expression is, so an index on `((expr), (expr), entity_type)`
+/// supports nothing this can name -- and before expressions were represented
+/// at all, that index read as one on `(entity_type)` and would have been
+/// counted as support for a foreign key it does not serve.
 pub fn unindexed_foreign_keys(keys: &[IndexRow], indexes: &[IndexRow]) -> Vec<IndexRow> {
     keys.iter()
         .filter(|key| {
@@ -985,7 +1249,10 @@ pub fn unindexed_foreign_keys(keys: &[IndexRow], indexes: &[IndexRow]) -> Vec<In
                         .columns
                         .iter()
                         .zip(idx.columns.iter())
-                        .all(|(k, i)| k.eq_ignore_ascii_case(i))
+                        .all(|(k, i)| match (k, i) {
+                            (Some(k), Some(i)) => k.eq_ignore_ascii_case(i),
+                            _ => false,
+                        })
             })
         })
         .cloned()
@@ -1017,7 +1284,7 @@ pub fn index_findings(
                 i.table.eq_ignore_ascii_case(&use_row.table)
                     && i.name.eq_ignore_ascii_case(&use_row.name)
             })
-            .map(|i| i.columns.clone())
+            .map(|i| shown(&i.columns))
             .unwrap_or_default();
         out.push(IndexFinding {
             fault: IndexFault::NeverRead,
@@ -1039,14 +1306,24 @@ pub fn index_findings(
             database: index.database,
             table: index.table,
             name: index.name,
-            columns: index.columns,
+            columns: shown(&index.columns),
             covered_by: Some(covered_by),
         });
     }
 
     for key in unindexed_keys {
-        let cols = key
+        // `KEY_COLUMN_USAGE` has no functional parts -- a foreign key is on
+        // columns -- but this writes a `CREATE INDEX` somebody will run, so
+        // anything unreadable here is skipped rather than guessed at.
+        let Some(names) = key
             .columns
+            .iter()
+            .map(|c| c.clone())
+            .collect::<Option<Vec<String>>>()
+        else {
+            continue;
+        };
+        let cols = names
             .iter()
             .map(|c| quote(c))
             .collect::<Vec<_>>()
@@ -1055,7 +1332,7 @@ pub fn index_findings(
             fault: IndexFault::UnindexedForeignKey,
             statement: format!(
                 "CREATE INDEX {} ON {}.{} ({cols});",
-                quote(&format!("idx_{}_{}", key.table, key.columns.join("_"))),
+                quote(&format!("idx_{}_{}", key.table, names.join("_"))),
                 quote(&key.database),
                 quote(&key.table),
             ),
@@ -1063,12 +1340,25 @@ pub fn index_findings(
             database: key.database.clone(),
             table: key.table.clone(),
             name: key.name.clone(),
-            columns: key.columns.clone(),
+            columns: names,
             covered_by: None,
         });
     }
 
     out
+}
+
+/// Key parts as a person should read them.
+///
+/// An expression is named rather than left blank. `IndexFinding::columns`
+/// crosses into the UI, where a blank would read as "this index has no
+/// columns" -- a different and wronger claim than "this part is an
+/// expression we cannot see".
+fn shown(columns: &[Option<String>]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|c| c.clone().unwrap_or_else(|| "(expression)".into()))
+        .collect()
 }
 
 /// A MySQL identifier, with an embedded backtick doubled.
@@ -1287,6 +1577,83 @@ fn placeholders(n: usize) -> String {
     std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
 }
 
+/// Why the index inventory has nothing to show.
+///
+/// Worth its own sentence rather than relaying `ER_QUERY_TIMEOUT`, because the
+/// distinction the person needs is *which half failed*: the workload above is
+/// still true, and saying so stops a slow `information_schema` from reading as
+/// a broken panel.
+fn inventory_refused(e: &sqlx::Error) -> String {
+    let code = match e {
+        sqlx::Error::Database(db) => db.code().map(|c| c.to_string()),
+        _ => None,
+    };
+    refusal_text(code.as_deref(), || friendly(e))
+}
+
+/// Split from [`inventory_refused`] so the deadline branch is reachable in a
+/// test: a `sqlx::Error::Database` cannot be constructed outside the driver, so
+/// a test that went through the `sqlx::Error` would only ever exercise the
+/// fallback and claim to have checked both.
+fn refusal_text(code: Option<&str>, otherwise: impl FnOnce() -> String) -> String {
+    if code == Some(DEADLINE_CODE) {
+        return format!(
+            "Listing indexes took longer than the {} seconds this read is given, so the \
+             server stopped it. On some servers information_schema.STATISTICS has to open \
+             every table in the schema to answer. The workload above is unaffected: that \
+             comes from a table already in memory.",
+            DEADLINE_MS / 1000
+        );
+    }
+    otherwise()
+}
+
+/// Every index on the named databases, columns in key order.
+///
+/// **The one that made [`DEADLINE`] necessary.** On the UAT instance this never
+/// came back: not slow, not refused, just gone, taking the shared connection
+/// with it (2026-11-05).
+fn indexes_sql(dbs: usize) -> String {
+    format!(
+        "SELECT {} \
+                TABLE_SCHEMA AS `db`, TABLE_NAME AS `tbl`, INDEX_NAME AS `idx`, \
+                COLUMN_NAME AS `col`, NON_UNIQUE AS `non_unique` \
+           FROM information_schema.STATISTICS \
+          WHERE TABLE_SCHEMA IN ({}) \
+          ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
+        deadline(),
+        placeholders(dbs)
+    )
+}
+
+/// How often each index has actually been read.
+fn index_use_sql(dbs: usize) -> String {
+    format!(
+        "SELECT {} \
+                OBJECT_SCHEMA AS `db`, OBJECT_NAME AS `tbl`, INDEX_NAME AS `idx`, \
+                COUNT_READ AS `reads` \
+           FROM performance_schema.table_io_waits_summary_by_index_usage \
+          WHERE INDEX_NAME IS NOT NULL AND OBJECT_SCHEMA IN ({})",
+        deadline(),
+        placeholders(dbs)
+    )
+}
+
+/// Every foreign key's child columns, in order.
+fn foreign_keys_sql(dbs: usize) -> String {
+    format!(
+        "SELECT {} \
+                CONSTRAINT_SCHEMA AS `db`, TABLE_NAME AS `tbl`, \
+                CONSTRAINT_NAME AS `name`, COLUMN_NAME AS `col` \
+           FROM information_schema.KEY_COLUMN_USAGE \
+          WHERE REFERENCED_TABLE_NAME IS NOT NULL \
+            AND CONSTRAINT_SCHEMA IN ({}) \
+          ORDER BY CONSTRAINT_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        deadline(),
+        placeholders(dbs)
+    )
+}
+
 /// Every index on the named databases, columns in key order.
 ///
 /// `information_schema` only — so this works on a connection that cannot read
@@ -1298,14 +1665,7 @@ pub(crate) async fn mysql_indexes(
     if dbs.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!(
-        "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS tbl, INDEX_NAME AS idx, \
-                COLUMN_NAME AS col, NON_UNIQUE AS non_unique \
-           FROM information_schema.STATISTICS \
-          WHERE TABLE_SCHEMA IN ({}) \
-          ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
-        placeholders(dbs.len())
-    );
+    let sql = indexes_sql(dbs.len());
 
     let rows = {
         let mut meta = server.mysql_meta().await?;
@@ -1315,36 +1675,64 @@ pub(crate) async fn mysql_indexes(
         for db in dbs {
             q = q.bind(db);
         }
-        q.fetch_all(&mut *meta).await.map_err(|e| friendly(&e))?
+        q.fetch_all(&mut *meta)
+            .await
+            .map_err(|e| inventory_refused(&e))?
     };
 
     let mut out: Vec<IndexRow> = Vec::new();
     for r in rows {
-        let (Ok(db), Ok(tbl), Ok(idx), Ok(col)) = (
+        let (Ok(db), Ok(tbl), Ok(idx)) = (
             r.try_get::<String, _>("db"),
             r.try_get::<String, _>("tbl"),
             r.try_get::<String, _>("idx"),
-            r.try_get::<String, _>("col"),
         ) else {
             continue;
         };
+        // **`Option<String>`, not `String`.** `COLUMN_NAME` is `NULL` for a
+        // functional key part, and reading it as a `String` made the whole
+        // row fail to decode -- so the part was dropped and the index arrived
+        // narrower than it is. Measured against both servers on 2026-11-06:
+        // six parts lost, five true redundancy findings with them, and
+        // `uq_reconciliation_config_scope` reported as leading with its third
+        // key part.
+        let col = r.try_get::<Option<String>, _>("col").unwrap_or(None);
         let unique = r.try_get::<i64, _>("non_unique").unwrap_or(1) == 0;
-
-        // The query is ordered, so a continuing index is always the last one.
-        match out.last_mut() {
-            Some(last) if last.database == db && last.table == tbl && last.name == idx => {
-                last.columns.push(col);
-            }
-            _ => out.push(IndexRow {
-                database: db,
-                table: tbl,
-                name: idx,
-                columns: vec![col],
-                unique,
-            }),
-        }
+        fold_part(&mut out, db, tbl, idx, col, unique);
     }
     Ok(out)
+}
+
+/// Add one key part to the index being built, or start a new index.
+///
+/// Split out of [`mysql_indexes`] so the `None` case is reachable in a test.
+/// A `sqlx::Row` cannot be constructed outside the driver, so a test that
+/// went through the decode would only ever exercise whichever branch the
+/// fixture happened to take -- which is exactly how a dropped functional key
+/// part survived to be found by a live server instead.
+///
+/// The query is ordered by index and key position, so a continuing index is
+/// always the last one added.
+fn fold_part(
+    out: &mut Vec<IndexRow>,
+    db: String,
+    tbl: String,
+    idx: String,
+    col: Option<String>,
+    unique: bool,
+) {
+    match out.last_mut() {
+        Some(last) if last.database == db && last.table == tbl && last.name == idx => {
+            last.columns.push(col);
+        }
+        _ => out.push(IndexRow {
+            database: db,
+            table: tbl,
+            name: idx,
+            columns: vec![col],
+            unique,
+        }),
+    }
 }
 
 /// How often each index has actually been read.
@@ -1359,13 +1747,7 @@ pub(crate) async fn mysql_index_use(
     if dbs.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!(
-        "SELECT OBJECT_SCHEMA AS db, OBJECT_NAME AS tbl, INDEX_NAME AS idx, \
-                COUNT_READ AS reads \
-           FROM performance_schema.table_io_waits_summary_by_index_usage \
-          WHERE INDEX_NAME IS NOT NULL AND OBJECT_SCHEMA IN ({})",
-        placeholders(dbs.len())
-    );
+    let sql = index_use_sql(dbs.len());
 
     let rows = {
         let mut meta = server.mysql_meta().await?;
@@ -1405,15 +1787,7 @@ pub(crate) async fn mysql_foreign_keys(
     if dbs.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!(
-        "SELECT CONSTRAINT_SCHEMA AS db, TABLE_NAME AS tbl, \
-                CONSTRAINT_NAME AS name, COLUMN_NAME AS col \
-           FROM information_schema.KEY_COLUMN_USAGE \
-          WHERE REFERENCED_TABLE_NAME IS NOT NULL \
-            AND CONSTRAINT_SCHEMA IN ({}) \
-          ORDER BY CONSTRAINT_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
-        placeholders(dbs.len())
-    );
+    let sql = foreign_keys_sql(dbs.len());
 
     let rows = {
         let mut meta = server.mysql_meta().await?;
@@ -1426,6 +1800,9 @@ pub(crate) async fn mysql_foreign_keys(
 
     let mut out: Vec<IndexRow> = Vec::new();
     for r in rows {
+        // `KEY_COLUMN_USAGE.COLUMN_NAME` is never `NULL` -- a foreign key is
+        // on columns, not expressions -- so a missing one here is a row that
+        // did not decode and is still dropped.
         let (Ok(db), Ok(tbl), Ok(name), Ok(col)) = (
             r.try_get::<String, _>("db"),
             r.try_get::<String, _>("tbl"),
@@ -1436,13 +1813,13 @@ pub(crate) async fn mysql_foreign_keys(
         };
         match out.last_mut() {
             Some(last) if last.database == db && last.table == tbl && last.name == name => {
-                last.columns.push(col);
+                last.columns.push(Some(col));
             }
             _ => out.push(IndexRow {
                 database: db,
                 table: tbl,
                 name,
-                columns: vec![col],
+                columns: vec![Some(col)],
                 unique: false,
             }),
         }
@@ -1458,9 +1835,17 @@ pub(crate) async fn mysql_foreign_keys(
 pub struct IndexScan {
     pub indexes: Vec<IndexRow>,
     pub uses: Vec<IndexUse>,
-    /// `false` when `performance_schema` refused, so "never read" is simply
+    /// `false` when the usage read did not answer, so "never read" is simply
     /// absent rather than wrongly empty. The structural faults still stand.
     pub usage_available: bool,
+    /// **Why** it did not answer, when it did not.
+    ///
+    /// This was `Err(_)` -- the reason thrown away and the panel left saying
+    /// "performance_schema refused" whatever had happened. A privilege wall,
+    /// a deadline and a malformed query are three different things, and the
+    /// third one is ours. Reporting all three as the first is how a bug in
+    /// this module gets filed against somebody's database permissions.
+    pub usage_refusal: Option<String>,
     pub foreign_keys: Vec<IndexRow>,
 }
 
@@ -1476,14 +1861,15 @@ pub(crate) async fn mysql_index_scan(
 ) -> Result<IndexScan, String> {
     let indexes = mysql_indexes(server, dbs).await?;
     let foreign_keys = mysql_foreign_keys(server, dbs).await?;
-    let (uses, usage_available) = match mysql_index_use(server, dbs).await {
-        Ok(u) => (u, true),
-        Err(_) => (Vec::new(), false),
+    let (uses, usage_available, usage_refusal) = match mysql_index_use(server, dbs).await {
+        Ok(u) => (u, true, None),
+        Err(e) => (Vec::new(), false, Some(e)),
     };
     Ok(IndexScan {
         indexes,
         uses,
         usage_available,
+        usage_refusal,
         foreign_keys,
     })
 }
@@ -1507,6 +1893,92 @@ async fn show_status(meta: &mut sqlx::MySqlConnection, name: &'static str) -> Op
 mod tests {
     use super::*;
     use crate::schema::TableRef;
+
+    // ------------------------------------------------- the SQL this module sends
+    //
+    // Pure builders, so the parts that cannot be unit-tested against a server
+    // are at least pinned here. Until the probe was run on 2026-11-05 none of
+    // this SQL had been executed anywhere, and these three tests are what that
+    // taught: the hint has to be first, the quantile has to be gated, and a
+    // bound value has to have a placeholder waiting for it.
+
+    /// **Every read in this module shares one connection with the schema tree,
+    /// and that connection cannot be cancelled.** So each must carry its own
+    /// deadline, and an optimizer hint only counts if it comes straight after
+    /// `SELECT` -- anywhere else MySQL takes it for a comment and ignores it.
+    #[test]
+    fn every_shared_read_carries_its_deadline_in_the_only_place_it_works() {
+        let reads = [
+            ("digest, 8.0", digest_sql(true)),
+            ("digest, pre-8.0", digest_sql(false)),
+            ("indexes", indexes_sql(2)),
+            ("index use", index_use_sql(2)),
+            ("foreign keys", foreign_keys_sql(2)),
+        ];
+        let want = format!("SELECT {} ", deadline());
+        for (name, sql) in reads {
+            assert!(
+                sql.starts_with(&want),
+                "{name} has no deadline where MySQL would read one: {sql}"
+            );
+        }
+        assert!(
+            deadline().contains("MAX_EXECUTION_TIME"),
+            "the deadline has to be the server's, not ours: a client-side one \
+             abandons the shared connection, which is the thing being protected"
+        );
+    }
+
+    /// `QUANTILE_95` does not exist before 8.0, and asking for a column that is
+    /// not there fails the whole read rather than losing one value.
+    #[test]
+    fn the_quantile_is_asked_for_only_where_it_exists() {
+        assert!(digest_sql(true).contains("QUANTILE_95 AS `q95`"));
+        let old = digest_sql(false);
+        assert!(!old.contains("QUANTILE_95"), "{old}");
+        assert!(old.contains("NULL AS `q95`"), "{old}");
+    }
+
+    /// Every database name is bound, so every one needs a placeholder. A count
+    /// that drifts binds a value to nothing and the server rejects the read.
+    #[test]
+    fn one_placeholder_per_database_in_every_inventory_read() {
+        for n in [1_usize, 2, 7] {
+            assert_eq!(indexes_sql(n).matches('?').count(), n);
+            assert_eq!(index_use_sql(n).matches('?').count(), n);
+            assert_eq!(foreign_keys_sql(n).matches('?').count(), n);
+        }
+        // The digest read has no predicate at all, so it binds nothing.
+        assert_eq!(digest_sql(true).matches('?').count(), 0);
+    }
+
+    /// The panel has to be able to say *which half* is missing: a refused
+    /// inventory beside a true workload is not a broken panel.
+    #[test]
+    fn a_deadline_on_the_inventory_explains_itself() {
+        let hit = refusal_text(Some(DEADLINE_CODE), || "raw driver text".into());
+        assert!(hit.contains("15 seconds"), "{hit}");
+        assert!(
+            hit.contains("workload above is unaffected"),
+            "the point of the sentence is which half still holds: {hit}"
+        );
+        // Everything else is relayed untouched -- a privilege error is not a
+        // timeout, and dressing it up as one would be a lie.
+        assert_eq!(refusal_text(Some("1142"), || "raw".into()), "raw");
+        assert_eq!(refusal_text(None, || "raw".into()), "raw");
+        assert_eq!(
+            inventory_refused(&sqlx::Error::RowNotFound),
+            friendly(&sqlx::Error::RowNotFound)
+        );
+    }
+
+    /// The sentence quotes the deadline, so it is derived from it.
+    #[test]
+    fn the_sentence_and_the_sql_quote_the_same_deadline() {
+        assert!(deadline().contains(&DEADLINE_MS.to_string()));
+        let text = refusal_text(Some(DEADLINE_CODE), || String::new());
+        assert!(text.contains(&(DEADLINE_MS / 1000).to_string()), "{text}");
+    }
 
     fn known() -> KnownTables {
         let tables = vec![
@@ -1546,15 +2018,22 @@ mod tests {
         known_tables(std::iter::once(&schema))
     }
 
-    /// The real rows, as measured on 2026-11-04. Times converted from the
+    /// The real rows, as measured on 2026-11-04, with the statement text of
+    /// `supplier-select` re-read on 2026-11-05. Times converted from the
     /// seconds the probe printed back into the picoseconds the table stores.
+    ///
+    /// The first probe truncated that statement mid-predicate and the stand-in
+    /// written here read `OR supplier_master_id = ?`, which is sargable. The
+    /// real one is not, and the fixture said so only after the whole 288-byte
+    /// digest came back. Every verdict assertion about the worst shape on the
+    /// server rested on the half of the predicate that had been cut off.
     fn uat() -> Vec<DigestRow> {
         let s = |secs: f64| (secs * 1e12) as u64;
         let ms = |millis: f64| (millis * 1e9) as u64;
         vec![
             DigestRow {
                 digest: "supplier-select".into(),
-                text: "SELECT `SupplierId` , `default_rate` AS `DefaultApr` , `include_in_plan` AS `IncludeInProgram` , `import_on_sync` AS `ImportOnPull` FROM `Supplier` WHERE `tenant_sub_id` = ? AND ( NAME = ? OR `supplier_master_id` = ? )".into(),
+                text: "SELECT `SupplierId` , `default_rate` AS `DefaultApr` , `include_in_plan` AS `IncludeInProgram` , `import_on_sync` AS `ImportOnPull` FROM `Supplier` WHERE `tenant_sub_id` = ? AND ( NAME = ? OR `JSON_CONTAINS` ( `LOWER` ( COALESCE ( ALIAS , ? ) ) , `JSON_QUOTE` ( `LOWER` (?) ) ) )".into(),
                 schema: Some("appdata".into()),
                 execs: 40_668_477,
                 total_picos: s(285_820.11),
@@ -1745,8 +2224,113 @@ mod tests {
 
     #[test]
     fn the_shapes_that_do_want_an_index_get_one() {
-        assert_eq!(verdict("supplier-select"), Verdict::MissingIndex);
         assert_eq!(verdict("partydocuments"), Verdict::MissingIndex);
+        assert!(verdict("partydocuments").proposes_an_index());
+    }
+
+    /// The shape this whole module was built to explain, and the one it got
+    /// wrong. Every `MissingIndex` trigger is present -- the ratio, the
+    /// executions that found no index -- and the answer is still no, because
+    /// the predicate puts a function round a column.
+    #[test]
+    fn the_worst_shape_on_the_server_is_not_offered_an_index() {
+        let row = uat()
+            .into_iter()
+            .find(|r| r.digest == "supplier-select")
+            .expect("the fixture carries it");
+        assert!(
+            row.ratio().unwrap() > RATIO_WANTS_INDEX,
+            "the ratio trigger"
+        );
+        assert!(row.no_index > 0, "the no-index trigger");
+
+        assert_eq!(verdict("supplier-select"), Verdict::PredicateNotIndexable);
+        assert!(!verdict("supplier-select").proposes_an_index());
+    }
+
+    // ---- the predicate detector ----------------------------------------
+
+    /// The form a digest actually arrives in: the function names are
+    /// backtick-quoted too, so a scanner that only looked for bare words
+    /// would never fire on the real text.
+    #[test]
+    fn a_backticked_function_name_is_still_a_function() {
+        assert!(wraps_a_column(
+            "SELECT `a` FROM `t` WHERE `JSON_CONTAINS` ( `LOWER` ( COALESCE ( ALIAS , ? ) ) , ? )"
+        ));
+    }
+
+    /// The distinction the whole rule rests on. Wrapping the *parameter* is
+    /// free -- `col = LOWER(?)` uses an index on `col` perfectly well -- and
+    /// a rule that could not tell the two apart would condemn half the
+    /// queries on any server.
+    #[test]
+    fn wrapping_the_parameter_is_not_wrapping_the_column() {
+        assert!(!wraps_a_column(
+            "SELECT `a` FROM `t` WHERE `name` = `LOWER` (?)"
+        ));
+        assert!(!wraps_a_column(
+            "SELECT `a` FROM `t` WHERE `name` = LOWER ( ? )"
+        ));
+        assert!(wraps_a_column(
+            "SELECT `a` FROM `t` WHERE LOWER ( `name` ) = ?"
+        ));
+    }
+
+    /// A function in the select list says nothing about whether the filter
+    /// can use an index.
+    #[test]
+    fn only_the_where_clause_counts() {
+        assert!(!wraps_a_column(
+            "SELECT `LOWER` ( `name` ) FROM `t` WHERE `id` = ?"
+        ));
+        assert!(!wraps_a_column("SELECT `LOWER` ( `name` ) FROM `t`"));
+    }
+
+    /// A plain predicate must fall through, or the new verdict would swallow
+    /// the one case that genuinely wants an index.
+    #[test]
+    fn a_sargable_predicate_is_left_alone() {
+        assert!(!wraps_a_column(
+            "SELECT `a` FROM `t` WHERE `sub_id` = ? AND ( `name` = ? OR `master_id` = ? )"
+        ));
+        assert!(!wraps_a_column("SELECT `a` FROM `t` WHERE `id` IN (?)"));
+    }
+
+    /// Digests are generated text, but they are text from a server and this
+    /// scanner walks bytes. Truncation must not panic.
+    #[test]
+    fn a_half_a_statement_does_not_panic() {
+        assert!(!wraps_a_column(
+            "SELECT `a` FROM `t` WHERE `LOWER` ( `name`"
+        ));
+        assert!(!wraps_a_column("SELECT `a` FROM `t` WHERE `LOWER` ("));
+        assert!(!wraps_a_column("WHERE"));
+        assert!(!wraps_a_column(""));
+        assert!(!wraps_a_column("SELECT `a` FROM `t` WHERE `unclosed"));
+    }
+
+    /// The rung sits inside the `MissingIndex` branch, so it can only ever
+    /// change that one verdict. Everything the earlier rules claim is
+    /// untouched by it -- which is the whole reason it was put there.
+    #[test]
+    fn the_new_rung_cannot_reach_any_other_verdict() {
+        let k = known();
+        let wrapped = " WHERE `LOWER` ( `name` ) = ?";
+
+        for digest in ["casbin", "cc-waiting", "set-names", "bouncing-view"] {
+            let before = verdict(digest);
+            let mut row = uat()
+                .into_iter()
+                .find(|r| r.digest == digest)
+                .expect("fixture");
+            row.text.push_str(wrapped);
+            assert_eq!(
+                classify(&row, &k).verdict,
+                before,
+                "{digest} changed verdict because of a wrapped column"
+            );
+        }
     }
 
     // ---- M2: chatter and platform, classified not listed ---------------
@@ -1992,8 +2576,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             select.verdict,
-            Verdict::MissingIndex,
-            "the read in a loop is still missing an index"
+            Verdict::PredicateNotIndexable,
+            "the read in a loop keeps its own verdict rather than becoming the loop"
         );
 
         let update = r
@@ -2044,14 +2628,234 @@ mod tests {
 
     // ---- the index inventory -------------------------------------------
 
+    /// An index on named columns. `"?"` is a functional key part, which is
+    /// what `STATISTICS` gives us for an expression: present, and unreadable.
     fn idx(table: &str, name: &str, cols: &[&str], unique: bool) -> IndexRow {
         IndexRow {
             database: "appdata".into(),
             table: table.into(),
             name: name.into(),
-            columns: cols.iter().map(|c| c.to_string()).collect(),
+            columns: cols
+                .iter()
+                .map(|c| if *c == "?" { None } else { Some(c.to_string()) })
+                .collect(),
             unique,
         }
+    }
+
+    // ---- functional key parts, as measured on 2026-11-06 --------------
+
+    /// Whether the `AS` at `at` is a `CAST(... AS type)` target rather than
+    /// an alias: the nearest enclosing unclosed paren belongs to a `CAST`.
+    fn is_a_cast_target(sql: &str, at: usize) -> bool {
+        let mut depth = 0i32;
+        for (i, c) in sql[..at].char_indices().rev() {
+            match c {
+                ')' => depth += 1,
+                '(' => {
+                    if depth == 0 {
+                        return sql[..i].trim_end().to_ascii_uppercase().ends_with("CAST");
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Every alias in a generated query is quoted, and **no cast target is**.
+    ///
+    /// `COUNT_READ AS reads` was rejected by a live server on 2026-11-06.
+    /// Whether `READS` is reserved on that exact version is not something this
+    /// repo can check from vendored source -- but it does not need to be. A
+    /// quoted alias is valid whatever the server's keyword list says, and this
+    /// panel generates SQL for every MySQL it is pointed at, including
+    /// versions whose reserved words it cannot know.
+    ///
+    /// **The second half of this assertion is why it exists.** The first pass
+    /// at the fix quoted every ` AS x` in sight, which turned
+    /// `CAST(... AS UNSIGNED)` into ``CAST(... AS `UNSIGNED`)`` -- invalid,
+    /// in the one query the whole panel is built on. The test passed anyway,
+    /// because it only asked whether a backtick followed. A test that checks
+    /// one direction of a rule will wave through the mistake that breaks the
+    /// other.
+    #[test]
+    fn every_generated_alias_is_quoted_and_no_cast_target_is() {
+        for (what, sql) in [
+            ("digest", digest_sql(true)),
+            ("digest, pre-8.0", digest_sql(false)),
+            ("indexes", indexes_sql(2)),
+            ("index use", index_use_sql(2)),
+            ("foreign keys", foreign_keys_sql(2)),
+        ] {
+            let mut from = 0usize;
+            while let Some(rel) = sql[from..].find(" AS ") {
+                let at = from + rel;
+                let after = &sql[at + " AS ".len()..];
+                let shown = &after[..after.len().min(24)];
+                if is_a_cast_target(&sql, at + 1) {
+                    assert!(
+                        !after.starts_with('`'),
+                        "{what}: quoted cast target at {shown:?} -- a type is not an identifier"
+                    );
+                } else {
+                    assert!(
+                        after.starts_with('`'),
+                        "{what}: unquoted alias at {shown:?}"
+                    );
+                }
+                from = at + " AS ".len();
+            }
+        }
+    }
+
+    /// The reason a usage read failed is carried, not replaced by a guess.
+    ///
+    /// `mysql_index_scan` matched `Err(_)` and the panel then told the user
+    /// "performance_schema refused" whatever had actually happened --
+    /// including a query this module had got wrong. The struct has somewhere
+    /// to put the truth now, and the default is "nothing went wrong".
+    #[test]
+    fn a_usage_refusal_has_somewhere_to_say_why() {
+        let clean = IndexScan::default();
+        assert!(clean.usage_refusal.is_none());
+
+        let refused = IndexScan {
+            usage_available: false,
+            usage_refusal: Some("You have no SELECT privilege".into()),
+            ..Default::default()
+        };
+        assert!(!refused.usage_available);
+        assert_eq!(
+            refused.usage_refusal.as_deref(),
+            Some("You have no SELECT privilege")
+        );
+    }
+
+    /// A functional key part keeps its place in the index.
+    ///
+    /// The bug this guards against was one decode: `COLUMN_NAME` read as a
+    /// `String` when it is `NULL`, so the whole row failed and the part was
+    /// dropped without a word. The index then arrived narrower than it is.
+    #[test]
+    fn a_null_column_name_is_a_key_part_and_not_a_lost_row() {
+        let mut out = Vec::new();
+        let part = |out: &mut Vec<IndexRow>, idx: &str, col: Option<&str>| {
+            fold_part(
+                out,
+                "appdata".into(),
+                "external_client".into(),
+                idx.into(),
+                col.map(str::to_string),
+                true,
+            )
+        };
+        part(
+            &mut out,
+            "uq_external_client_sc_external_id",
+            Some("service_org_id"),
+        );
+        part(&mut out, "uq_external_client_sc_external_id", None);
+
+        assert_eq!(out.len(), 1, "one index, two key parts");
+        assert_eq!(
+            out[0].columns,
+            vec![Some("service_org_id".to_string()), None],
+            "the expression part was dropped instead of being kept as unreadable"
+        );
+    }
+
+    /// The five findings that were being lost.
+    ///
+    /// `external_client` really carries a one-column non-unique index on
+    /// `service_org_id` **and** a unique index on
+    /// `(service_org_id, <expression>)`. The narrow one is redundant: the
+    /// unique one can serve it. While the expression part was dropped on
+    /// decode both indexes looked one column wide, so neither was a strict
+    /// prefix of the other and nothing was reported.
+    #[test]
+    fn an_index_covered_by_a_functional_one_is_still_redundant() {
+        let all = vec![
+            idx(
+                "external_client",
+                "idx_external_client_service_org_id",
+                &["service_org_id"],
+                false,
+            ),
+            idx(
+                "external_client",
+                "uq_external_client_sc_external_id",
+                &["service_org_id", "?"],
+                true,
+            ),
+        ];
+        let found = redundant(&all);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0.name, "idx_external_client_service_org_id");
+        assert_eq!(found[0].1, "uq_external_client_sc_external_id");
+    }
+
+    /// And the asymmetry that keeps it honest: an expression is opaque, so an
+    /// index that *contains* one is never proposed for dropping. Two opaque
+    /// parts are not known to be equal, and `STATISTICS` does not report what
+    /// either of them is.
+    #[test]
+    fn an_index_with_an_expression_is_never_called_redundant() {
+        let all = vec![
+            idx("t", "narrow", &["a", "?"], false),
+            idx("t", "wide", &["a", "?", "b"], false),
+        ];
+        assert!(
+            redundant(&all).is_empty(),
+            "an unreadable key part was treated as equal to another one"
+        );
+    }
+
+    /// `uq_reconciliation_config_scope` is `(<expr>, <expr>, entity_type)` on
+    /// both servers. Dropping the expressions left it reading as an index on
+    /// `(entity_type)` -- which would have counted as support for a foreign
+    /// key on that column that it does not serve.
+    #[test]
+    fn a_leading_expression_supports_no_foreign_key() {
+        let indexes = vec![idx(
+            "reconciliation_config",
+            "uq_reconciliation_config_scope",
+            &["?", "?", "entity_type"],
+            true,
+        )];
+        let keys = vec![idx(
+            "reconciliation_config",
+            "fk_entity",
+            &["entity_type"],
+            false,
+        )];
+
+        let unsupported = unindexed_foreign_keys(&keys, &indexes);
+        assert_eq!(
+            unsupported.len(),
+            1,
+            "an expression was accepted as support for a column"
+        );
+
+        // And it is supported once a real index on it exists.
+        let mut with_support = indexes.clone();
+        with_support.push(idx(
+            "reconciliation_config",
+            "idx_entity",
+            &["entity_type"],
+            false,
+        ));
+        assert!(unindexed_foreign_keys(&keys, &with_support).is_empty());
+    }
+
+    /// What the panel shows. A blank would read as "this index has no
+    /// columns", which is a different and wronger claim than "this part is an
+    /// expression we cannot see".
+    #[test]
+    fn an_expression_is_named_in_the_finding() {
+        let cols = idx("t", "i", &["a", "?"], false).columns;
+        assert_eq!(shown(&cols), vec!["a", "(expression)"]);
     }
 
     #[test]

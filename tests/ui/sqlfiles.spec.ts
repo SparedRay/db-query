@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   CONN_INFO,
+  MYSQL_CAPS,
   READ_ONLY_CAPS,
   calls,
   connect,
@@ -31,6 +32,20 @@ import {
 
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", (e) => {
+    // **One exception, and only this one.** WebKit fires this when a
+    // `ResizeObserver` callback changes the size it is observing more times
+    // than the loop limit allows. Both windowed lists here do exactly that by
+    // design — painting rows changes the scroller's content size — and
+    // expanding a dock on a narrow window with another dock open changes four
+    // panes at once, which tips it over. The browser delivers the remaining
+    // notifications on the next frame, so the UI settles correctly; it is a
+    // performance smell, not a fault. Recorded in stage 31 §8.3.
+    //
+    // Deliberately matched on the whole message rather than a substring, so
+    // it cannot grow into a filter that hides real errors.
+    if (e.message === "ResizeObserver loop completed with undelivered notifications.") {
+      return;
+    }
     throw new Error(`uncaught page error: ${e.message}`);
   });
 });
@@ -130,9 +145,27 @@ async function withFiles(page: Page, extra: Record<string, unknown> = {}) {
   });
 }
 
+/**
+ * Get to the run dialog.
+ *
+ * The rail button opens the **dock** now, as every other rail button does,
+ * and starting a run is a button inside it — so a finished report has a home
+ * to go back to instead of being a band you could only dismiss.
+ */
+async function openRunDialog(page: Page) {
+  // The rail button *toggles*, as every other dock's does, so clicking it
+  // with the dock already open would shut it. Reaching the dialog a second
+  // time means the button inside the dock, which is what a person does too.
+  if (await page.locator("#batch-pane").isHidden()) {
+    await page.click("#btn-sqlfiles");
+    await expect(page.locator("#batch-pane")).toBeVisible();
+  }
+  await page.click("#batch-run");
+}
+
 /** Open it, choose both folders, so Run is live. */
 async function ready(page: Page) {
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await expect(page.locator("#sqlfiles-dialog")).toBeVisible();
   await page.click("#sf-pick-source");
   await page.click("#sf-pick-dest");
@@ -143,7 +176,7 @@ async function ready(page: Page) {
 
 test("the rail button opens it, and Ctrl+Shift+B does too", async ({ page }) => {
   await withFiles(page);
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await expect(page.locator("#sqlfiles-dialog")).toBeVisible();
   await page.click("#sf-cancel");
   await expect(page.locator("#sqlfiles-dialog")).toBeHidden();
@@ -175,7 +208,7 @@ test("with no connection the dialog opens and says so", async ({ page }) => {
   // installed by `installBackend`, and without it the app cannot boot at all.
   await installBackend(page);
   await visit(page);
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await expect(page.locator("#sqlfiles-dialog")).toBeVisible();
   await expect(page.locator("#sf-error")).toContainText("No connection is open");
   await expect(page.locator("#sf-ok")).toBeDisabled();
@@ -184,7 +217,7 @@ test("with no connection the dialog opens and says so", async ({ page }) => {
 /** And an engine with no statement splitter is offered nothing to run. */
 test("an engine that cannot run scripts says which", async ({ page }) => {
   await connect(page, { connect: () => ({ ...CONN_INFO, capabilities: READ_ONLY_CAPS }) });
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await expect(page.locator("#sf-error")).toContainText("can run a folder");
   await expect(page.locator("#sf-ok")).toBeDisabled();
 });
@@ -193,7 +226,7 @@ test("an engine that cannot run scripts says which", async ({ page }) => {
 
 test("the preview lists every file, including the ones that will not run", async ({ page }) => {
   await withFiles(page);
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
 
   const rows = page.locator("#sf-preview .sf-file");
@@ -225,7 +258,7 @@ test("an empty folder says so, in the error line and on the button", async ({ pa
   await withFiles(page, {
     sqlfiles_scan: () => ({ files: [], runnableFiles: 0, statements: 0, outputs: 0, writes: 0 }),
   });
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
 
   await expect(page.locator("#sf-error")).toBeVisible();
@@ -246,7 +279,7 @@ test("a folder of nothing-to-run says so too", async ({ page }) => {
       writes: 0,
     }),
   });
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
 
   await expect(page.locator("#sf-error")).toContainText("Nothing in that folder can be run");
@@ -256,7 +289,7 @@ test("a folder of nothing-to-run says so too", async ({ page }) => {
 
 test("Run waits for a destination", async ({ page }) => {
   await withFiles(page);
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
   await expect(page.locator("#sf-ok")).toBeDisabled();
   await expect(page.locator("#sf-summary")).toContainText("choose a destination");
@@ -272,7 +305,7 @@ test("Run waits for a destination", async ({ page }) => {
  */
 test("pointing the destination at the source is allowed and noted", async ({ page }) => {
   await withFiles(page, { sqlfiles_pick_folder: () => "/home/u/scripts" });
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
   await page.click("#sf-pick-dest");
 
@@ -369,7 +402,7 @@ test("a second job finds Run disabled with the reason on it", async ({ page }) =
   await expect(page.locator("#job-strip")).toBeVisible();
 
   // Open it again while that one runs.
-  await page.click("#btn-sqlfiles");
+  await openRunDialog(page);
   await page.click("#sf-pick-source");
   await page.click("#sf-pick-dest");
   await expect(page.locator("#sf-ok")).toBeDisabled();
@@ -523,4 +556,170 @@ test("Hide dismisses the report", async ({ page }) => {
   await expect(page.locator("#job-report")).toBeVisible();
   await page.locator('#job-report button:has-text("Hide")').click();
   await expect(page.locator("#job-report")).toBeHidden();
+});
+
+// ------------------------------------------------ the dock (Stage 31 §6.15)
+
+/**
+ * The report is per **connection**, not per tab and not global.
+ *
+ * It was a band in the output pane, outside the tab system so a tab switch
+ * left it alone — right about tabs, and silent about connections. A run picks
+ * its own connection in its own dialog, so a report from one server sat on
+ * screen under another with nothing saying which it came from.
+ */
+test("the dock opens from the rail, and the dialog from inside it", async ({ page }) => {
+  await withFiles(page);
+  await expect(page.locator("#batch-pane")).toBeHidden();
+
+  await page.click("#btn-sqlfiles");
+  await expect(page.locator("#batch-pane")).toBeVisible();
+  // A toggle, like every other rail button — not a one-way trip to a modal.
+  await page.click("#btn-sqlfiles");
+  await expect(page.locator("#batch-pane")).toBeHidden();
+});
+
+test("the dock is shut from the first byte, not by script", async ({ page }) => {
+  await withFiles(page);
+  // `batch-shut` is in the markup, so the track is zero before any JS runs.
+  // The other four docks each had this bug once; see §6.4.
+  await expect(page.locator("#app")).toHaveClass(/batch-shut/);
+  await expect(page.locator("#batch-pane")).toBeHidden();
+  await expect(page.locator("#batchsplit")).toBeHidden();
+});
+
+test("a run opens the dock and puts its report in it", async ({ page }) => {
+  // `writes: 0` so the run is not held at the write confirmation, as every
+  // other test that actually runs does.
+  await withFiles(page, { sqlfiles_scan: () => ({ ...SCAN, writes: 0 }) });
+  await ready(page);
+  await page.click("#sf-ok");
+
+  await expect(page.locator("#batch-pane")).toBeVisible();
+  await expect(page.locator("#job-report")).toBeVisible();
+  await expect(page.locator("#job-report")).toContainText("01-setup.sql");
+  await expect(page.locator("#batch-empty")).toBeHidden();
+});
+
+/** Two saved profiles, both connectable, so a switch is one click. */
+const TWO = ["uat", "qa"].map((id) => ({
+  id,
+  name: id,
+  colour: "#22c55e",
+  host: `${id}.example.com`,
+  port: 3306,
+  user: "app",
+  database: "poc",
+  allowInvalidCerts: false,
+  rememberPassword: true,
+}));
+
+/**
+ * One report per connection, and switching swaps rather than destroys.
+ *
+ * This is what the band in the output pane could not do. A run picks its own
+ * connection in its own dialog, so a report from `uat` sat on screen while
+ * `qa` was active with nothing saying which it came from. Switching back
+ * brings it back, because the run it describes still happened.
+ */
+test("a report belongs to its connection, and switching swaps them", async ({ page }) => {
+  await installBackend(page, {
+    list_profiles: () => ({ profiles: TWO, warning: null }),
+    connect_saved: (a) => ({
+      id: a.id as string,
+      serverVersion: "8.4.0",
+      databases: ["poc"],
+      currentDatabase: "poc",
+      capabilities: MYSQL_CAPS,
+    }),
+    list_tables: () => [],
+    list_columns: () => [],
+    list_routines: () => [],
+    schema_names: () => ({}),
+    sqlfiles_pick_folder: (() => {
+      let n = 0;
+      return () => (n++ % 2 === 0 ? "/home/u/scripts" : "/home/u/out");
+    })(),
+    sqlfiles_scan: () => ({ ...SCAN, writes: 0 }),
+    sqlfiles_run: () => OUTCOME,
+  });
+  await visit(page);
+
+  await page.locator('.rail-item[title^="uat"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await ready(page);
+  await page.click("#sf-ok");
+  await expect(page.locator("#job-report")).toContainText("01-setup.sql");
+
+  // qa has run nothing, so it says so rather than showing uat's report.
+  await page.locator('.rail-item[title^="qa"]').click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(2);
+  await expect(page.locator("#batch-pane")).toBeVisible();
+  await expect(page.locator("#job-report")).toBeHidden();
+  await expect(page.locator("#batch-empty")).toContainText(
+    "No folder has been run against this connection yet",
+  );
+
+  // And back. The run still happened; nothing was thrown away for it.
+  await page.locator('.rail-item[title^="uat"]').click();
+  await expect(page.locator("#job-report")).toContainText("01-setup.sql");
+  await expect(page.locator("#batch-empty")).toBeHidden();
+});
+
+test("an empty dock says so rather than showing nothing", async ({ page }) => {
+  await withFiles(page);
+  await page.click("#btn-sqlfiles");
+  await expect(page.locator("#batch-empty")).toContainText(
+    "No folder has been run against this connection yet",
+  );
+  await expect(page.locator("#job-report")).toBeHidden();
+});
+
+test("expanding the dock hides the editor, and Escape gives it back", async ({ page }) => {
+  await withFiles(page);
+  await page.click("#btn-sqlfiles");
+  await expect(page.locator("#main")).toBeVisible();
+
+  await page.click("#batch-expand");
+  // The same mechanism the performance dock uses: one `data-full` naming
+  // which dock has the window, not a flag per dock.
+  await expect(page.locator("#app")).toHaveAttribute("data-full", "batch");
+  await expect(page.locator("#main")).not.toBeVisible();
+  await expect(page.locator("#batch-expand")).toHaveAttribute("aria-label", "Collapse");
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#app")).not.toHaveAttribute("data-full", /.*/);
+  await expect(page.locator("#main")).toBeVisible();
+  await expect(page.locator("#batch-expand")).toHaveAttribute("aria-label", "Expand");
+});
+
+test("shutting the dock while expanded does not leave the editor hidden", async ({ page }) => {
+  await withFiles(page);
+  await page.click("#btn-sqlfiles");
+  await page.click("#batch-expand");
+  await expect(page.locator("#main")).not.toBeVisible();
+
+  await page.click("#batch-close");
+  await expect(page.locator("#batch-pane")).toBeHidden();
+  await expect(page.locator("#main")).toBeVisible();
+});
+
+test("only one dock can have the window at a time", async ({ page }) => {
+  await withFiles(page);
+  // Both open at once, which §6.5 settled is allowed.
+  await page.click("#btn-sqlfiles");
+  await page.click("#btn-workload");
+  await expect(page.locator("#batch-pane")).toBeVisible();
+  await expect(page.locator("#wl-pane")).toBeVisible();
+
+  await page.click("#batch-expand");
+  await expect(page.locator("#app")).toHaveAttribute("data-full", "batch");
+  await expect(page.locator("#wl-pane")).not.toBeVisible();
+
+  // Expanding the other one takes the window from the first, rather than two
+  // docks each believing they have it.
+  await page.keyboard.press("Escape");
+  await page.click("#wl-expand");
+  await expect(page.locator("#app")).toHaveAttribute("data-full", "wl");
+  await expect(page.locator("#batch-pane")).not.toBeVisible();
 });

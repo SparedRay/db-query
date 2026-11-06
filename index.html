@@ -17,12 +17,14 @@
          `wl-shut` off took 527px out of the window from boot and pushed the
          migrations seam beyond the right edge, which twelve migrations tests
          noticed immediately. -->
-    <div id="app" class="chat-closed mig-shut wl-shut">
+    <div id="app" class="chat-closed mig-shut wl-shut batch-shut hist-shut">
       <div class="railbar">
         <nav id="rail" class="rail" title="Connections"></nav>
         <!-- Icons are injected from src/icons.ts, so the drawings live in one
              place rather than being duplicated as markup here. -->
-        <button id="btn-assistant" class="rail-cog" type="button" title="Ask the assistant (Ctrl+K)"></button>
+        <button id="btn-assistant" class="rail-cog" type="button"
+                aria-controls="chat-pane"
+                title="Ask the AI assistant (Ctrl+K)"></button>
         <!-- Stage 28. Opens the migrations panel, and carries how many are
              pending once a reading exists — the one thing worth seeing
              without opening it. -->
@@ -30,7 +32,8 @@
                 title="Migrations (Ctrl+Shift+M)" aria-pressed="false" aria-controls="mig-pane">
           <span id="mig-pending" class="rail-badge" hidden></span>
         </button>
-        <button id="btn-history" class="rail-cog" type="button" title="Query history (Ctrl+H)"></button>
+        <button id="btn-history" class="rail-cog" type="button" aria-pressed="false"
+                aria-controls="hist-pane" title="Query history (Ctrl+H)"></button>
         <!-- Stage 31. Reads the server's own workload counters. The fourth
              dock: not a tab, because `tabs.ts` says no tab is anything but an
              editor, and not a modal, because Stage 21 §2 already recorded
@@ -43,7 +46,8 @@
         <!-- Stage 23. `Ctrl+Shift+B` rather than `Ctrl+B`: that one has
              toggled the schema since Stage 12, so this takes the modifier
              instead of the letter. -->
-        <button id="btn-sqlfiles" class="rail-cog" type="button"
+        <button id="btn-sqlfiles" class="rail-cog" type="button" aria-pressed="false"
+                aria-controls="batch-pane"
                 title="Run SQL files from a folder (Ctrl+Shift+B)"></button>
         <button id="btn-settings" class="rail-cog" type="button" title="Settings"></button>
       </div>
@@ -161,12 +165,9 @@
                one line that says how far it has got. -->
           <div id="job-strip" class="mig-progress" hidden></div>
           <div id="results-body" class="results-body">
-            <!-- A finished job's report (Stage 23). In the strip's slot, because
-                 a run ends by turning one into the other — but a *band* rather
-                 than a replacement for the grid. Outside the tab system, so switching tabs and running
-                 queries leave it alone, which is the whole point: today's export
-                 report goes into `#grid` and `onActivate` repaints that. -->
-            <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
+            <!-- The batch report used to be a band here. It is `#batch-pane`
+                 now: a report is per connection, and a band in the output pane
+                 had no way to say which connection it came from. -->
             <div id="tabs" class="tabs"></div>
             <div id="grid" class="grid-host" tabindex="0"></div>
             <!-- Stage 29. Sequence: its filter, its own scrolling region beside
@@ -228,12 +229,33 @@
       <div id="migsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
 
       <section id="mig-pane" class="mig-pane" aria-label="Migrations" hidden>
-        <div class="pane-head">
-          <span class="chat-title">Migrations</span>
-          <button type="button" id="mig-close" class="mini"
-                  title="Close migrations (Ctrl+Shift+M)" aria-label="Close migrations">
-            &times;
-          </button>
+        <!-- Stage 31 §6.16. Every dock's head is this shape, in this order:
+             the name, the note the expanded view adds, the dock's own actions,
+             then the two controls every dock has: the width, then the door.
+             Written out four times rather than templated, because the four
+             heads differ in their *actions* and agreeing on the frame is the
+             whole point; a test holds them to it.
+
+             The buttons are empty here on purpose. Every icon in this app is
+             drawn in `src/icons.ts` and appended by `main.ts` — that file's
+             header records why: a text glyph has thin font coverage and a
+             missing one renders as a hollow box, and an emoji ignores
+             `color` and arrives in the system's own colour. `«` and `×`
+             would have been safe characters, but then a head would hold two
+             drawing systems, which is the inconsistency this section exists
+             to remove.
+
+             The words moved to `aria-label`, which is both the accessible
+             name and what the tooltip says. An unlabelled glyph is a guess,
+             and `Clear` unlabelled is a guess with consequences. -->
+        <div class="dock-head">
+          <strong class="dock-title">Migrations</strong>
+          <span class="dock-full-note">— editor and results hidden, with your tabs and text intact</span>
+          <span class="grow"></span>
+          <button type="button" id="mig-expand" class="mini dock-icon dock-expand" aria-pressed="false"
+                  aria-label="Expand" title="Hide the editor and use the whole window (Esc comes back)"></button>
+          <button type="button" id="mig-close" class="mini dock-icon dock-close"
+                  aria-label="Close migrations" title="Close migrations (Ctrl+Shift+M)"></button>
         </div>
         <div id="mig-pane-body" class="mig-pane-body">
           <!-- Which project and environment, chosen here rather than in the
@@ -296,13 +318,16 @@
       <div id="msplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
 
       <section id="chat-pane" class="chat-pane" aria-label="Assistant" hidden>
-        <div class="pane-head">
-          <span class="chat-title">Assistant</span>
-          <button type="button" id="chat-clear" class="mini">Clear</button>
-          <button type="button" id="chat-close" class="mini"
-                  title="Close the assistant (Ctrl+K)" aria-label="Close the assistant">
-            &times;
-          </button>
+        <div class="dock-head">
+          <strong class="dock-title">Assistant</strong>
+          <span class="dock-full-note">— editor and results hidden, with your tabs and text intact</span>
+          <span class="grow"></span>
+          <button type="button" id="chat-clear" class="mini dock-icon dock-clear"
+                  aria-label="Clear this conversation" title="Forget this conversation — the assistant loses the context with it"></button>
+          <button type="button" id="chat-expand" class="mini dock-icon dock-expand" aria-pressed="false"
+                  aria-label="Expand" title="Hide the editor and use the whole window (Esc comes back)"></button>
+          <button type="button" id="chat-close" class="mini dock-icon dock-close"
+                  aria-label="Close the assistant" title="Close the assistant (Ctrl+K)"></button>
         </div>
         <p class="hint" id="chat-note">Checking&hellip;</p>
         <div id="chat-log" class="chat-log"></div>
@@ -330,27 +355,27 @@
            pasted. -->
       <div id="wlsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
       <section id="wl-pane" class="wl-pane" aria-label="Performance" hidden>
-        <div class="wl-head">
-          <strong class="wl-title">Where the time goes</strong>
+        <!-- Band 1 of three. The shipped layout had six bands of chrome above
+             the first row of data in a 420px column; everything that is not
+             the finding itself has moved below it or into the footer. -->
+        <div class="dock-head">
+          <strong class="dock-title">Where the time goes</strong>
+          <!-- Only on screen in the expanded view. A mode that looked like it
+               had closed your editor would be worth distrusting, so it says
+               what it did and what survived it. -->
+          <span class="dock-full-note">— editor and results hidden, with your tabs and text intact</span>
           <span class="grow"></span>
-          <button type="button" id="wl-refresh" class="mini">Refresh</button>
-          <button type="button" id="wl-close" class="mini" title="Shut this panel">Close</button>
+          <button type="button" id="wl-refresh" class="mini dock-icon dock-refresh"
+                  aria-label="Refresh" title="Read the server&apos;s counters again (one query, nothing is changed)"></button>
+          <!-- The dock can already be dragged wider, but the splitter clamps
+               it to `innerWidth - 420` so the editor always keeps a column.
+               This is the state that cannot be reached by dragging: the dock
+               is the glance, expanded is the study. -->
+          <button type="button" id="wl-expand" class="mini dock-icon dock-expand" aria-pressed="false"
+                  aria-label="Expand" title="Hide the editor and use the whole window (Esc comes back)"></button>
+          <button type="button" id="wl-close" class="mini dock-icon dock-close"
+                  aria-label="Close the performance panel" title="Close the performance panel"></button>
         </div>
-        <div class="wl-head wl-head-2">
-          <!-- The counters are cumulative and carry no timestamps, so one
-               reading is the server's whole lifetime. Two subtracted is a
-               window — the only way to ask what *your* change did. -->
-          <div class="seg" id="wl-windows" role="group" aria-label="Window">
-            <button type="button" class="seg-btn" data-window="start" aria-pressed="true">
-              Lifetime
-            </button>
-            <button type="button" class="seg-btn" data-window="baseline" aria-pressed="false" disabled>
-              Since baseline
-            </button>
-          </div>
-          <button type="button" id="wl-baseline" class="mini">Set baseline</button>
-        </div>
-        <span id="wl-scope" class="wl-scope"></span>
 
         <div id="wl-pane-body" class="wl-pane-body">
           <!-- The diagnosis. Shown whenever it has something to say, which
@@ -361,41 +386,162 @@
           </div>
 
           <div id="wl-body" class="wl-body" hidden>
-            <div id="wl-tiles" class="wl-tiles"></div>
-            <div id="wl-loops" class="wl-loops" hidden></div>
-            <div class="wl-controls">
-              <div class="seg" id="wl-classes" role="group" aria-label="Which shapes">
-                <button type="button" class="seg-btn" data-class="application" aria-pressed="true">
-                  App<span class="seg-count" id="wl-count-application"></span>
-                </button>
-                <button type="button" class="seg-btn" data-class="chatter" aria-pressed="false">
-                  Driver<span class="seg-count" id="wl-count-chatter"></span>
-                </button>
-                <button type="button" class="seg-btn" data-class="platform" aria-pressed="false">
-                  Platform<span class="seg-count" id="wl-count-platform"></span>
-                </button>
-              </div>
-              <div class="seg" id="wl-sorts" role="group" aria-label="Order">
-                <button type="button" class="seg-btn" data-sort="time" aria-pressed="true">Time</button>
-                <button type="button" class="seg-btn" data-sort="examined" aria-pressed="false">Examined</button>
-                <button type="button" class="seg-btn" data-sort="execs" aria-pressed="false">Execs</button>
-              </div>
+            <!-- Band 2: the finding, in a sentence, before any control. The
+                 four tiles this replaces made the reader assemble the
+                 sentence themselves out of a worst shape, a row count and a
+                 verdict chip three bands apart. -->
+            <div class="wl-lead">
+              <p class="wl-lead-line" id="wl-lead"></p>
+              <p class="wl-lead-sub" id="wl-lead-sub"></p>
             </div>
-            <span id="wl-known" class="wl-known"></span>
-            <div id="wl-list" class="wl-list" tabindex="-1"></div>
 
-            <!-- The index inventory: three more queries, so it is asked for.
-                 Nothing here runs DDL either — every row ends in a statement. -->
-            <div class="wl-inv-head">
-              <button type="button" id="wl-inv-run" class="mini">Read the index inventory</button>
+            <!-- Band 3: two lists, as siblings. They were stacked in one
+                 scroller, which put the index inventory below the fold of a
+                 420px column. Hidden when the panel is expanded, because then
+                 both are on screen at once and there is nothing to switch. -->
+            <div class="wl-views" id="wl-views" role="tablist" aria-label="Which list">
+              <button type="button" class="wl-view-tab" data-view="workload" role="tab"
+                      aria-selected="true">Workload<span class="wl-view-n" id="wl-n-workload"></span></button>
+              <button type="button" class="wl-view-tab" data-view="indexes" role="tab"
+                      aria-selected="false">Indexes<span class="wl-view-n" id="wl-n-indexes"></span></button>
             </div>
-            <span id="wl-inv-note" class="wl-known"></span>
-            <div id="wl-inv" class="wl-list" hidden tabindex="-1"></div>
+
+            <div class="wl-panes" id="wl-panes" data-view="workload">
+              <section class="wl-view" id="wl-workload" aria-label="Workload">
+                <div class="wl-controls">
+                  <div class="seg" id="wl-classes" role="group" aria-label="Which shapes">
+                    <button type="button" class="seg-btn" data-class="application" aria-pressed="true">
+                      App<span class="seg-count" id="wl-count-application"></span>
+                    </button>
+                    <button type="button" class="seg-btn" data-class="chatter" aria-pressed="false">
+                      Driver<span class="seg-count" id="wl-count-chatter"></span>
+                    </button>
+                    <button type="button" class="seg-btn" data-class="platform" aria-pressed="false">
+                      Platform<span class="seg-count" id="wl-count-platform"></span>
+                    </button>
+                  </div>
+                  <span class="grow"></span>
+                  <!-- A select, not a third segmented control. Three of them
+                       in a 420px column wrapped onto two lines and read as
+                       one undifferentiated band of chrome. -->
+                  <label class="wl-sort-label" for="wl-sort">Worst by</label>
+                  <select id="wl-sort" class="wl-sort">
+                    <option value="time">time</option>
+                    <option value="examined">rows examined</option>
+                    <option value="execs">executions</option>
+                  </select>
+                </div>
+                <div id="wl-list" class="wl-list" tabindex="-1"></div>
+              </section>
+
+              <!-- The index inventory: three more queries, so it is asked for.
+                   Nothing here runs DDL either — every row ends in a statement. -->
+              <section class="wl-view" id="wl-indexes" aria-label="Indexes">
+                <div class="wl-inv-head">
+                  <button type="button" id="wl-inv-run" class="mini"
+                          title="Three queries against information_schema. No DDL, here or anywhere in this panel.">Read the index inventory</button>
+                </div>
+                <span id="wl-inv-note" class="wl-known"></span>
+                <div id="wl-inv" class="wl-list" hidden tabindex="-1"></div>
+              </section>
+            </div>
           </div>
 
           <p class="hint" id="wl-note">
             A digest holds no literal values, so no parameter data can appear here.
           </p>
+        </div>
+
+        <!-- The footer. The window control and the baseline only mean
+             something once you have read a reading, so they stopped being the
+             second thing in the panel. The scope line sits with them because
+             it is the same kind of fact: which server, over what period. -->
+        <div class="wl-foot">
+          <span id="wl-scope" class="wl-scope"></span>
+          <div class="wl-foot-row">
+            <!-- The counters are cumulative and carry no timestamps, so one
+                 reading is the server's whole lifetime. Two subtracted is a
+                 window — the only way to ask what *your* change did. -->
+            <div class="seg" id="wl-windows" role="group" aria-label="Window">
+              <button type="button" class="seg-btn" data-window="start" aria-pressed="true">
+                Lifetime
+              </button>
+              <button type="button" class="seg-btn" data-window="baseline" aria-pressed="false" disabled>
+                Since baseline
+              </button>
+            </div>
+            <span class="grow"></span>
+            <button type="button" id="wl-baseline" class="mini">Set baseline</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- The batch report, as a dock (Stage 31 §6.15).
+           It was a band inside `#results-body`, outside the tab system so a
+           tab switch left it alone. That was right about tabs and silent
+           about connections: the run picks its own connection in its own
+           dialog, so a report from UAT stayed on screen under QA with nothing
+           saying which it came from.
+           A dock settles both. One report per connection, swapped when the
+           connection changes, and untouched by tabs because it is not in the
+           tab system at all. -->
+      <div id="batchsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+      <section id="batch-pane" class="batch-pane" aria-label="Batch runs" hidden>
+        <div class="dock-head">
+          <strong class="dock-title">Folder runs</strong>
+          <span class="dock-full-note">— editor and results hidden, with your tabs and text intact</span>
+          <span class="grow"></span>
+          <button type="button" id="batch-expand" class="mini dock-icon dock-expand" aria-pressed="false"
+                  aria-label="Expand" title="Hide the editor and use the whole window (Esc comes back)"></button>
+          <button type="button" id="batch-close" class="mini dock-icon dock-close"
+                  aria-label="Close the batch panel" title="Close the batch panel"></button>
+        </div>
+        <div id="batch-body" class="batch-body">
+          <p class="batch-empty" id="batch-empty"></p>
+          <!-- The report itself, built by `showJobReport`. -->
+          <section id="job-report" class="job-report" hidden aria-label="Run report"></section>
+          <div class="dock-foot">
+            <button type="button" id="batch-run" class="mini"
+                    title="Choose a folder and run its .sql files in order (Ctrl+Shift+B)">Run a folder…</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stage 31 §6.18. The fifth dock, and the last of this stage's
+           dialogs that was a reference rather than a decision.
+
+           It was a `<dialog>` from Stage 13, and `history.ts` had to call
+           `close()` **before** handing a statement over, because a modal owns
+           the screen and cannot insert into the editor behind it. So using one
+           row threw away the list you were working through -- which is, line
+           for line, what Stage 21 §2 recorded about the performance panel's
+           own first cut as a dialog. §7 writes the rule down: a dock is a
+           reference you work from, a modal is a decision in flight. -->
+      <div id="histsplit" class="splitter splitter-v" title="Drag to resize" hidden></div>
+      <section id="hist-pane" class="hist-pane" aria-label="Query history" hidden>
+        <div class="dock-head">
+          <strong class="dock-title">Query history</strong>
+          <span class="dock-full-note">— editor and results hidden, with your tabs and text intact</span>
+          <span class="grow"></span>
+          <button type="button" id="hist-expand" class="mini dock-icon dock-expand" aria-pressed="false"
+                  aria-label="Expand" title="Hide the editor and use the whole window (Esc comes back)"></button>
+          <button type="button" id="hist-close" class="mini dock-icon dock-close"
+                  aria-label="Close query history" title="Close query history (Ctrl+H)"></button>
+        </div>
+        <div class="hist-controls">
+          <input type="search" id="hist-search" placeholder="Search statements…" autocomplete="off" />
+          <label class="toggle"><input type="checkbox" id="hist-this-conn" checked /> This connection only</label>
+        </div>
+        <div id="hist-list" class="hist-list" tabindex="-1"></div>
+        <p class="hint" id="hist-note">
+          Statements that set a credential are never recorded.
+        </p>
+        <!-- Destructive, and deliberately as far from the two frame controls
+             as the panel allows: the batch dock's Run row is in the same
+             place for the same reason. -->
+        <div class="dock-foot">
+          <button type="button" id="hist-clear" class="mini danger"
+                  title="Delete the recorded statements — this cannot be undone">Clear history…</button>
         </div>
       </section>
     </div>
@@ -882,23 +1028,6 @@
         <button type="button" id="sf-ok" class="primary">Run</button>
       </menu>
     </dialog>
-
-    <dialog id="history-dialog">
-      <h2>Query history</h2>
-      <div class="hist-controls">
-        <input type="search" id="hist-search" placeholder="Search statements…" autocomplete="off" />
-        <label class="toggle"><input type="checkbox" id="hist-this-conn" checked /> This connection only</label>
-      </div>
-      <div id="hist-list" class="hist-list" tabindex="-1"></div>
-      <p class="hint" id="hist-note">
-        Statements that set a credential are never recorded.
-      </p>
-      <menu>
-        <button type="button" id="hist-clear" class="danger">Clear history…</button>
-        <button type="button" id="hist-close" class="primary">Close</button>
-      </menu>
-    </dialog>
-
 
     <script type="module" src="/src/boot.ts"></script>
   </body>

@@ -1472,9 +1472,11 @@ fn workload_baseline_clear(app: tauri::AppHandle, connection_id: String) -> Resu
 #[serde(rename_all = "camelCase")]
 pub struct IndexInventory {
     pub findings: Vec<workload::IndexFinding>,
-    /// `false` when `performance_schema` refused. The never-read list is then
+    /// `false` when the usage read did not answer. The never-read list is then
     /// **absent rather than empty**, which is a different claim.
     pub usage_available: bool,
+    /// Why it did not answer. Shown instead of a guess at the cause.
+    pub usage_refusal: Option<String>,
     pub indexes_seen: usize,
     pub databases: Vec<String>,
 }
@@ -1536,6 +1538,7 @@ async fn workload_indexes(
     Ok(IndexInventory {
         findings: workload::index_findings(&scan.indexes, &scan.uses, &unindexed, &writes),
         usage_available: scan.usage_available,
+        usage_refusal: scan.usage_refusal,
         indexes_seen: scan.indexes.len(),
         databases: dbs,
     })

@@ -150,7 +150,10 @@ test("the assistant button marks a CLI that is not ready, and still opens", asyn
 
 test("a ready CLI leaves the button unmarked", async ({ page }) => {
   await boot(page, { enabled: ["copilot"], provider: "localCli", recipe: "copilot" });
-  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+  await expect(page.locator("#btn-assistant")).toHaveAttribute(
+    "title",
+    /Answered by Copilot CLI/,
+  );
   await expect(page.locator("#btn-assistant.not-ready")).toHaveCount(0);
 });
 
@@ -412,13 +415,19 @@ test("the enabled integration and the chosen CLI survive a new launch", async ({
   await openSettings(page);
   await page.click('.integration[data-recipe="copilot"] input[type="checkbox"]');
   await page.selectOption("#set-ai-preset", { label: "Copilot CLI" });
-  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+  await expect(page.locator("#btn-assistant")).toHaveAttribute(
+    "title",
+    /Answered by Copilot CLI/,
+  );
 
   await relaunch(page);
 
   // The button is the part that needs no dialog: if the provider came back,
   // this says so before anything is opened.
-  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+  await expect(page.locator("#btn-assistant")).toHaveAttribute(
+    "title",
+    /Answered by Copilot CLI/,
+  );
   await openSettings(page);
   await expect(
     page.locator('.integration[data-recipe="copilot"] input[type="checkbox"]'),

@@ -1,4 +1,4 @@
-// The query history dialog.
+// The query history dock.
 //
 // # What it is for
 //
@@ -9,6 +9,19 @@
 //
 // Recording happens in Rust, at the one point every execution passes through.
 // This module only reads.
+//
+// # Why it is not a dialog any more (§6.18)
+//
+// It was one from Stage 13, and using a row had to **close** it first:
+// `deps.dialog.close()` on the line before `deps.insert(...)`, because a modal
+// owns the screen and cannot put text into the editor behind it. So the list
+// you were working through was destroyed by the act of using one row of it —
+// exactly what Stage 21 §2 recorded about the performance panel's first cut,
+// and the reason that one is a dock. Those two `close()` calls are gone: the
+// panel stays open, and the second statement you want is still on screen.
+//
+// The grid is the caller's, as it is for every other dock, so this module asks
+// for `setOpen` and never touches a class or a column.
 
 import { api, type HistoryHit } from "./api";
 import { choose } from "./dialog";
@@ -16,7 +29,7 @@ import { contextMenu } from "./menu";
 
 export interface HistoryDeps {
   /** Elements, resolved by the caller so this module owns no lookups. */
-  dialog: HTMLDialogElement;
+  pane: HTMLElement;
   search: HTMLInputElement;
   thisConnectionOnly: HTMLInputElement;
   list: HTMLElement;
@@ -30,6 +43,10 @@ export interface HistoryDeps {
   openInTab: (sql: string) => void;
   copy: (sql: string) => void;
   notify: (message: string) => void;
+  /** Show or hide the dock. Owned by the caller, which owns the grid. */
+  setOpen: (open: boolean) => void;
+  /** Whether the dock is showing right now. */
+  isOpen: () => boolean;
 }
 
 /** A short, local "when" — the exact timestamp is on the row's tooltip. */
@@ -93,13 +110,9 @@ export function createHistory(deps: HistoryDeps) {
     row.oncontextmenu = (e) =>
       contextMenu(e, [
         { label: "Insert at cursor", run: () => (selected = index, accept()) },
-        {
-          label: "Open in a new tab",
-          run: () => {
-            deps.openInTab(hit.sql);
-            deps.dialog.close();
-          },
-        },
+        // **The dock stays open.** It closed itself here and in `accept()`,
+        // which is the defect this file's header records.
+        { label: "Open in a new tab", run: () => deps.openInTab(hit.sql) },
         { label: "Copy", run: () => deps.copy(hit.sql) },
       ]);
     return row;
@@ -127,11 +140,10 @@ export function createHistory(deps: HistoryDeps) {
       ?.scrollIntoView({ block: "nearest" });
   }
 
-  /** Take the selected statement into the editor. */
+  /** Take the selected statement into the editor, and stay open. */
   function accept() {
     const hit = hits[selected];
     if (!hit) return;
-    deps.dialog.close();
     deps.insert(hit.sql);
   }
 
@@ -155,7 +167,7 @@ export function createHistory(deps: HistoryDeps) {
 
   deps.search.oninput = () => void refresh();
   deps.thisConnectionOnly.onchange = () => void refresh();
-  deps.close.onclick = () => deps.dialog.close();
+  deps.close.onclick = () => deps.setOpen(false);
 
   deps.clear.onclick = async () => {
     // Destructive and unrecoverable, so it asks — through dialog.ts, never
@@ -180,10 +192,12 @@ export function createHistory(deps: HistoryDeps) {
     }
   };
 
-  // Arrow keys move, Enter takes. Handled on the dialog so they work whether
-  // focus is in the search box or the list — typing to filter and pressing Down
-  // to pick is the whole interaction.
-  deps.dialog.addEventListener("keydown", (e) => {
+  // Arrow keys move, Enter takes. Handled on the **pane**, so they work
+  // wherever focus is inside it — typing to filter and pressing Down to pick
+  // is the whole interaction. On the dialog this listener saw every key in the
+  // app, because a modal has the keyboard; on a dock it sees the keys meant
+  // for it, which is the behaviour that was wanted both times.
+  deps.pane.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       moveSelection(1);
@@ -196,22 +210,72 @@ export function createHistory(deps: HistoryDeps) {
     }
   });
 
+  /** The scope control, against the connection that is actually on screen. */
+  function syncScope() {
+    const active = deps.activeConnection();
+    deps.thisConnectionOnly.checked = active !== null;
+    deps.thisConnectionOnly.disabled = active === null;
+  }
+
   return {
+    /** Open the dock on a fresh search. */
     async open() {
-      // `showModal()` on an open dialog throws; re-asking for history you are
-      // already looking at should just put the cursor back in the search box.
-      if (deps.dialog.open) {
+      // Already open: put the cursor back in the search box, which is what
+      // asking for history you are already looking at means. (As a dialog this
+      // branch existed because `showModal()` on an open dialog throws; it
+      // survives because the behaviour was right for its own sake.)
+      if (deps.isOpen()) {
         deps.search.focus();
         return;
       }
       deps.search.value = "";
-      // Default to the connection you are looking at, when there is one.
-      const active = deps.activeConnection();
-      deps.thisConnectionOnly.checked = active !== null;
-      deps.thisConnectionOnly.disabled = active === null;
-      deps.dialog.showModal();
+      syncScope();
+      deps.setOpen(true);
       deps.search.focus();
       await refresh();
+    },
+    /** The rail button and `Ctrl+H`, which toggle as every other dock's do. */
+    async toggle() {
+      if (deps.isOpen()) {
+        deps.setOpen(false);
+        return;
+      }
+      await this.open();
+    },
+    close() {
+      deps.setOpen(false);
+    },
+    /**
+     * Follow the active connection (§6.8's rule, now that this can stay open
+     * across a switch).
+     *
+     * A dialog was opened, read and dismissed inside one connection, so its
+     * scope could be decided once at `open()`. A dock outlives the switch: the
+     * box says "This connection only" and would have gone on showing the old
+     * server's statements, with nothing on screen saying which server they
+     * came from. Shut, it costs nothing — the search is not sent.
+     */
+    connectionChanged() {
+      if (!deps.isOpen()) return;
+      const active = deps.activeConnection();
+      const scoped = deps.thisConnectionOnly.checked;
+      // **Only the availability follows the connection, not the choice.** The
+      // first cut called `syncScope()` here, which re-checked the box on
+      // every switch and so overrode a deliberate "every connection" with a
+      // list of one -- caught by `an unscoped list is not re-read on a
+      // switch`, which is the test that exists because `open()` and a switch
+      // want different things from the same two lines.
+      deps.thisConnectionOnly.disabled = active === null;
+      if (scoped && active === null) {
+        // There is no connection left to be scoped to, so widen rather than
+        // keep showing a list filtered by a connection that has gone.
+        deps.thisConnectionOnly.checked = false;
+        void refresh();
+        return;
+      }
+      // Re-read only when the scope is the connection: an all-connections
+      // list is the same list whichever one is active.
+      if (scoped) void refresh();
     },
   };
 }

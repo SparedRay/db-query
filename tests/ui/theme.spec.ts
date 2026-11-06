@@ -145,3 +145,60 @@ for (const scheme of ["light", "dark"] as const) {
     expect(painted.tabs).not.toBe(painted.pane);
   });
 }
+
+/**
+ * Every dropdown in the app is ours, not the platform's.
+ *
+ * A native `<select>` is drawn by the operating system, and on Windows that
+ * is a bevelled grey button from another decade sitting in the middle of a
+ * dark panel. `color-scheme: dark` tints it; only `appearance: none` replaces
+ * it. Reported from the batch runner, whose two dropdowns had no CSS at all.
+ *
+ * The test walks the DOM rather than a list of ids, so a `<select>` added
+ * later is covered by being a `<select>` — which is the whole point of the
+ * rule being a base rule. The one the performance panel gained this week was
+ * wrong for exactly as long as there was no such test.
+ */
+test("no dropdown is left to the platform to draw", async ({ page }) => {
+  await boot(page);
+  // Opened so their dropdowns are laid out and measurable, not display:none.
+  await page.click("#btn-settings");
+
+  const unstyled = await page.evaluate(() =>
+    [...document.querySelectorAll("select")]
+      .map((el) => {
+        const s = getComputedStyle(el);
+        return {
+          id: el.id || el.className || "(anonymous)",
+          appearance: s.appearance,
+          // The arrow we draw ourselves. Without it the control is a plain
+          // box with no sign that it opens.
+          image: s.backgroundImage === "none" ? "none" : "set",
+        };
+      })
+      .filter((s) => s.appearance !== "none" || s.image !== "set"),
+  );
+
+  expect(unstyled, "these dropdowns are still drawn by the platform").toEqual([]);
+  // And there is something to check, so the filter above cannot pass by
+  // finding nothing at all.
+  const count = await page.locator("select").count();
+  expect(count).toBeGreaterThan(4);
+});
+
+test("the dropdown arrow follows the theme", async ({ page }) => {
+  await boot(page);
+  const arrow = () =>
+    page.evaluate(() => getComputedStyle(document.querySelector("select")!).backgroundImage);
+
+  await chooseTheme(page, "dark");
+  const dark = await arrow();
+  await chooseTheme(page, "light");
+  const light = await arrow();
+
+  // A data URI cannot take `currentColor`, so the two themes carry different
+  // images. Identical ones would mean one of them is invisible.
+  expect(dark).not.toBe(light);
+  expect(dark).toContain("svg");
+  expect(light).toContain("svg");
+});

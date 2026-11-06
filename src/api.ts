@@ -1151,6 +1151,7 @@ export interface Diagnostic {
  */
 export type WorkloadVerdict =
   | "missingIndex"
+  | "predicateNotIndexable"
   | "noIndexWillHelp"
   | "viewBlocksFilter"
   | "rowByRowLoop"
@@ -1253,9 +1254,12 @@ export interface IndexFinding {
 
 export interface IndexInventory {
   findings: IndexFinding[];
-  /** `false` when performance_schema refused, so the never-read list is
+  /** `false` when the usage read did not answer, so the never-read list is
    *  **absent rather than empty** — a different claim. */
   usageAvailable: boolean;
+  /** Why it did not answer. The panel used to assert "performance_schema
+   *  refused" for every cause, including a malformed query of its own. */
+  usageRefusal: string | null;
   indexesSeen: number;
   databases: string[];
 }

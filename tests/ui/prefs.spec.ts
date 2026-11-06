@@ -59,8 +59,14 @@ test("preferences come back from the file with nothing in this origin's storage"
   // Applied before the first frame, not after: the font size is a CSS variable
   // the editor is drawn with.
   await expect(page.locator("html")).toHaveAttribute("style", /--code-size:\s*18px/);
-  // And the integration is on, so the CLI is where questions go.
-  await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Ask Copilot CLI/);
+  // And the integration is on, so the CLI is where questions go. The rail
+  // button is named for the feature now, with the provider on its second
+  // line — which is still the evidence this test wants, since nothing but
+  // the loaded preference could have put it there.
+  await expect(page.locator("#btn-assistant")).toHaveAttribute(
+    "title",
+    /Ask the AI assistant.*\n.*Answered by Copilot CLI/s,
+  );
 
   await page.click("#btn-settings");
   await page.click("#set-tab-assistant");
