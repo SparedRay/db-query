@@ -258,13 +258,13 @@ pub async fn stream_to_file(
     header: impl FnOnce(&MySqlRow) -> Result<String, String>,
 ) -> Result<(usize, u64, bool), String> {
     let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
-    let mut guard = tab.exec.lock().await;
-    session::ensure_exec(&mut guard, &tab).await?;
+    // Clears a previous run's cancel flag before opening anything — see
+    // `session::begin_run`. An export is fresh work like any other.
+    let (mut guard, _) = session::begin_run(&tab).await?;
     let conn = guard
         .as_mut()
         .expect("ensure_exec guarantees a live connection");
 
-    tab.cancel_requested.store(false, Ordering::SeqCst);
     tab.running.store(true, Ordering::SeqCst);
 
     let watching = Arc::clone(&tab);
@@ -500,13 +500,13 @@ pub(crate) async fn mysql_run_script(
     // so there is no way to run this against the wrong one.
     let tab: Arc<TabSession> = session::tab(state, tab_id).await?;
 
-    let mut guard = tab.exec.lock().await;
-    let reconnected = session::ensure_exec(&mut guard, &tab).await?;
+    // The cancel flag is cleared inside this, **before** a connection is
+    // opened. `session::begin_run` records why that order is load-bearing.
+    let (mut guard, reconnected) = session::begin_run(&tab).await?;
     let conn = guard
         .as_mut()
         .expect("ensure_exec guarantees a live connection");
 
-    tab.cancel_requested.store(false, Ordering::SeqCst);
     tab.running.store(true, Ordering::SeqCst);
 
     let script_start = Instant::now();

@@ -890,6 +890,34 @@ pub async fn ensure_exec(
     Ok(replaced)
 }
 
+/// Take this tab's editor connection for fresh work, opening one if needed.
+///
+/// **The flag is cleared before `ensure_exec`, and that order is the whole
+/// point of this function.** `ensure_exec` opens through [`cancellable`], which
+/// refuses outright while `cancel_requested` is set — so a tab whose last run
+/// was cancelled *and abandoned* could never open another connection. It
+/// reported `Cancelled.` for every statement, every export and every change of
+/// database, and the only way out was to disconnect and connect again. Found on
+/// a `SELECT * FROM information_schema.rds_metrics_gauge` that Aurora never
+/// returned from: the cancel dropped the connection, as it is meant to, and
+/// then nothing could replace it.
+///
+/// Clearing it here is safe because this runs with the `exec` lock held, and a
+/// run holds that lock for its whole life. Holding it means no run is in
+/// flight, so there is nothing left for the flag to describe.
+///
+/// `running` is deliberately **not** set here: it is set by the caller after
+/// this returns, so that a failure to connect cannot leave a tab marked busy
+/// for the rest of the session.
+pub async fn begin_run(
+    tab: &TabSession,
+) -> Result<(tokio::sync::MutexGuard<'_, Option<MySqlConnection>>, bool), String> {
+    let mut guard = tab.exec.lock().await;
+    tab.cancel_requested.store(false, Ordering::SeqCst);
+    let replaced = ensure_exec(&mut guard, tab).await?;
+    Ok((guard, replaced))
+}
+
 pub(crate) async fn mysql_use_database(
     state: &AppState,
     tab_id: &str,
@@ -898,8 +926,7 @@ pub(crate) async fn mysql_use_database(
     let tab = tab(state, tab_id).await?;
     let quoted = crate::sqlgen::quote_ident(db)?;
 
-    let mut guard = tab.exec.lock().await;
-    ensure_exec(&mut guard, &tab).await?;
+    let (mut guard, _) = begin_run(&tab).await?;
     let conn = guard.as_mut().expect("ensure_exec guarantees a connection");
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("USE {quoted}")))
         .execute(&mut *conn)
@@ -1122,6 +1149,65 @@ pub(crate) mod tests {
             capabilities,
             introspection_count: AtomicU64::new(0),
         }))
+    }
+
+    /// A tab whose server refuses at once, rather than one that is merely
+    /// unroutable: `offline_tab`'s `db.example.com` would spend a DNS lookup
+    /// and a connect timeout, and a unit test cannot afford either.
+    fn unreachable_tab() -> TabSession {
+        let mut profile = sample();
+        profile.host = "127.0.0.1".into();
+        profile.port = 1;
+        profile.database = None;
+        let engine =
+            crate::elastic::ElasticEngine::new("http://127.0.0.1:1", Default::default(), None);
+        let capabilities = engine.capabilities().clone();
+        let (id, profile) = ServerConn::parts(profile);
+        TabSession::new(Arc::new(ServerConn {
+            id,
+            profile,
+            password: String::new(),
+            killer: None,
+            meta: None,
+            schema_cache: Mutex::new(HashMap::new()),
+            engine: Box::new(engine),
+            server_version: Some("test".into()),
+            capabilities,
+            introspection_count: AtomicU64::new(0),
+        }))
+    }
+
+    /// **A cancel must not outlive the run it cancelled.**
+    ///
+    /// Reported against a `SELECT` on `information_schema.rds_metrics_gauge`
+    /// that Aurora never returned from. Cancel did its job -- the wait stopped
+    /// and the mid-protocol connection was dropped -- and from then on the tab
+    /// answered `Cancelled.` to everything, because `ensure_exec` opens through
+    /// `cancellable` and the flag was still set. Disconnecting and connecting
+    /// again was the only way out, which is not a cancel, it is a restart.
+    ///
+    /// The assertion is about *which* error comes back: port 1 refuses, so a
+    /// tab that got as far as the socket fails with a connection error. Being
+    /// told `Cancelled.` instead means it never tried.
+    #[tokio::test]
+    async fn a_cancelled_run_does_not_refuse_the_next_connection() {
+        let tab = unreachable_tab();
+        // Exactly the state Cancel leaves behind when the statement never came
+        // back: flag set, connection abandoned.
+        tab.cancel_requested.store(true, Ordering::SeqCst);
+        assert!(tab.exec.lock().await.is_none(), "nothing to reuse");
+
+        let err = begin_run(&tab)
+            .await
+            .expect_err("nothing is listening on port 1");
+        assert!(
+            !err.contains(CANCELLED),
+            "the next run was refused by the last run's cancel: {err}"
+        );
+        assert!(
+            !tab.cancel_requested.load(Ordering::SeqCst),
+            "the flag describes the run in flight, so starting one clears it"
+        );
     }
 
     /// **What Cancel has to mean when the other end is not there.** A query
