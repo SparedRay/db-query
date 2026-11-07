@@ -1477,6 +1477,10 @@ pub struct IndexInventory {
     pub usage_available: bool,
     /// Why it did not answer. Shown instead of a guess at the cause.
     pub usage_refusal: Option<String>,
+    /// How the indexes divide. `None` whenever `usage_available` is false:
+    /// absent, rather than a split of three zeroes that would read as "every
+    /// index on this server has been read".
+    pub usage: Option<workload::IndexUsageSplit>,
     pub indexes_seen: usize,
     pub databases: Vec<String>,
 }
@@ -1539,6 +1543,9 @@ async fn workload_indexes(
         findings: workload::index_findings(&scan.indexes, &scan.uses, &unindexed, &writes),
         usage_available: scan.usage_available,
         usage_refusal: scan.usage_refusal,
+        usage: scan
+            .usage_available
+            .then(|| workload::index_usage_split(&scan.uses)),
         indexes_seen: scan.indexes.len(),
         databases: dbs,
     })

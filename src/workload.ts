@@ -49,6 +49,15 @@ import {
   type WorkloadClass,
   type WorkloadVerdict,
 } from "./api";
+import {
+  type BarRow,
+  type PairRow,
+  decades,
+  dumbbells,
+  pairLegend,
+  rankedBars,
+  segmentedBar,
+} from "./charts";
 
 export interface WorkloadDeps {
   /** Elements, resolved by the caller so this module owns no lookups. */
@@ -71,8 +80,20 @@ export interface WorkloadDeps {
   sort: HTMLSelectElement;
   counts: Record<WorkloadClass, HTMLElement>;
   list: HTMLElement;
+  /** Where the server's time went, as a proportion (Stage 33 §4.1). */
+  split: HTMLElement;
+  /** The chart card: one switch, three drawings of the rows below it. */
+  chart: HTMLElement;
+  chartViews: HTMLElement;
+  chartBody: HTMLElement;
+  chartTitle: HTMLElement;
+  /** Says "log scale" where the axis is one. A reader who takes a log axis
+   *  for a linear one has read the chart backwards, so it is never implied. */
+  chartScale: HTMLElement;
   invRun: HTMLButtonElement;
   invNote: HTMLElement;
+  /** How the indexes divide, above the list of the ones worth questioning. */
+  invSplit: HTMLElement;
   inv: HTMLElement;
   windows: HTMLElement;
   baseline: HTMLButtonElement;
@@ -92,6 +113,18 @@ export interface WorkloadDeps {
 }
 
 type Sort = "time" | "examined" | "execs";
+
+/** Which of the three drawings the chart card is showing (Stage 33). */
+type ChartView = "ranked" | "ratio" | "latency";
+
+/**
+ * How many rows a chart draws.
+ *
+ * Five, in a 420px column, with everything below them folded into one bar on
+ * the ranked chart. Not a scroller: a chart you have to scroll has stopped
+ * being a glance and the list underneath is already the long form.
+ */
+const CHART_ROWS = 5;
 
 /** What each verdict is called, and whether it proposes anything. */
 const VERDICTS: Record<WorkloadVerdict, string> = {
@@ -184,6 +217,7 @@ export function createWorkload(deps: WorkloadDeps) {
   let view: "workload" | "indexes" = "workload";
   let only: WorkloadClass = "application";
   let sort: Sort = "time";
+  let chartView: ChartView = "ranked";
   let expanded: string | null = null;
   let inventory: IndexInventory | null = null;
   /** Which window the person asked for — not which one they got. */
@@ -302,6 +336,272 @@ export function createWorkload(deps: WorkloadDeps) {
         ),
       );
     }
+  }
+
+  // ------------------------------------------------------------ the charts
+  //
+  // Stage 33. The panel measured everything and drew none of it: the two
+  // facts that decide a verdict -- 2,599 : 1 and 1.0 : 1 -- sat in identical
+  // grey chips at the bottom of two rows, three hundred-fold apart and the
+  // same size on screen. Every claim this panel makes is a claim about a
+  // magnitude, and until now not one of them was drawn to scale.
+
+  /**
+   * Where the server's time went, before a single shape is read.
+   *
+   * The honest first fact on a shared instance is what fraction of the
+   * counters are yours at all — the panel said it in a subordinate clause of
+   * the lead's second line, after the finding it qualifies.
+   *
+   * **Seconds, where the class switch under it carries counts.** The two
+   * disagreeing about what they measure would be worse than no bar, so the
+   * legend prints its own figures and names them. The switch was going to
+   * take the seconds instead, which is what the Stage 33 mockup proposed; at
+   * 420px three buttons reading `App 96h 40m` wrap onto two lines, and the
+   * row already shares its width with the sort control.
+   */
+  function paintSplit() {
+    deps.split.replaceChildren();
+    const report = panel?.report;
+    if (!report) return;
+
+    deps.split.append(
+      segmentedBar([
+        {
+          label: "App",
+          value: report.applicationSecs,
+          tone: "mark",
+          text: duration(report.applicationSecs),
+        },
+        {
+          label: "Driver",
+          value: report.chatterSecs,
+          tone: "quiet",
+          text: duration(report.chatterSecs),
+        },
+        {
+          label: "Platform",
+          value: report.platformSecs,
+          tone: "faint",
+          text: duration(report.platformSecs),
+        },
+      ]),
+    );
+  }
+
+  /** What the ranked chart draws, which is whatever the sort is ranking by. */
+  const METRIC: Record<
+    Sort,
+    { title: string; of: (s: WorkloadShape) => number; text: (n: number) => string }
+  > = {
+    time: { title: "Shapes by server time", of: (s) => s.totalSecs, text: duration },
+    examined: { title: "Shapes by rows examined", of: (s) => s.rowsExamined, text: compact },
+    execs: { title: "Shapes by executions", of: (s) => s.execs, text: compact },
+  };
+
+  /** Milliseconds, on an axis whose decades cross from ms into seconds. */
+  function millis(ms: number): string {
+    return ms < 1000 ? `${Math.round(ms).toLocaleString()} ms` : `${+(ms / 1000).toFixed(2)} s`;
+  }
+
+  function paintChart() {
+    const report = panel?.report;
+    const rows = shapes();
+    deps.chartBody.replaceChildren();
+    // Nothing to rank is not an empty chart, it is no chart. The list below
+    // already says why the list is empty.
+    deps.chart.hidden = !report || rows.length === 0;
+    if (!report || rows.length === 0) return;
+
+    // `QUANTILE_95` arrived in 8.0, so on an older server the tab is
+    // **absent** rather than present and empty — the same claim
+    // `usageAvailable` makes about never-read indexes.
+    if (!report.hasQuantiles && chartView === "latency") chartView = "ranked";
+    for (const btn of deps.chartViews.querySelectorAll<HTMLButtonElement>(".seg-btn")) {
+      if (btn.dataset.chart === "latency") btn.hidden = !report.hasQuantiles;
+      btn.setAttribute("aria-pressed", String(btn.dataset.chart === chartView));
+    }
+
+    if (chartView === "ranked") drawRanked(rows);
+    else if (chartView === "ratio") drawRatio(rows);
+    else drawLatency(rows);
+  }
+
+  /**
+   * One shape against the rest, on a linear scale.
+   *
+   * **Linear deliberately.** A log axis would make these bars comparable and
+   * that is precisely the wrong favour: on UAT one shape is twenty-three
+   * times the next one, that disparity *is* the finding, and a scale that
+   * evened it out would have edited the result before the reader saw it. The
+   * small bars are supposed to look small.
+   *
+   * One tone for every bar with the accent on the first — emphasis, not a
+   * ramp. Shading each bar darker-where-bigger would encode the bar's length
+   * twice and spend the only free channel on what the reader can already see.
+   */
+  function drawRanked(rows: WorkloadShape[]) {
+    const metric = METRIC[sort];
+    deps.chartTitle.textContent = metric.title;
+    deps.chartScale.textContent =
+      rows.length > CHART_ROWS ? `top ${CHART_ROWS} of ${rows.length}` : "";
+
+    const head = rows.slice(0, CHART_ROWS);
+    const tail = rows.slice(CHART_ROWS);
+
+    const bars: BarRow[] = head.map((s, i) => {
+      const value = metric.of(s);
+      return {
+        label: s.text,
+        value,
+        text: metric.text(value),
+        title: `${s.text}\n${metric.text(value)} · ${VERDICTS[s.verdict]}`,
+        // The first row is the one the lead sentence already names, because
+        // the sort and the metric are the same choice.
+        lead: i === 0,
+      };
+    });
+
+    if (tail.length > 0) {
+      const rest = tail.reduce((n, s) => n + metric.of(s), 0);
+      bars.push({
+        label: `${tail.length} more shape${tail.length === 1 ? "" : "s"}`,
+        value: rest,
+        text: metric.text(rest),
+        title: `The ${tail.length} shapes below the top ${CHART_ROWS}, added together.`,
+      });
+    }
+
+    deps.chartBody.append(
+      rankedBars(bars, {
+        note:
+          "Linear, so the gap between the first bar and the rest is the size it really is.",
+      }),
+    );
+  }
+
+  /**
+   * The evidence the verdict is already based on.
+   *
+   * This panel classifies a shape by asking how much it reads against how
+   * much it returns, and then printed that ratio as a chip of grey text.
+   * Drawn against a 1 : 1 rule the verdicts stop being assertions: a shape
+   * far to the right is reading its way through a table, and a shape *on* the
+   * line returns everything it reads, which is the one case where no index
+   * can help.
+   *
+   * **Log here, for the opposite reason to the ranked chart.** On a linear
+   * axis every bar but the first is a sliver and the range the verdict
+   * actually turns in — 1 : 1 to perhaps 50 : 1 — is the first two percent of
+   * the track.
+   */
+  function drawRatio(rows: WorkloadShape[]) {
+    deps.chartTitle.textContent = "Rows read per row returned";
+    deps.chartScale.textContent = "log scale";
+
+    // A write returns nothing, so it has no ratio — and a shape with no ratio
+    // is left out rather than drawn at zero, which would put it on the 1 : 1
+    // rule and claim it reads exactly what it returns.
+    const rated = rows
+      .flatMap((s) => (s.ratio === null ? [] : [{ shape: s, ratio: s.ratio }]))
+      .sort((a, b) => b.ratio - a.ratio)
+      .slice(0, CHART_ROWS);
+
+    if (rated.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "wl-empty";
+      empty.textContent =
+        "Nothing here returned a row, so there is no read-to-returned ratio to draw.";
+      deps.chartBody.append(empty);
+      return;
+    }
+
+    const axis = {
+      ...decades(rated[0].ratio),
+      text: (n: number) =>
+        n === 1 ? "1 : 1" : n >= 1e6 ? compact(n) : n.toLocaleString(),
+    };
+
+    deps.chartBody.append(
+      rankedBars(
+        rated.map(({ shape, ratio }, i) => ({
+          label: shape.text,
+          value: ratio,
+          text: ratioText(ratio),
+          title:
+            `${shape.text}\n${shape.rowsExamined.toLocaleString()} rows examined to return ` +
+            `${shape.rowsSent.toLocaleString()} · ${VERDICTS[shape.verdict]}`,
+          lead: i === 0,
+        })),
+        {
+          axis,
+          note:
+            "The rule at 1 : 1 is a query that returns everything it reads. A bar with no " +
+            "length is sitting on it, and that is the one case no index can help.",
+        },
+      ),
+    );
+  }
+
+  /**
+   * The gap between the mean and the tail, which is the one thing this panel
+   * measures and has never been able to show.
+   *
+   * The list is ranked by total time, so a shape that runs rarely and is
+   * catastrophic when it does never reaches the top of it. `workload.rs`
+   * already says why it takes the column — *tail latency matters more than
+   * the mean for a shape that is usually fine and occasionally terrible* —
+   * and nothing on screen had ever shown the difference.
+   *
+   * **Ranked by the gap, not by time.** Ranked by time this draws the same
+   * five rows as the ranked chart and finds nothing.
+   */
+  function drawLatency(rows: WorkloadShape[]) {
+    deps.chartTitle.textContent = "Average → 95th percentile";
+    deps.chartScale.textContent = "log scale";
+
+    const pairs = rows
+      .flatMap((s) =>
+        s.p95Millis === null || s.avgMillis <= 0
+          ? []
+          : [{ shape: s, avg: s.avgMillis, p95: s.p95Millis, gap: s.p95Millis / s.avgMillis }],
+      )
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, CHART_ROWS);
+
+    if (pairs.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "wl-empty";
+      empty.textContent = "No shape here has both an average and a 95th percentile to compare.";
+      deps.chartBody.append(empty);
+      return;
+    }
+
+    const axis = {
+      ...decades(Math.max(...pairs.map((p) => p.p95))),
+      text: millis,
+    };
+
+    const drawn: PairRow[] = pairs.map(({ shape, avg, p95, gap }, i) => ({
+      label: shape.text,
+      from: avg,
+      to: p95,
+      text: `${millis(avg)} → ${millis(p95)}`,
+      title:
+        `${shape.text}\nThe slowest 5% take ${gap >= 10 ? Math.round(gap) : gap.toFixed(1)}× ` +
+        `the average · ${shape.execs.toLocaleString()} executions`,
+      flag: i === 0,
+    }));
+
+    deps.chartBody.append(
+      dumbbells(drawn, {
+        axis,
+        note:
+          "Ranked by the gap rather than by total time: a shape that runs rarely and is " +
+          "terrible when it does never reaches the top of the list.",
+      }),
+      pairLegend("average", "95th percentile"),
+    );
   }
 
   /**
@@ -611,9 +911,57 @@ export function createWorkload(deps: WorkloadDeps) {
     unindexedForeignKey: "foreign key, no index",
   };
 
+  /**
+   * How the indexes divide, above the list of the ones worth questioning
+   * (Stage 33 §4.3).
+   *
+   * The inventory reports how many findings it has and never what that is a
+   * fraction of. On UAT it is 245 of 1,025 — a quarter of every index on the
+   * instance — and a panel proposing to drop a quarter of an instance's
+   * indexes should say so before the first `DROP INDEX` is read.
+   *
+   * `PRIMARY` is a part of its own rather than folded into "read", because
+   * those are excluded by **the rule** and not by the data: a third category
+   * the list makes invisible by simply not showing it.
+   *
+   * Drawn only when the usage read answered. With no usage there is no
+   * never-read segment, and a bar showing zero never-read would be a claim
+   * nobody made — the same absent-rather-than-empty distinction the note
+   * above it already draws.
+   */
+  function paintInvSplit() {
+    deps.invSplit.replaceChildren();
+    const usage = inventory?.usage;
+    if (!usage || usage.seen === 0) return;
+
+    deps.invSplit.append(
+      segmentedBar([
+        {
+          label: "Read",
+          value: usage.read,
+          tone: "mark",
+          text: usage.read.toLocaleString(),
+        },
+        {
+          label: "Never read",
+          value: usage.unread,
+          tone: "quiet",
+          text: usage.unread.toLocaleString(),
+        },
+        {
+          label: "PRIMARY",
+          value: usage.primaryKeys,
+          tone: "faint",
+          text: usage.primaryKeys.toLocaleString(),
+        },
+      ]),
+    );
+  }
+
   function paintInventory() {
     deps.inv.replaceChildren();
     deps.inv.hidden = inventory === null;
+    paintInvSplit();
     if (!inventory) return;
 
     const findings = inventory.findings;
@@ -788,10 +1136,16 @@ export function createWorkload(deps: WorkloadDeps) {
 
     if (panel?.report) {
       paintLead();
+      paintSplit();
       paintCounts();
       paintWindows();
+      paintChart();
       paintList();
       paintInventory();
+    } else {
+      deps.split.replaceChildren();
+      deps.invSplit.replaceChildren();
+      deps.chart.hidden = true;
     }
   }
 
@@ -931,6 +1285,17 @@ export function createWorkload(deps: WorkloadDeps) {
     sort = next;
     expanded = null;
     paint();
+  });
+
+  // Only the chart is repainted: the three views are three drawings of the
+  // same rows, so nothing below the card changes and `paint()` would rebuild
+  // the list and lose whichever row was expanded.
+  deps.chartViews.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".seg-btn");
+    const next = btn?.dataset.chart as ChartView | undefined;
+    if (!next || next === chartView) return;
+    chartView = next;
+    paintChart();
   });
 
   deps.views.addEventListener("click", (e) => {

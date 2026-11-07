@@ -1252,6 +1252,27 @@ export interface IndexFinding {
   statement: string;
 }
 
+/**
+ * How the indexes on this connection divide (Stage 33).
+ *
+ * The inventory lists what is worth questioning and never says what that is a
+ * fraction *of*: 245 findings reads as a long list, and 245 of 1,025 reads as
+ * a quarter of every index on the instance. The three parts are counted from
+ * the **usage rows**, not from the catalogue, so `seen` is the denominator the
+ * split is actually true of — the two agreed exactly on UAT, and that is a
+ * measurement rather than a guarantee.
+ *
+ * `primaryKeys` is its own part rather than folded into `read`, because those
+ * are excluded by the rule and not by the data. A third category the list
+ * makes invisible by simply not showing it.
+ */
+export interface IndexUsage {
+  seen: number;
+  read: number;
+  unread: number;
+  primaryKeys: number;
+}
+
 export interface IndexInventory {
   findings: IndexFinding[];
   /** `false` when the usage read did not answer, so the never-read list is
@@ -1260,6 +1281,10 @@ export interface IndexInventory {
   /** Why it did not answer. The panel used to assert "performance_schema
    *  refused" for every cause, including a malformed query of its own. */
   usageRefusal: string | null;
+  /** The split, or `null` when the usage read did not answer — the same
+   *  absent-rather-than-empty claim `usageAvailable` makes, in a shape that
+   *  cannot be mistaken for three zeroes. */
+  usage: IndexUsage | null;
   indexesSeen: number;
   databases: string[];
 }

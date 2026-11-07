@@ -616,6 +616,12 @@ function inventory(over: Record<string, unknown> = {}) {
       },
     ],
     usageAvailable: true,
+    // The real split off UAT, 2026-11-06. Deliberately **not** `indexesSeen`:
+    // the catalogue and the usage read are two reads that agreed exactly on
+    // that instance, and a measurement is not a guarantee — so the bar is
+    // drawn from the rows the never-read rule was actually applied to, and a
+    // test below proves it uses this denominator and not the other.
+    usage: { seen: 1025, read: 648, unread: 245, primaryKeys: 132 },
     indexesSeen: 1284,
     databases: ["appdata", "authdata"],
     ...over,
@@ -1162,4 +1168,304 @@ test("switching connection forgets the other server's baseline window", async ({
   const last = reads[reads.length - 1].args as { connectionId: string; sinceBaseline: boolean };
   expect(last.connectionId).toBe("qa");
   expect(last.sinceBaseline).toBe(false);
+});
+
+// ------------------------------------------------------- the charts (Stage 33)
+
+/**
+ * The panel measured everything and drew none of it.
+ *
+ * The two facts that decide a verdict — 2,599 : 1 and 1.0 : 1 — sat in
+ * identical grey chips at the bottom of two rows, three hundred-fold apart and
+ * the same size on screen. Every claim this panel makes is a claim about a
+ * magnitude, and until Stage 33 not one of them was drawn to scale.
+ *
+ * **The marks are asserted, not the pixels.** A bar's `style.width` is the
+ * number the chart was told to draw; its rendered width is that number through
+ * a layout nobody is testing here. Every assertion below reads the mark.
+ */
+
+/** What each bar in the chart card was set to. */
+function fills(page: Page) {
+  return page
+    .locator("#wl-chart-body .chart-fill")
+    .evaluateAll((els) => els.map((el) => (el as HTMLElement).style.width));
+}
+
+/** The shares a segmented bar was given, in order. */
+function shares(page: Page, scope: string) {
+  return page
+    .locator(`${scope} .chart-part`)
+    .evaluateAll((els) => els.map((el) => Number((el as HTMLElement).style.flexGrow)));
+}
+
+async function showChart(page: Page, which: "ranked" | "ratio" | "latency") {
+  await page.click(`#wl-chart-views .seg-btn[data-chart="${which}"]`);
+  await expect(page.locator(`#wl-chart-views .seg-btn[data-chart="${which}"]`)).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+}
+
+test("where the server's time went is a proportion, not a subordinate clause", async ({
+  page,
+}) => {
+  await open(page);
+
+  // 88h 20m application, 38m 40s driver, 59m 58s platform. The lead's second
+  // line has always carried these; what it could not carry is that the first
+  // one is 98% of the reading.
+  await expect(page.locator("#wl-split .chart-key-val").nth(0)).toHaveText("88h 20m");
+  await expect(page.locator("#wl-split .chart-key-val").nth(1)).toHaveText("38m 40s");
+  await expect(page.locator("#wl-split .chart-key-val").nth(2)).toHaveText("59m 58s");
+
+  const parts = await shares(page, "#wl-split");
+  expect(parts).toHaveLength(3);
+  expect(parts[0]).toBeGreaterThan(0.97);
+  expect(parts[0] + parts[1] + parts[2]).toBeCloseTo(1, 5);
+
+  // Seconds here, counts on the switch below. The two must never be mistaken
+  // for each other, which is why the legend names its own figures.
+  await expect(page.locator("#wl-count-application")).toHaveText("2");
+});
+
+test("the ranked chart draws one shape against the rest, linear", async ({ page }) => {
+  await open(page);
+
+  await expect(page.locator("#wl-chart-title")).toHaveText("Shapes by server time");
+  // 285,820s against 32,200s. Linear, so the second bar is an eighth of the
+  // first — which is the finding. On a log axis it would be seven tenths.
+  expect(await fills(page)).toEqual(["100%", "11.27%"]);
+
+  // Emphasis, not a colour per row: the one the lead sentence already names.
+  await expect(page.locator("#wl-chart-body .chart-row.lead")).toHaveCount(1);
+  await expect(page.locator("#wl-chart-body .chart-row").nth(0)).toHaveClass(/lead/);
+  await expect(page.locator("#wl-chart-body .chart-row").nth(0)).toContainText("Supplier");
+
+  // No axis on a linear chart: there is nothing to read off it that the
+  // figure at the end of each row does not already say.
+  await expect(page.locator("#wl-chart-body .chart-axis")).toHaveCount(0);
+});
+
+test("the ranked chart follows the sort and says which metric it drew", async ({ page }) => {
+  await open(page);
+  const before = (await calls(page)).filter((c) => c.cmd === "workload_read").length;
+
+  await page.selectOption("#wl-sort", "execs");
+  await expect(page.locator("#wl-chart-title")).toHaveText("Shapes by executions");
+  // 40,668,477 against 3,621 — a thousand-fold, where by time it was eight.
+  // The same two shapes, and a completely different picture.
+  expect(await fills(page)).toEqual(["100%", "0.01%"]);
+  await expect(page.locator("#wl-chart-body .chart-val").nth(0)).toHaveText("40.7 M");
+
+  // The chart is drawn from the reading already in hand.
+  const after = (await calls(page)).filter((c) => c.cmd === "workload_read").length;
+  expect(after).toBe(before);
+});
+
+test("selectivity puts the shape that returns what it reads on the 1 : 1 rule", async ({
+  page,
+}) => {
+  await open(page);
+  await showChart(page, "ratio");
+
+  await expect(page.locator("#wl-chart-title")).toHaveText("Rows read per row returned");
+  await expect(page.locator("#wl-chart-scale")).toHaveText("log scale");
+
+  // 2,599 : 1 on a decade axis topping out at 10,000 — log10(2599.2)/4.
+  // And `acl_rule` at exactly 1 : 1 is drawn as **nothing**: a 3px stub
+  // would say "nearly nothing" where the truth is "nothing", and that zero
+  // is the whole reason its verdict differs from the row above it.
+  expect(await fills(page)).toEqual(["85.37%", "0%"]);
+  await expect(page.locator("#wl-chart-body .chart-val").nth(0)).toHaveText("2,599 : 1");
+  await expect(page.locator("#wl-chart-body .chart-val").nth(1)).toHaveText("1.0 : 1");
+
+  // The one assertion here that reads the paint rather than the mark. A
+  // `min-width` is what would turn that zero into a 3px stub, and a stub does
+  // not change the inline width — so the claim "drawn as nothing" is only
+  // true of the rendered box, and only a rendered box can falsify it.
+  const painted = await page
+    .locator("#wl-chart-body .chart-fill")
+    .nth(1)
+    .evaluate((el) => el.getBoundingClientRect().width);
+  expect(painted).toBe(0);
+
+  // The axis exists and is labelled from the rule, so nobody reads it linear.
+  await expect(page.locator("#wl-chart-body .chart-tick").first()).toHaveText("1 : 1");
+  await expect(page.locator("#wl-chart-body .chart-tick").last()).toHaveText("10,000");
+});
+
+test("a write has no ratio and is left out rather than drawn on the rule", async ({ page }) => {
+  // An UPDATE returns nothing, so `ratio` is null. Drawn at zero it would sit
+  // on the 1 : 1 rule and claim it reads exactly what it returns — which is
+  // the one place on this chart that means "no index can help".
+  const update = shape({
+    digest: "supplier-update",
+    text: "UPDATE `Supplier` SET `last_pulled` = ? WHERE `SupplierId` = ?",
+    verdict: "unclassified",
+    tables: ["supplier"],
+    execs: 40666497,
+    totalSecs: 6270,
+    rowsSent: 0,
+    rowsExamined: 40666497,
+    ratio: null,
+  });
+  await open(
+    page,
+    panel({
+      report: {
+        ...panel().report,
+        shapes: [CREDITOR_SELECT, CASBIN, update, SET_NAMES, HEARTBEAT],
+        totalShapes: 5,
+        applicationShapes: 3,
+      },
+    }),
+  );
+
+  // It is in the list...
+  await expect(page.locator("#wl-list .wl-row")).toHaveCount(3);
+  // ...and in the ranked chart, which measures time and has one for it.
+  await expect(page.locator("#wl-chart-body .chart-row")).toHaveCount(3);
+
+  await showChart(page, "ratio");
+  await expect(page.locator("#wl-chart-body .chart-row")).toHaveCount(2);
+  await expect(page.locator("#wl-chart-body")).not.toContainText("UPDATE");
+});
+
+test("the latency chart is absent, not empty, on a server with no quantiles", async ({ page }) => {
+  await open(page);
+  // QUANTILE_95 arrived in 8.0. The fixture is the pre-8.0 branch.
+  await expect(page.locator('#wl-chart-views .seg-btn[data-chart="latency"]')).toBeHidden();
+  await expect(page.locator('#wl-chart-views .seg-btn[data-chart="ratio"]')).toBeVisible();
+});
+
+test("latency ranks by the gap, not by total time", async ({ page }) => {
+  // The shape this chart exists for: rare, and catastrophic when it runs. By
+  // total time it is the smallest of the three and never reaches the top of
+  // the list, which is why the list has never been able to show it.
+  const spiky = shape({
+    digest: "statement-spike",
+    text: "SELECT `id` FROM `Statement` WHERE `cycle_id` = ?",
+    verdict: "missingIndex",
+    tables: ["statement"],
+    execs: 9120,
+    totalSecs: 109,
+    avgMillis: 12,
+    p95Millis: 1840,
+    rowsSent: 9120,
+    rowsExamined: 912000,
+    ratio: 100,
+  });
+  await open(
+    page,
+    panel({
+      report: {
+        ...panel().report,
+        shapes: [
+          { ...CREDITOR_SELECT, p95Millis: 11 },
+          { ...CASBIN, p95Millis: 9000 },
+          spiky,
+          SET_NAMES,
+          HEARTBEAT,
+        ],
+        totalShapes: 5,
+        applicationShapes: 3,
+        hasQuantiles: true,
+      },
+    }),
+  );
+
+  // By time it is third of three.
+  await expect(page.locator("#wl-chart-body .chart-row").nth(2)).toContainText("Statement");
+
+  await showChart(page, "latency");
+  await expect(page.locator("#wl-chart-title")).toHaveText("Average → 95th percentile");
+  // 1,840 / 12 is 153×, against 1.6× and 1.0×. First, and flagged.
+  const first = page.locator("#wl-chart-body .chart-row").nth(0);
+  await expect(first).toContainText("Statement");
+  await expect(first).toHaveClass(/lead/);
+  await expect(first.locator(".chart-val")).toHaveText("12 ms → 1.84 s");
+
+  // Two ends, named. Identity is never colour alone.
+  await expect(page.locator("#wl-chart .chart-key-name").nth(0)).toHaveText("average");
+  await expect(page.locator("#wl-chart .chart-key-name").nth(1)).toHaveText("95th percentile");
+});
+
+test("the index split is counted from the usage rows, not the catalogue", async ({ page }) => {
+  await readInventory(page);
+
+  await expect(page.locator("#wl-inv-split .chart-key-val").nth(0)).toHaveText("648");
+  await expect(page.locator("#wl-inv-split .chart-key-val").nth(1)).toHaveText("245");
+  await expect(page.locator("#wl-inv-split .chart-key-val").nth(2)).toHaveText("132");
+
+  // 648 of 1,025 is 63%. Of `indexesSeen`, which is 1,284 here, it would be
+  // 50% — two reads that happened to agree on one instance must not be
+  // assumed to agree on the next.
+  const parts = await shares(page, "#wl-inv-split");
+  expect(parts[0]).toBeCloseTo(648 / 1025, 4);
+  expect(parts[1]).toBeCloseTo(245 / 1025, 4);
+  expect(parts[0] + parts[1] + parts[2]).toBeCloseTo(1, 5);
+});
+
+test("no split is drawn when the usage read did not answer", async ({ page }) => {
+  // Absent, not three zeroes. A bar showing nothing never-read would be a
+  // claim nobody made, and it is the claim this panel most wants to avoid.
+  await readInventory(
+    page,
+    inventory({
+      usageAvailable: false,
+      usage: null,
+      usageRefusal: "SELECT command denied to user 'reporting'@'%'",
+      findings: [],
+    }),
+  );
+
+  await expect(page.locator("#wl-inv-split .chart-seg")).toHaveCount(0);
+  await expect(page.locator("#wl-inv-note")).toContainText("denied");
+});
+
+test("switching chart keeps the open row and asks the server nothing", async ({ page }) => {
+  await open(page);
+  await page.click("#wl-list .wl-row");
+  await expect(page.locator("#wl-list .wl-detail")).toHaveCount(1);
+  const before = (await calls(page)).length;
+
+  await showChart(page, "ratio");
+  // Three drawings of the same rows: nothing below the card changes, so the
+  // list is not rebuilt and the row somebody opened stays open.
+  await expect(page.locator("#wl-list .wl-detail")).toHaveCount(1);
+  expect(await calls(page)).toHaveLength(before);
+});
+
+test("a chart does not take the connection's colour", async ({ page }) => {
+  await open(page);
+
+  // Stage 32's rule: `--conn-colour` marks **identity** — which server am I
+  // looking at. The length of a bar is a measurement *about* that server,
+  // which is semantics, and semantics keeps the app's own accent. A chart
+  // that recoloured on connect would read as though the measurement belonged
+  // to the colour.
+  // Resolved, never a literal: the accent differs between the two themes, and
+  // a test that hard-codes one of them passes for the wrong reason in the
+  // other. `connection-accent.spec.ts` is where that rule was written down.
+  const read = () =>
+    page.locator("#wl-chart-body .chart-fill").first().evaluate((el) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--accent)";
+      el.append(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return { fill: getComputedStyle(el).backgroundColor, accent };
+    });
+
+  const before = await read();
+  await page.evaluate(() =>
+    (document.getElementById("app") as HTMLElement).style.setProperty("--conn-colour", "#ef4444"),
+  );
+  const after = await read();
+
+  expect(after.fill).toBe(before.fill);
+  expect(after.fill).not.toBe("rgb(239, 68, 68)");
+  // And it is the accent, rather than merely not being the connection's.
+  expect(after.fill).toBe(after.accent);
 });

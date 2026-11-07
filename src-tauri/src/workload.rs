@@ -1129,6 +1129,50 @@ pub struct IndexUse {
     pub reads: u64,
 }
 
+/// How the indexes on a connection divide (Stage 33).
+///
+/// The inventory has always reported how many findings it has and never what
+/// that is a fraction of. On UAT it is 245 of 1,025 -- a quarter of every
+/// index on the instance -- and a panel proposing to drop a quarter of an
+/// instance's indexes should say so before the first `DROP INDEX` is read.
+///
+/// Counted from the **usage rows**, which is what the never-read rule is
+/// applied to, so `seen` is the denominator the split is actually true of.
+/// The catalogue agreed with it exactly on UAT (1,025 both ways, §8.2.1), and
+/// that is a measurement rather than a guarantee -- so the two are not mixed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexUsageSplit {
+    pub seen: u64,
+    pub read: u64,
+    pub unread: u64,
+    /// Skipped by the rule rather than by the data, so a part of its own.
+    pub primary_keys: u64,
+}
+
+/// Divide the usage rows the same way [`index_findings`] does.
+///
+/// The predicate is spelled out once there and once here, which is a copy --
+/// and the test below is what stops the two drifting, because a split whose
+/// `unread` disagreed with the number of never-read findings beside it would
+/// be worse than no split at all.
+pub fn index_usage_split(uses: &[IndexUse]) -> IndexUsageSplit {
+    let mut split = IndexUsageSplit {
+        seen: uses.len() as u64,
+        ..Default::default()
+    };
+    for row in uses {
+        if row.name.eq_ignore_ascii_case("PRIMARY") {
+            split.primary_keys += 1;
+        } else if row.reads > 0 {
+            split.read += 1;
+        } else {
+            split.unread += 1;
+        }
+    }
+    split
+}
+
 /// Why an index is being questioned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2994,6 +3038,53 @@ mod tests {
             reads: 0,
         }];
         assert!(index_findings(&[], &uses, &[], &HashMap::new()).is_empty());
+    }
+
+    /// The split and the findings apply the same rule, so they must agree.
+    ///
+    /// This is the test that matters about [`index_usage_split`]: its
+    /// predicate is a second copy of the one in [`index_findings`], and a bar
+    /// whose "never read" segment disagreed with the number of never-read
+    /// findings printed beside it would be worse than no bar. Asserted
+    /// against the findings rather than against a literal, so the two cannot
+    /// drift apart without this failing.
+    #[test]
+    fn the_split_agrees_with_the_findings_it_sits_above() {
+        let use_row = |table: &str, name: &str, reads: u64| IndexUse {
+            database: "appdata".into(),
+            table: table.into(),
+            name: name.into(),
+            reads,
+        };
+        let uses = vec![
+            use_row("Supplier", "PRIMARY", 0),
+            use_row("Supplier", "ix_owner", 0),
+            use_row("Supplier", "ix_name", 9_912),
+            use_row("Payment", "PRIMARY", 4_410),
+            use_row("Payment", "ix_stale", 0),
+        ];
+
+        let split = index_usage_split(&uses);
+        assert_eq!(split.seen, 5);
+        // Both PRIMARYs, whether or not the counter says they were read:
+        // they are skipped by the rule, which is a different fact from the
+        // data, and they are their own part for that reason.
+        assert_eq!(split.primary_keys, 2);
+        assert_eq!(split.read, 1);
+        assert_eq!(split.unread, 2);
+        assert_eq!(split.read + split.unread + split.primary_keys, split.seen);
+
+        let unread = index_findings(&[], &uses, &[], &HashMap::new())
+            .iter()
+            .filter(|f| f.fault == IndexFault::NeverRead)
+            .count();
+        assert_eq!(split.unread as usize, unread);
+    }
+
+    /// Nothing read, nothing to divide -- and no division by it either.
+    #[test]
+    fn an_empty_usage_read_splits_into_nothing() {
+        assert_eq!(index_usage_split(&[]), IndexUsageSplit::default());
     }
 
     #[test]

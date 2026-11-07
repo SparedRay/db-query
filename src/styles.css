@@ -83,6 +83,33 @@
   --warn-fg: #fcd34d;
   --numeric: #7dd3fc;
   --null: #6b7280;
+  /* **Chart marks** (Stage 33). Three tones, not a hue per series: the
+     *emphasis* form. One mark takes the app's accent and the rest are
+     drained, which is the honest encoding when a chart's job is "this one,
+     against the rest" — a palette of five hues would spend the only free
+     channel saying what the bar lengths already say.
+
+     Deliberately **not** --conn-colour. Stage 32's rule is that the
+     connection's colour marks identity — which server am I looking at — and
+     the length of a bar is a measurement *about* that server, which is
+     semantics. A chart that recoloured on connect would read as though the
+     measurement belonged to the colour.
+
+     Measured against the surface these sit on (--bg-raised) in both themes:
+     mark 4.43:1 dark / 4.78:1 light, quiet 4.83 / 6.0, faint 2.16 / 2.40.
+     Faint is under 3:1 by choice — it is only ever one segment of a bar whose
+     legend names it and prints its figure, which is the condition that
+     relaxes the floor. The two neutrals are far enough apart to be told apart
+     with any colour vision (ΔE 16.8 dark, 19.8 light, OKLab ×100). */
+  --chart-mark: var(--accent);
+  --chart-quiet: var(--fg-dim);
+  --chart-faint: #4b5563;
+  /* The two ends of a dumbbell: one hue, two steps. Lighter is further on
+     dark and darker is further on light, so the tail is the emphatic end
+     against either ground. */
+  --chart-from: var(--accent);
+  --chart-to: var(--numeric);
+  --chart-grid: var(--border);
   --shadow: rgba(0,0,0,.45);
   --backdrop: rgba(0,0,0,.55);
   --code-size: 12px;
@@ -134,6 +161,15 @@
      distinguishable from ordinary text without shouting. */
   --numeric: #0b6ea8;
   --null: #8b909b;
+  /* The three that cannot be aliases here. --chart-mark, --chart-quiet and
+     --chart-grid follow --accent, --fg-dim and --border, which this block
+     already restates, so they need no line of their own. --chart-to does: on
+     white the emphatic end of a dumbbell has to be the *darker* step, and
+     light's --numeric is a cyan that does not sit on one hue with the step
+     below it. */
+  --chart-faint: #9aa1ad;
+  --chart-from: #7eaaf0;
+  --chart-to: var(--accent);
   --shadow: rgba(15,23,42,.14);
   --backdrop: rgba(15,23,42,.35);
   color-scheme: light;
@@ -2347,6 +2383,125 @@ button .spinner {
 
 /* Two actions on a shape: a tab to run things in, and a question to ask. */
 .wl-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* --- Charts (Stage 33) ---------------------------------------------------
+   Built by `charts.ts`, which knows tones and not colours. Everything here is
+   sized for a 420px dock, because that is the width that kills most of the
+   alternatives: a scatter of rows-examined against selectivity says more than
+   any of these and cannot be read in a 420px column.
+
+   Thin marks and a recessive grid throughout. The one saturated fill is the
+   row the lead sentence already names. */
+
+.chart-split { display: flex; flex-direction: column; gap: 7px; }
+
+/* The segmented bar. The 2px gaps are the *surface* showing through rather
+   than a border on each part: a border would add a line that is not data, and
+   at this height it would be half the mark. */
+.chart-seg { display: flex; gap: 2px; height: 8px; }
+.chart-part { display: block; min-width: 3px; }
+.chart-part:first-child { border-radius: 4px 0 0 4px; }
+.chart-part:last-child { border-radius: 0 4px 4px 0; }
+
+.chart-legend {
+  display: flex; flex-wrap: wrap; gap: 3px 12px;
+  font-size: 10.5px; color: var(--fg-dim); line-height: 1.5;
+}
+.chart-key { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.chart-key-val { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+
+.tone-mark { background: var(--chart-mark); }
+.tone-quiet { background: var(--chart-quiet); }
+.tone-faint { background: var(--chart-faint); }
+.tone-from { background: var(--chart-from); }
+.tone-to { background: var(--chart-to); }
+
+/* The plot. Positioned, so the gridlines can span it. */
+.chart-plot { position: relative; }
+.chart-grid { position: absolute; inset: 0; pointer-events: none; }
+/* Solid hairlines, never dashed: a dash reads as a projection or a threshold
+   when it is only a grid. */
+.chart-gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--chart-grid); }
+
+.chart-rows { position: relative; display: flex; flex-direction: column; gap: 8px; }
+.chart-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px; align-items: baseline;
+}
+.chart-name {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.chart-val {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.chart-row.lead .chart-name { color: var(--fg-strong); }
+.chart-row.lead .chart-val { color: var(--fg-strong); font-weight: 700; }
+
+.chart-track { grid-column: 1 / -1; height: 7px; background: var(--chart-grid); border-radius: 4px; }
+/* On an axis the track is not a 100% reference — the axis is — so it stops
+   being a filled trough and becomes the rule the bars are measured from. */
+.chart-track.on-axis { background: transparent; border-left: 1px solid var(--fg-dim); }
+.chart-fill { height: 100%; min-width: 3px; border-radius: 0 4px 4px 0; }
+/* Zero width is a value on a log axis: a shape that reads exactly as much as
+   it returns sits *on* the origin. A 3px stub would say "nearly nothing"
+   where the truth is "nothing". */
+.chart-track.on-axis .chart-fill { min-width: 0; }
+
+/* The dumbbell. The dots carry a ring of the surface so that a pair close
+   enough to touch still reads as two marks. */
+.chart-pair { grid-column: 1 / -1; position: relative; height: 11px; }
+.chart-pair-line {
+  position: absolute; top: 5px; height: 2px;
+  background: var(--chart-from); opacity: .55;
+}
+.chart-dot {
+  position: absolute; top: 1.5px; width: 8px; height: 8px; border-radius: 50%;
+  margin-left: -4px; box-shadow: 0 0 0 2px var(--bg-raised);
+}
+
+.chart-axis { position: relative; height: 14px; margin-top: 6px; border-top: 1px solid var(--chart-grid); }
+.chart-tick {
+  position: absolute; top: 2px; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 9px; color: var(--fg-dim); white-space: nowrap;
+}
+/* The outermost labels stay inside the plot rather than hanging off it. */
+.chart-tick.first { transform: none; }
+.chart-tick.last { transform: translateX(-100%); }
+
+.chart-note { margin: 8px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--fg-dim); }
+.chart-note b { color: var(--fg); font-weight: 600; }
+
+/* Where the charts sit in the dock.
+
+   The split bar goes directly above the control it explains — the class
+   switch for the workload, the note line for the inventory — because its
+   figures and that control's figures are the same three numbers. Nothing
+   between them. */
+.wl-split { padding: 0 1px; }
+.wl-split:empty { display: none; }
+
+/* One card, three charts, one switch. Three cards stacked would be most of a
+   420px column before the list started; and the three answer the same
+   question about the same rows, which is what a switch is for. */
+.wl-chart {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 9px 10px 10px;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px;
+}
+.wl-chart-head { display: flex; align-items: center; gap: 8px; }
+.wl-chart-title {
+  font: 600 9.5px/1.4 system-ui, sans-serif; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--fg-dim); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wl-chart-scale {
+  margin-left: auto; font-family: var(--mono); font-size: 9px; color: var(--fg-dim);
+  white-space: nowrap;
+}
+.wl-chart-views { align-self: flex-start; }
 
 /* --- Any dock, expanded ------------------------------------------------- */
 

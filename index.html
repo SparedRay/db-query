@@ -438,6 +438,12 @@
 
             <div class="wl-panes" id="wl-panes" data-view="workload">
               <section class="wl-view" id="wl-workload" aria-label="Workload">
+                <!-- Where the counters went, before any of them is read
+                     (Stage 33 §4.1). Directly above the class switch because
+                     the switch carries the same three facts as counts and
+                     this carries them as a proportion — a bar and the figures
+                     it is drawn from, with nothing in between. -->
+                <div id="wl-split" class="wl-split"></div>
                 <div class="wl-controls">
                   <div class="seg" id="wl-classes" role="group" aria-label="Which shapes">
                     <button type="button" class="seg-btn" data-class="application" aria-pressed="true">
@@ -461,6 +467,28 @@
                     <option value="execs">executions</option>
                   </select>
                 </div>
+                <!-- Three charts of the same rows, one switch (Stage 33 §4.2).
+                     Stacked they would be most of a 420px column before the
+                     list began. Hidden until there is a reading, and the
+                     Latency tab is hidden on a server with no quantiles —
+                     absent rather than empty, which is the distinction the
+                     index inventory already draws. -->
+                <div id="wl-chart" class="wl-chart" hidden>
+                  <div class="wl-chart-head">
+                    <span class="wl-chart-title" id="wl-chart-title"></span>
+                    <span class="wl-chart-scale" id="wl-chart-scale"></span>
+                  </div>
+                  <div class="seg wl-chart-views" id="wl-chart-views" role="group"
+                       aria-label="Which chart">
+                    <button type="button" class="seg-btn" data-chart="time"
+                            aria-pressed="true">Time</button>
+                    <button type="button" class="seg-btn" data-chart="ratio"
+                            aria-pressed="false">Selectivity</button>
+                    <button type="button" class="seg-btn" data-chart="latency"
+                            aria-pressed="false" hidden>Latency</button>
+                  </div>
+                  <div id="wl-chart-body" class="wl-chart-body"></div>
+                </div>
                 <div id="wl-list" class="wl-list" tabindex="-1"></div>
               </section>
 
@@ -472,6 +500,10 @@
                           title="Three queries against information_schema. No DDL, here or anywhere in this panel.">Read the index inventory</button>
                 </div>
                 <span id="wl-inv-note" class="wl-known"></span>
+                <!-- What the list's length means as a proportion (Stage 33
+                     §4.3). 245 findings out of 1,025 indexes is a quarter of
+                     an instance, and the count alone has never said so. -->
+                <div id="wl-inv-split" class="wl-split"></div>
                 <div id="wl-inv" class="wl-list" hidden tabindex="-1"></div>
               </section>
             </div>
