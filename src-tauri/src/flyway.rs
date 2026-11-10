@@ -531,10 +531,7 @@ ignoreNewlinesInTextObjects = "off"
         let ids: Vec<&str> = p.environments.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["development", "qa", "uat"], "sorted, not file order");
         assert_eq!(p.environment("uat").unwrap().label(), "UAT database");
-        assert_eq!(
-            p.environment("qa").unwrap().user.as_deref(),
-            Some("svc_qa")
-        );
+        assert_eq!(p.environment("qa").unwrap().user.as_deref(), Some("svc_qa"));
     }
 
     /// **The property, not the filter.** No type here has a field a password
@@ -658,12 +655,7 @@ ignoreNewlinesInTextObjects = "off"
     fn a_different_default_schema_is_not_a_different_target() {
         let p = parse(REAL).unwrap();
         let env = p.environment("qa").unwrap();
-        let conn = profile(
-            "qa.example.com",
-            3306,
-            Some("appdata"),
-            "svc_qa",
-        );
+        let conn = profile("qa.example.com", 3306, Some("appdata"), "svc_qa");
         assert_eq!(disagreements(env, &conn), vec![]);
         assert_eq!(matches(env, &[conn]).len(), 1);
     }
@@ -713,12 +705,7 @@ ignoreNewlinesInTextObjects = "off"
 
     fn qa() -> crate::session::ConnProfile {
         named(
-            profile(
-                "qa.example.com",
-                3306,
-                Some("appdata"),
-                "svc_qa",
-            ),
+            profile("qa.example.com", 3306, Some("appdata"), "svc_qa"),
             "QA",
         )
     }
@@ -736,10 +723,7 @@ ignoreNewlinesInTextObjects = "off"
     fn an_environment_matches_the_connections_that_are_it() {
         let p = parse(REAL).unwrap();
         let env = p.environment("qa").unwrap();
-        let other = named(
-            profile("dev.example.com", 3306, None, "svc_dev"),
-            "Dev",
-        );
+        let other = named(profile("dev.example.com", 3306, None, "svc_dev"), "Dev");
         let found = matches(env, &[other, qa()]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "QA");

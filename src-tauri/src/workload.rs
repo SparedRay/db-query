@@ -2403,7 +2403,8 @@ mod tests {
         let k = known();
         let row = DigestRow {
             digest: "d".into(),
-            text: "SELECT `SupplierId` , @@`sql_mode` FROM `Supplier` WHERE `tenant_sub_id` = ?".into(),
+            text: "SELECT `SupplierId` , @@`sql_mode` FROM `Supplier` WHERE `tenant_sub_id` = ?"
+                .into(),
             execs: 10,
             rows_sent: 1,
             rows_examined: 1,
