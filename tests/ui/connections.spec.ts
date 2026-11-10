@@ -304,3 +304,87 @@ test("a connection with no dictionary saves without one", async ({ page }) => {
   const saved = (await calls(page)).find((c) => c.cmd === "save_profile");
   expect((saved?.args.profile as { dictionary?: string | null })?.dictionary).toBe(null);
 });
+
+// --------------------------------- Stage 34: one language for the rail's marks
+
+/**
+ * **Three kinds of thing, three places.**
+ *
+ * The rail used four corners and three shapes to say four things, because
+ * each mark was added on its own: a count top-right, a lock top-left, an
+ * ad-hoc dot bottom-right, an assistant warning bottom-right on a different
+ * control. The vocabulary is now a *property* top-left, a *count* top-right,
+ * and *activity* as the whole control tracing its outline.
+ *
+ * A connection can be read-only **and** unsaved at once, which is the case the
+ * old layout answered by using opposite corners. They stack now.
+ */
+test("a read-only connection and an unsaved one carry their mark in the same place", async ({
+  page,
+}) => {
+  await railOf(page, [{ ...MYSQL, readOnly: true }]);
+
+  const box = page.locator(".rail-item .rail-marks");
+  await expect(box).toHaveCount(1);
+  await expect(box.locator('[data-icon="lock"]')).toHaveCount(1);
+  // Top-left, which is where a property goes.
+  const where = await box.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { left: s.left, top: s.top, position: s.position };
+  });
+  expect(where.position).toBe("absolute");
+  expect(where.left).toBe("-3px");
+  expect(where.top).toBe("-3px");
+});
+
+test("an ordinary saved connection carries no property mark at all", async ({ page }) => {
+  await railOf(page, [MYSQL]);
+  await expect(page.locator(".rail-item .rail-marks")).toHaveCount(0);
+});
+
+/**
+ * Both at once, side by side — the choice this stage had to make.
+ *
+ * Stacking keeps both facts on screen. The alternative was a priority order
+ * with the loser in the tooltip, which hides a true thing: "this connection
+ * will vanish when you close it" is exactly the sort of fact you want *before*
+ * disconnecting, and a tooltip is read after reaching for the mouse — the same
+ * reasoning the read-only mark was given in the first place.
+ */
+test("read-only and unsaved stack rather than taking opposite corners", async ({ page }) => {
+  await installBackend(page, schemaBackend);
+  await visit(page);
+
+  // An ad-hoc connection: filled in and connected without ticking Save.
+  await page.click("#btn-connect");
+  await page.click("#conn-save");
+  await page.click("#conn-read-only");
+  await page.click("#conn-ok");
+  await expect(page.locator(".rail-item")).toHaveCount(1);
+
+  const box = page.locator(".rail-item .rail-marks");
+  await expect(box.locator(".rail-mark")).toHaveCount(2);
+  await expect(box.locator('[data-icon="lock"]')).toHaveCount(1);
+  await expect(box.locator(".rail-mark.unsaved")).toHaveCount(1);
+
+  // Side by side on one row, and inside the button's 32px.
+  const laid = await box.evaluate((el) => {
+    const kids = [...el.children].map((k) => k.getBoundingClientRect());
+    return {
+      sameRow: Math.abs(kids[0].top - kids[1].top) < kids[0].height,
+      inOrder: kids[0].left < kids[1].left,
+      width: el.getBoundingClientRect().width,
+    };
+  });
+  expect(laid.sameRow).toBe(true);
+  expect(laid.inOrder).toBe(true);
+  // 13 + 2 + 9 = 24 on a 32px button. The limit is the point: a third
+  // property is where this decision gets reopened.
+  expect(laid.width).toBeLessThanOrEqual(32);
+
+  // And nothing is left in the corner it used to use.
+  const corner = await page
+    .locator(".rail-item")
+    .evaluate((el) => getComputedStyle(el, "::after").content);
+  expect(corner === "none" || corner === "normal").toBe(true);
+});

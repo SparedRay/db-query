@@ -106,6 +106,12 @@
             <label class="toggle sql-only" title="Advisory squiggles only — never blocks Run">
               <input type="checkbox" id="chk-lint" checked /> Lint
             </label>
+            <!-- Wrapping is right for reading a statement someone else wrote
+                 and wrong for a generated INSERT with four hundred columns,
+                 where one logical line becomes a screenful. On by default. -->
+            <label class="toggle" title="Wrap long lines instead of scrolling sideways">
+              <input type="checkbox" id="chk-wrap" checked /> Wrap
+            </label>
             <label class="toggle sql-only" title="Safety net: KILL the query after N seconds. 0 = off">
               Timeout
               <input type="number" id="num-timeout" class="num" value="0" min="0" max="3600" />s
@@ -861,6 +867,12 @@
             <option value="all">Re-run the query and export every row</option>
           </select>
         </label>
+        <!-- Why the second option is refused, when it is. It used to be
+             written into that option's own label, where it was only visible
+             with the popup open — and a disabled row is barely greyed on
+             WebKitGTK, so the option looked ordinary, the click did nothing
+             and the dialog never accounted for itself. -->
+        <p id="export-scope-refusal" class="hint refusal" hidden></p>
 
         <fieldset id="export-csv-opts">
           <legend>CSV</legend>

@@ -222,6 +222,16 @@ export function dialectFor(name: string | null | undefined): SQLDialect {
   return name === "mysql" || name === undefined || name === null ? MySQL : StandardSQL;
 }
 const lintCompartment = new Compartment();
+/**
+ * Whether long lines wrap, or scroll sideways.
+ *
+ * In a compartment rather than fixed, because the right answer depends on
+ * what is in the buffer. Wrapping is right for reading a statement someone
+ * else wrote; it is wrong for a generated `INSERT` with four hundred columns,
+ * where one logical line becomes a screenful and the line numbers stop
+ * lining up with anything. On by default, as it has been since Stage 1.
+ */
+const wrapCompartment = new Compartment();
 
 /**
  * The editor follows the app's theme tokens rather than carrying its own
@@ -434,7 +444,7 @@ export function createEditor(parent: HTMLElement, hooks: EditorHooks): EditorVie
     schemaCompartment.of(sql({ ...sqlConfig, upperCaseKeywords: true })),
     lintCompartment.of([]),
     themeCompartment.of(darkTheme),
-    EditorView.lineWrapping,
+    wrapCompartment.of(EditorView.lineWrapping),
     EditorView.updateListener.of((u) => {
       if (u.docChanged) hooks.onDocChanged?.();
     }),
@@ -466,6 +476,20 @@ export function setLinting(view: EditorView, source: LintSource | null, delay = 
     effects: lintCompartment.reconfigure(
       source ? [linter(source, { delay }), lintGutter()] : [],
     ),
+  });
+}
+
+/**
+ * Wrap long lines, or let them scroll sideways.
+ *
+ * Like `setLinting`, this lives in a compartment and compartments are
+ * **per-state**, so a new tab starts at the initial value and the caller has
+ * to re-apply after swapping states. That is why it hangs off the same place
+ * `applyLintSetting` does rather than being set once at boot.
+ */
+export function setLineWrapping(view: EditorView, on: boolean) {
+  view.dispatch({
+    effects: wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []),
   });
 }
 

@@ -80,7 +80,7 @@ test("connecting shows a spinner on the connection being opened", async ({ page 
   });
 
   await page.locator(".rail-item").click();
-  await expect(page.locator(".rail-item.connecting")).toHaveCount(1);
+  await expect(page.locator(".rail-item.busy")).toHaveCount(1);
   await expect(page.locator(".rail-item .busy-outline")).toBeVisible();
   await expect(page.locator(".rail-item")).toHaveAttribute("aria-busy", "true");
 
@@ -100,7 +100,7 @@ test("clicking again while connecting does not start a second attempt", async ({
   });
 
   await page.locator(".rail-item").click();
-  await expect(page.locator(".rail-item.connecting")).toHaveCount(1);
+  await expect(page.locator(".rail-item.busy")).toHaveCount(1);
   await page.locator(".rail-item").click();
   await page.locator(".rail-item").click();
 
@@ -122,7 +122,7 @@ test("a failed connection clears the spinner", async ({ page }) => {
 
   g.fail(new Error("Access denied for user 'reporting'"));
   await expect(page.locator(".rail-item .busy-outline")).toHaveCount(0);
-  await expect(page.locator(".rail-item.connecting")).toHaveCount(0);
+  await expect(page.locator(".rail-item.busy")).toHaveCount(0);
   await expect(page.locator(".rail-item.offline")).toHaveCount(1);
 });
 
@@ -359,4 +359,101 @@ test("a new tab on the connection's own database issues no USE", async ({ page }
   await page.click(".stab-add");
   await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
   expect(await commandNames(page)).not.toContain("use_database");
+});
+
+// --------------------------------------------------------- disconnecting
+
+/**
+ * **The way down is as slow as the way up, and said nothing.**
+ *
+ * `connect` marked the entry and re-rendered; `disconnect` set no flag at
+ * all, so closing a connection to a server that was not answering looked
+ * exactly like a button that had stopped working. Reported as "when
+ * disconnecting it shows no loader so sometimes it feels stuck".
+ *
+ * The state is now `busy` rather than `connecting` and every slow path on a
+ * connection runs inside `inFlight`, which is what makes this impossible to
+ * forget again: nothing sets the flag, the wrapper does.
+ */
+test("disconnecting says so, on the rail and on the button", async ({ page }) => {
+  const g = gate();
+  await installBackend(page, {
+    ...schemaBackend,
+    list_profiles: () => ({ profiles: [SAVED], warning: null }),
+    connect_saved: () => CONN,
+    disconnect: async () => {
+      await g.p;
+      return null;
+    },
+  });
+  await visit(page);
+  await page.locator(".rail-item").click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await expect(page.locator("#btn-connect")).toHaveText("Disconnect");
+
+  // Not awaited: the whole subject is the state *during* the call.
+  void page.locator("#btn-connect").click();
+
+  await expect(page.locator(".rail-item.busy")).toHaveCount(1);
+  await expect(page.locator(".rail-item .busy-outline")).toBeVisible();
+  await expect(page.locator(".rail-item")).toHaveAttribute("aria-busy", "true");
+  // And on the control that was actually clicked, which lives outside the
+  // rail and so needs the hook rather than the re-render.
+  await expect(page.locator("#btn-connect")).toContainText("Disconnecting");
+  await expect(page.locator("#btn-connect")).toBeDisabled();
+  await expect(page.locator("#btn-connect .spinner")).toBeVisible();
+
+  // **The trace has to be visible against the item it is tracing.** While
+  // connecting the item is still offline — transparent — so an accent stroke
+  // reads against the rail. Disconnecting draws the same outline on a *live*
+  // item filled with the connection's own colour, and on a blue connection an
+  // accent stroke is accent on accent.
+  //
+  // Asserted as "the stroke is the item's own foreground", not merely as
+  // "the stroke differs from the fill": the fixture connection is red, so an
+  // accent-blue stroke differs from it and the weaker check passed with the
+  // rule reverted. What has to be true is that the trace uses the colour
+  // already chosen to be legible on that fill, whatever the connection is.
+  const paint = await page.locator(".rail-item").evaluate((el) => ({
+    fg: getComputedStyle(el).color,
+    fill: getComputedStyle(el).backgroundColor,
+    stroke: getComputedStyle(el.querySelector(".busy-outline rect") as Element).stroke,
+  }));
+  expect(paint.stroke).toBe(paint.fg);
+  expect(paint.stroke).not.toBe(paint.fill);
+
+  g.open();
+  await expect(page.locator(".rail-item.offline")).toHaveCount(1);
+  await expect(page.locator(".rail-item .busy-outline")).toHaveCount(0);
+  await expect(page.locator("#btn-connect")).toHaveText("Connect");
+  await expect(page.locator("#btn-connect")).toBeEnabled();
+});
+
+/**
+ * A server that refuses the hang-up must not leave the rail spinning.
+ *
+ * `inFlight` clears in `finally`, which is the half of the mechanism a flag
+ * set by hand at each call site reliably gets wrong.
+ */
+test("a disconnect that fails still clears the busy state", async ({ page }) => {
+  const g = gate();
+  await installBackend(page, {
+    ...schemaBackend,
+    list_profiles: () => ({ profiles: [SAVED], warning: null }),
+    connect_saved: () => CONN,
+    disconnect: async () => {
+      await g.p;
+      throw new Error("the server went away");
+    },
+  });
+  await visit(page);
+  await page.locator(".rail-item").click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+
+  void page.locator("#btn-connect").click();
+  await expect(page.locator(".rail-item.busy")).toHaveCount(1);
+
+  g.open();
+  await expect(page.locator(".rail-item.busy")).toHaveCount(0);
+  await expect(page.locator("#btn-connect")).toBeEnabled();
 });

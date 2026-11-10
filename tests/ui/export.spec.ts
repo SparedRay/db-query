@@ -164,16 +164,40 @@ test("E8 — the unbounded re-run goes back to the server for every row", async 
  * The re-run returns the query's own columns, so it cannot honour a subset —
  * and it must say why rather than vanishing.
  */
-test("E8 — the re-run is disabled, with a reason, while a subset is selected", async ({ page }) => {
+/**
+ * **E8 is inverted, and the thing it used to pin was the reported bug.**
+ *
+ * It asserted that selecting a row disabled the unbounded re-run, "with a
+ * reason". The reason was written into the option's own label — text that
+ * only exists while the popup is open — and WebKitGTK greys a disabled row
+ * so faintly that the option looked ordinary. So the dropdown appeared to
+ * refuse a perfectly normal click and never said why.
+ *
+ * The refusal was also guarding nothing: choosing "every row" calls
+ * `export_rerun` with the statement and never reads the selection. The test
+ * is inverted rather than deleted, and its second half now proves that.
+ */
+test("E8 — a selected subset does not take the unbounded re-run away", async ({ page }) => {
   await withRows(page, TWO_ROWS);
   await page.click('tr[data-row="0"] .rownum');
   await page.click("#btn-export");
 
   const all = page.locator("#export-scope option").nth(1);
-  // `toBeDisabled` does not report a disabled <option>, so assert the attribute.
-  await expect(all).toHaveAttribute("disabled", "");
-  await expect(all).toHaveText(/not available while a subset is selected/);
+  await expect(all).toHaveJSProperty("disabled", false);
+  await expect(all).toHaveText("Re-run the query and export every row");
+  await expect(page.locator("#export-scope-refusal")).toBeHidden();
+
+  // Still the default, because the selection is what you most likely meant;
+  // "every row" is there to be chosen, not forced.
   await expect(page.locator("#export-scope")).toHaveValue("shown");
+
+  // ...and choosing it really does ignore the selection, which is why the
+  // refusal was protecting nothing.
+  await page.selectOption("#export-scope", "all");
+  await page.click("#export-ok");
+  const names = (await calls(page)).map((c) => c.cmd);
+  expect(names).toContain("export_rerun");
+  expect(names).not.toContain("export_csv");
 });
 
 test("selecting everything is not a subset, so the re-run stays available", async ({ page }) => {
@@ -335,7 +359,10 @@ test("an engine that cannot stream is not offered the unbounded re-run", async (
   // toBeDisabled() does not cover <option>; the property is the fact.
   const all = page.locator("#export-scope option").nth(1);
   await expect(all).toHaveJSProperty("disabled", true);
-  await expect(all).toContainText("cannot stream");
+  // The reason is in the dialog now, not in the option's own label, where
+  // it only existed while the popup was open.
+  await expect(all).toHaveText("Re-run the query and export every row");
+  await expect(page.locator("#export-scope-refusal")).toContainText("cannot stream");
   // And it must not have been *selected* by the truncation branch either.
   await expect(page.locator("#export-scope")).toHaveValue("shown");
 });
@@ -423,4 +450,30 @@ test("a batch size beyond what a server will take is clamped", async ({ page }) 
 
   await page.click("#btn-export");
   await expect(page.locator("#sql-batch")).toHaveValue("10000");
+});
+
+// ------------------------------------------- the scope control (Stage 34)
+
+/**
+ * A refusal that is real is said **outside** the dropdown.
+ *
+ * An engine that cannot stream a whole result genuinely cannot do this, and
+ * that is a different claim from "your selection is in the way". The reason
+ * now sits in the dialog where it can be read without opening anything.
+ */
+test("an engine that cannot stream says so in the dialog, not in the option", async ({ page }) => {
+  await withRows(page, TWO_ROWS, {
+    connect: () => ({ ...CONN_INFO, capabilities: { ...READ_ONLY_CAPS, streamingExport: false } }),
+  });
+  await page.click("#btn-export");
+  await expect(page.locator("#export-dialog")).toBeVisible();
+
+  await expect(page.locator("#export-scope option[value='all']")).toHaveJSProperty(
+    "disabled",
+    true,
+  );
+  const why = page.locator("#export-scope-refusal");
+  await expect(why).toBeVisible();
+  await expect(why).toContainText("cannot stream");
+  await expect(page.locator("#export-scope")).toHaveValue("shown");
 });

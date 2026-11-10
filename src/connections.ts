@@ -18,8 +18,17 @@ export interface ConnectionEntry {
   /** Persisted in connections.json, as opposed to a one-off connection. */
   saved: boolean;
   connected: boolean;
-  /** An attempt is in flight. Drives the rail spinner; never persisted. */
-  connecting?: boolean;
+  /**
+   * **Something slow is happening to this connection**, whatever it is.
+   *
+   * Not `connecting`, which it was until Stage 34: closing a connection goes
+   * to the server too, and `disconnect` set no flag at all — so hanging up on
+   * a server that was not answering looked exactly like a dead button. The
+   * state is "an operation is in flight", because that is the question the
+   * rail is answering, and every slow path on this class now runs inside
+   * `inFlight` rather than remembering to set it. Never persisted.
+   */
+  busy?: boolean;
   serverVersion: string | null;
   /**
    * What this connection's engine supports. Null until it has connected once —
@@ -53,6 +62,15 @@ export interface ConnectionHooks {
   canDrop?: (entry: ConnectionEntry) => Promise<boolean>;
   onDisconnected: (entry: ConnectionEntry) => void;
   onRemoved: (entry: ConnectionEntry) => void;
+  /**
+   * An operation started or finished on some connection.
+   *
+   * The rail paints itself from `render()`, but the Connect/Disconnect button
+   * in the sidebar head is the control a person actually clicks and it lives
+   * outside this class. One signal rather than each slow path telling it: the
+   * whole point of `inFlight` is that nothing has to remember.
+   */
+  onBusyChanged?: () => void;
   /** Offered only where the engine has a schema to write out. */
   exportSchema?: (connectionId: string) => void;
   /** Open, attach or create this connection's AI dictionary (Stage 25). */
@@ -204,9 +222,7 @@ export class ConnectionManager {
     // then MySQL's own handshake. Clicking a saved connection used to give no
     // sign of life until it either appeared or failed, which reads as a broken
     // button rather than as work in progress.
-    entry.connecting = true;
-    this.render();
-    try {
+    return this.inFlight(entry, async () => {
       const info = await open();
       entry.connected = true;
       entry.serverVersion = info.serverVersion;
@@ -219,11 +235,30 @@ export class ConnectionManager {
       await this.hooks.onConnected(entry, info);
       this.activate(entry.profile.id);
       return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
+    }).catch((err: unknown) => ({ ok: false, error: String(err) }));
+  }
+
+  /**
+   * Run something slow against `entry`, with the rail saying so.
+   *
+   * **One state, one painter, one place that clears it.** Opening a
+   * connection had this and closing one did not, because each path set its
+   * own flag and `disconnect` simply never did — so a hang-up that waited on
+   * an unresponsive server showed nothing at all and read as a frozen app.
+   * A flag every call site has to remember is a flag some call site forgets,
+   * and this is the shape that cannot be forgotten: the state is set by the
+   * wrapper, and `finally` clears it on the error path too.
+   */
+  private async inFlight<T>(entry: ConnectionEntry, run: () => Promise<T>): Promise<T> {
+    entry.busy = true;
+    this.render();
+    this.hooks.onBusyChanged?.();
+    try {
+      return await run();
     } finally {
-      entry.connecting = false;
+      entry.busy = false;
       this.render();
+      this.hooks.onBusyChanged?.();
     }
   }
 
@@ -266,12 +301,17 @@ export class ConnectionManager {
   }
 
   async disconnect(entry: ConnectionEntry) {
+    // The confirmation comes first and is deliberately **outside** the busy
+    // state: a dialog waiting on a person is not work in flight, and marking
+    // it as such would spin the rail for as long as they take to read it.
     if (this.hooks.canDrop && !(await this.hooks.canDrop(entry))) return;
-    try {
-      await api.disconnect(entry.profile.id);
-    } catch (err) {
-      this.hooks.notify(String(err));
-    }
+    await this.inFlight(entry, async () => {
+      try {
+        await api.disconnect(entry.profile.id);
+      } catch (err) {
+        this.hooks.notify(String(err));
+      }
+    });
     entry.connected = false;
     entry.serverVersion = null;
     entry.capabilities = null;
@@ -293,6 +333,9 @@ export class ConnectionManager {
   }
 
   async remove(entry: ConnectionEntry) {
+    // `disconnect` carries its own busy state, so this does not nest one
+    // around it — the forget below is local work and the keychain delete is
+    // the only slow part, which `inFlight` covers.
     if (entry.connected) await this.disconnect(entry);
     if (entry.saved) {
       try {
@@ -321,7 +364,7 @@ export class ConnectionManager {
         "rail-item" +
         (entry.profile.id === this.activeId ? " active" : "") +
         (entry.connected ? " live" : " offline") +
-        (entry.connecting ? " connecting" : "") +
+        (entry.busy ? " busy" : "") +
         (entry.saved ? "" : " adhoc");
       el.style.setProperty("--conn-colour", entry.profile.colour);
       el.textContent = initials(entry.profile.name);
@@ -335,19 +378,35 @@ export class ConnectionManager {
         (entry.profile.readOnly ? "\nRead-only — writes are refused" : "") +
         (entry.saved ? "" : "\n(not saved — this connection is one-off)");
 
-      // R4: readable without opening anything. The flag is a property of the
-      // saved profile, so it shows whether or not the connection is up — the
-      // question "is this the one that cannot be written to" is asked before
-      // connecting, not after.
+      // **Properties of the connection, stacked top-left** (Stage 34 §7).
+      //
+      // Readable without opening anything, and true whether or not the
+      // connection is up — "is this the one that cannot be written to" and
+      // "will this vanish when I disconnect" are both asked *before* doing
+      // something, which is what separates a property from a count or from
+      // activity. Both can hold at once, so they share one container and sit
+      // side by side rather than being put in opposite corners.
+      const marks: HTMLElement[] = [];
       if (entry.profile.readOnly) {
         el.classList.add("read-only");
-        const mark = document.createElement("span");
-        mark.className = "ro-mark";
-        mark.append(icon("lock"));
-        el.append(mark);
+        const lock = document.createElement("span");
+        lock.className = "rail-mark ro-mark";
+        lock.append(icon("lock"));
+        marks.push(lock);
+      }
+      if (!entry.saved) {
+        const dot = document.createElement("span");
+        dot.className = "rail-mark unsaved";
+        marks.push(dot);
+      }
+      if (marks.length > 0) {
+        const box = document.createElement("span");
+        box.className = "rail-marks";
+        box.append(...marks);
+        el.append(box);
       }
 
-      if (entry.connecting) {
+      if (entry.busy) {
         el.setAttribute("aria-busy", "true");
         // 9 is `.rail-item`'s own border-radius, which the outline traces.
         el.append(busyOutline(9));
@@ -356,7 +415,7 @@ export class ConnectionManager {
       el.onclick = () => {
         // A second click while the first is still in flight would open a
         // second connection to the same server.
-        if (entry.connecting) return;
+        if (entry.busy) return;
         if (entry.connected) this.activate(entry.profile.id);
         else void this.connect(entry);
       };

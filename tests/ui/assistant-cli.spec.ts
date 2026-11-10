@@ -129,16 +129,26 @@ test("a missing CLI names the binary rather than just failing", async ({ page })
  *
  * Opening the panel is how you read *why* it is not ready, so disabling the
  * button would hide the explanation behind the thing that needs explaining.
+ *
+ * **No corner mark any more** (Stage 34 §7). There was an amber dot, and it
+ * was the one indicator on the rail that carried no action: permanent until
+ * somebody fixed their PATH, about a tool's installation rather than about
+ * anything you were doing, and in the corner the connection marks now use.
+ * What it was standing in for is asserted below instead — the title, and the
+ * panel's own sentence with the command to run, both of which say more than a
+ * dot could. The class is gone rather than left painting nothing.
  */
-test("the assistant button marks a CLI that is not ready, and still opens", async ({ page }) => {
+test("the assistant button says a CLI is not ready in words, and still opens", async ({ page }) => {
   await boot(page, {
     enabled: ["copilot"],
     provider: "localCli",
     recipe: "copilot",
     probe: SIGNED_OUT,
   });
-  await expect(page.locator("#btn-assistant.not-ready")).toHaveCount(1);
   await expect(page.locator("#btn-assistant")).toHaveAttribute("title", /Run `copilot login`/);
+  // And nothing is drawn on it: no corner mark, and no activity outline
+  // either, because the probe has finished.
+  await expect(page.locator("#btn-assistant .busy-outline")).toHaveCount(0);
   await expect(page.locator("#btn-assistant")).toBeEnabled();
 
   await page.click("#btn-assistant");
@@ -148,13 +158,46 @@ test("the assistant button marks a CLI that is not ready, and still opens", asyn
   await expect(page.locator("#chat-send")).toBeDisabled();
 });
 
-test("a ready CLI leaves the button unmarked", async ({ page }) => {
+/**
+ * **Activity is the whole control, not a speck on it** (Stage 34 §7).
+ *
+ * While the probe is in flight the assistant used to draw an 8px `.spinner`
+ * in its bottom-right corner, for the same fact a rail connection expresses
+ * by tracing its outline. One vocabulary: the traced outline, everywhere.
+ */
+test("the assistant traces its outline while it probes a CLI", async ({ page }) => {
+  let release!: (v: unknown) => void;
+  const held = new Promise((r) => {
+    release = r;
+  });
+  await withSettings(page, {
+    cliEnabled: ["copilot"],
+    aiProvider: "localCli",
+    aiRecipe: "copilot",
+  });
+  await connect(page, {
+    assistant_status: () => ({ hasKey: true, ready: true, local: false }),
+    assistant_cli_probe: () => held,
+  });
+
+  const btn = page.locator("#btn-assistant");
+  await expect(btn.locator(".busy-outline")).toBeVisible();
+  // And not the corner spinner it used to be.
+  await expect(btn.locator(".spinner")).toHaveCount(0);
+  await expect(btn).toHaveAttribute("title", /Checking/);
+
+  release(SIGNED_IN);
+  await expect(btn.locator(".busy-outline")).toHaveCount(0);
+  await expect(btn).toHaveAttribute("title", /Answered by Copilot CLI/);
+});
+
+test("a ready CLI says so in its title", async ({ page }) => {
   await boot(page, { enabled: ["copilot"], provider: "localCli", recipe: "copilot" });
   await expect(page.locator("#btn-assistant")).toHaveAttribute(
     "title",
     /Answered by Copilot CLI/,
   );
-  await expect(page.locator("#btn-assistant.not-ready")).toHaveCount(0);
+  await expect(page.locator("#btn-assistant .busy-outline")).toHaveCount(0);
 });
 
 // ------------------------------------------------------------------- settings
@@ -185,7 +228,6 @@ test("disabling the CLI in use moves the provider off it", async ({ page }) => {
   await expect(page.locator("#ai-http-fields")).toBeVisible();
   const labels = await page.locator("#set-ai-preset option").allTextContents();
   expect(labels).not.toContain("Copilot CLI");
-  await expect(page.locator("#btn-assistant.not-ready")).toHaveCount(0);
 });
 
 // ---------------------------------------------------------------- asking it

@@ -35,6 +35,10 @@ export interface Settings {
   /** Defaults applied at boot to the controls in the editor header. */
   autoLimit: boolean;
   lint: boolean;
+  /** Whether long lines wrap. Persisted but deliberately **not** mirrored
+   *  in the Settings dialog: it is one click away in the editor header,
+   *  and a second control for it is a second thing that can disagree. */
+  wrapText: boolean;
   timeoutSecs: number;
   /** Rows for the generated "SELECT ... LIMIT n" browse query. */
   browseLimit: number;
@@ -112,6 +116,7 @@ export const DEFAULTS: Settings = {
   editorTheme: "default",
   autoLimit: true,
   lint: true,
+  wrapText: true,
   timeoutSecs: 0,
   browseLimit: 1000,
   insertBatch: 1000,
@@ -291,6 +296,7 @@ export function load(): Settings {
       : DEFAULTS.editorTheme,
     autoLimit: typeof o.autoLimit === "boolean" ? o.autoLimit : DEFAULTS.autoLimit,
     lint: typeof o.lint === "boolean" ? o.lint : DEFAULTS.lint,
+    wrapText: typeof o.wrapText === "boolean" ? o.wrapText : DEFAULTS.wrapText,
     timeoutSecs: bounded(Number(o.timeoutSecs), 0, 3600, DEFAULTS.timeoutSecs),
     browseLimit: bounded(Number(o.browseLimit), 1, 1_000_000, DEFAULTS.browseLimit),
     insertBatch: bounded(Number(o.insertBatch), 1, 10_000, DEFAULTS.insertBatch),

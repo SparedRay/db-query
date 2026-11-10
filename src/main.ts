@@ -52,7 +52,7 @@ import {
   save as saveSettings,
 } from "./settings";
 import { contextMenu } from "./menu";
-import { icon, type IconName } from "./icons";
+import { busyOutline, icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter, type SchemaLookup } from "./treefilter";
 import { ResultView, resultSets } from "./grid";
@@ -76,7 +76,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   createEditor, cursorByteOffset, docText, insertAtCursor, refreshLint, replaceRange,
   selectedText,
-  selectRange, setDialect, setEditorTheme, setLinting, setPlainToml, setSchema, setSchemaLoader,
+  selectRange, setDialect, setEditorTheme, setLineWrapping, setLinting, setPlainToml, setSchema,
+  setSchemaLoader,
 } from "./editor";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -148,6 +149,7 @@ const els = {
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
   lintOn: $<HTMLInputElement>("chk-lint"),
+  wrapOn: $<HTMLInputElement>("chk-wrap"),
   timeout: $<HTMLInputElement>("num-timeout"),
   fileNote: $<HTMLSpanElement>("file-note"),
   dictBand: $<HTMLSpanElement>("dict-band"),
@@ -308,6 +310,7 @@ const els = {
   exportFormat: $<HTMLSelectElement>("export-format"),
   exportScope: $<HTMLSelectElement>("export-scope"),
   exportScopeNote: $<HTMLParagraphElement>("export-scope-note"),
+  exportScopeRefusal: $<HTMLParagraphElement>("export-scope-refusal"),
   exportCsvOpts: $<HTMLFieldSetElement>("export-csv-opts"),
   exportSqlOpts: $<HTMLFieldSetElement>("export-sql-opts"),
   exportError: $<HTMLParagraphElement>("export-error"),
@@ -573,6 +576,18 @@ function applyLintSetting(force = false) {
 }
 
 /**
+ * Wrapping, from the toolbar checkbox.
+ *
+ * A compartment is per-state, so this has to run after every state swap as
+ * well as on every toggle — the same reason `applyLintSetting(true)` is
+ * called from the tab-activated hook rather than once at boot. A tab that
+ * came back wrapped when the box was unticked would be the whole bug.
+ */
+function applyWrapSetting() {
+  setLineWrapping(view, els.wrapOn.checked);
+}
+
+/**
  * The dictionary chip, and nothing else.
  *
  * Split out of `refreshFileNote` because that function's other work — the
@@ -737,11 +752,24 @@ function syncConnLabel() {
   // it just never said so. A control that does the opposite of its label is
   // worse than one that is missing.
   const isLive = !!active?.connected;
-  els.btnConnect.textContent = isLive ? "Disconnect" : "Connect";
-  els.btnConnect.title = isLive
-    ? `Disconnect from ${active.profile.name}`
-    : "Open a connection";
-  els.btnConnect.classList.toggle("danger", isLive);
+  // **Say what is happening, including on the way down.** Closing a
+  // connection talks to the server like opening one does, and this button
+  // said nothing while it did — so hanging up on a server that was not
+  // answering looked exactly like a button that had stopped working. The
+  // state comes from `inFlight`, so every slow path on a connection reaches
+  // here without having to ask.
+  const busy = !!active?.busy;
+  els.btnConnect.replaceChildren(
+    busy ? Object.assign(document.createElement("span"), { className: "spinner" }) : "",
+    busy ? (isLive ? " Disconnecting\u2026" : " Connecting\u2026") : isLive ? "Disconnect" : "Connect",
+  );
+  els.btnConnect.disabled = busy;
+  els.btnConnect.title = busy
+    ? "Waiting for the server"
+    : isLive
+      ? `Disconnect from ${active.profile.name}`
+      : "Open a connection";
+  els.btnConnect.classList.toggle("danger", isLive && !busy);
   // Whether this connection can host a Flyway project is a property of the
   // connection, so the toggle follows it rather than being switched on once.
 
@@ -768,10 +796,14 @@ function syncConnLabel() {
 
   const mine = tabs?.forConnection(active.profile.id) ?? [];
   const running = mine.filter((t) => t.busy).length;
-  const db = tabs?.active()?.activeDb ?? null;
 
+  // **No database here.** This line used to read `name · database`, where the
+  // database was the *active tab's* `activeDb` — a fact about one tab, printed
+  // on the header of the connection, as though it were a property of the
+  // server. The schema tree directly underneath already marks that database
+  // `.node.db-active`, in bold and in `--fg-strong`, which is both the
+  // stronger statement and the true one. Two copies, and this was the weaker.
   const parts = [active.profile.name];
-  if (db) parts.push(db);
   if (running > 0) parts.push(`${running} running`);
   els.connLabel.textContent = parts.join(" · ");
 
@@ -1917,16 +1949,30 @@ function openExportDialog() {
   // streaming path at all — was offered this and taken down a MySQL-only road.
   // A declared capability that nobody consults is decoration.
   const canStream = conns.active()?.capabilities?.streamingExport ?? true;
-  const rerunOk = sql !== null && results.isEverything() && canStream;
+
+  // **A selection is not a reason to refuse this.** The re-run path calls
+  // `exportRerun` with the statement and never reads `data`, so "every row"
+  // is unambiguous whatever happens to be selected \u2014 asking for all of it is
+  // an instruction, not a contradiction. That check was guarding a path that
+  // does not consult the thing it was guarding, and it was the one refusal a
+  // person could provoke by clicking a cell, which is the natural thing to do
+  // before reaching for Export.
+  const rerunOk = sql !== null && canStream;
+  const refusal = canStream
+    ? sql === null
+      ? "This result did not come from a statement that can be re-run, so only the rows already fetched can be written."
+      : ""
+    : "This engine cannot stream a whole result, so only the rows already fetched can be written.";
+
   const allOption = els.exportScope.options[1];
   allOption.disabled = !rerunOk;
-  allOption.textContent = rerunOk
-    ? "Re-run the query and export every row"
-    : !results.isEverything()
-      ? "Re-run the query \u2014 not available while a subset is selected"
-      : !canStream
-        ? "Re-run the query \u2014 this engine cannot stream a whole result"
-        : "Re-run the query \u2014 not available for this statement";
+  // The reason is said **outside** the dropdown. Written into the option's own
+  // label it only existed while the popup was open, and WebKitGTK greys a
+  // disabled row so faintly that the option looks ordinary \u2014 so the click did
+  // nothing and nothing on screen accounted for it.
+  els.exportScopeRefusal.textContent = refusal;
+  els.exportScopeRefusal.hidden = refusal === "";
+
   if (!rerunOk) els.exportScope.value = "shown";
   else if (data.truncated) els.exportScope.value = "all";
 
@@ -3195,6 +3241,7 @@ conns = new ConnectionManager($("rail"), {
     session.forget(entry.profile.id);
     if (conns.active()?.profile.id === entry.profile.id) setMcpFocus(null);
   },
+  onBusyChanged: () => syncConnLabel(),
   exportSchema: (connectionId) => openSchemaExport(connectionId, null),
   dictionary: (entry) => void openDictionary(entry),
   notify: (m) => results.setMessage(m),
@@ -3245,6 +3292,11 @@ tabs = new TabManager($("script-tabs"), view, {
     // TOML rather than SQL — so the two branches differ in language, lint and
     // which buttons exist, and in nothing else.
     showDictionaryTab(tab.kind === "dictionary");
+    // Above the branch, because wrapping is the one editor setting that is
+    // not SQL-only: a dictionary tab is TOML in the same CodeMirror and has
+    // the same long-line problem. Below it, a dictionary tab came back
+    // wrapped with the box unticked.
+    applyWrapSetting();
     if (tab.kind === "dictionary") {
       setPlainToml(view);
       applyDictionaryLint();
@@ -3354,11 +3406,13 @@ function applySettings() {
   theme.set(settings.theme);
   els.autoLimit.checked = settings.autoLimit;
   els.lintOn.checked = settings.lint;
+  els.wrapOn.checked = settings.wrapText;
   els.timeout.value = String(settings.timeoutSecs);
   browseLimit = settings.browseLimit;
   // Via the existing helper, which owns the debounce bucket — reconfiguring
   // the linter behind its back would leave `appliedLintDelay` lying.
   applyLintSetting(true);
+  applyWrapSetting();
 }
 
 for (const f of FONTS) {
@@ -4226,8 +4280,9 @@ const ASSISTANT_TIP = "Ask the AI assistant (Ctrl+K)";
  */
 function paintAssistantButton() {
   const recipe = settings.aiProvider === "localCli" ? settings.aiRecipe : null;
-  const spinner = els.btnAssistant.querySelector(".spinner");
-  els.btnAssistant.classList.remove("not-ready");
+  // Activity is the whole control tracing its outline, the same as a rail
+  // connection — it was an 8px corner spinner, for the same fact (Stage 34 §7).
+  const spinner = els.btnAssistant.querySelector(".busy-outline");
   if (!recipe) {
     spinner?.remove();
     els.btnAssistant.title = ASSISTANT_TIP;
@@ -4237,18 +4292,19 @@ function paintAssistantButton() {
   const status = cliStatus.get(recipe);
   if (status === null) {
     // Probing. The same spinner the rail and the tree use.
-    if (!spinner) {
-      els.btnAssistant.append(
-        Object.assign(document.createElement("span"), { className: "spinner" }),
-      );
-    }
+    // 8 is `.rail-cog`'s own border-radius, which the outline traces.
+    if (!spinner) els.btnAssistant.append(busyOutline(8));
     els.btnAssistant.title = `Checking ${cliLabel(recipe)}…`;
     return;
   }
 
   spinner?.remove();
   const ready = status?.installed === true && status?.signedIn === true;
-  els.btnAssistant.classList.toggle("not-ready", !ready);
+  // **A CLI that is not ready carries no mark** (Stage 34 §7). The title
+  // below says exactly what is wrong and the panel says it again with the
+  // command to run, which is where a reason belongs; the amber dot that used
+  // to sit in the corner was permanent, actionless, and in the corner the
+  // other marks now use.
   // **The button is named for what it does, and the provider is the second
   // line.** It used to read "Ask Claude Code" or "Ask Copilot CLI", which
   // named the program we happen to shell out to rather than the feature the
@@ -4902,6 +4958,11 @@ els.btnCloseResults.onclick = () => {
 };
 
 els.lintOn.onchange = () => applyLintSetting(true);
+els.wrapOn.onchange = () => {
+  settings.wrapText = els.wrapOn.checked;
+  saveSettings(settings);
+  applyWrapSetting();
+};
 applyLintSetting(true);
 
 results.setMessage("No connection. Use + in the left rail to add one.");
