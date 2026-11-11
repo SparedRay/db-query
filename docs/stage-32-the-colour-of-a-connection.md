@@ -219,11 +219,42 @@ Which is the sharper statement of what this app is, and worth keeping for the
 next decision of this shape: a buffer here exists to be run against a server.
 Offline editing is a text editor's job, and the tabs are intact either way.
 
-**White on amber.** A pressed segmented button fills with the connection's
-colour and keeps `--on-accent` white. On `#f59e0b` that is about 2.1:1 — legible
-at 12px but the weakest pair in the palette. It is the same pair the rail has
-used for its chips since Stage 7, so this spreads an existing choice rather
-than making a new one. Fixing it properly means a readable-foreground token
-computed from the swatch's luminance, which would also flip the rail's green
-and amber chips to dark text — a visible change to something nobody asked
-about, so it is written down here instead of done.
+**~~White on amber.~~ Closed 2026-11-11.** A pressed segmented button filled
+with the connection's colour and kept `--on-accent` white. On `#f59e0b` that
+measured **2.15:1** — the weakest pair in the palette. This note said fixing it
+properly meant a foreground computed from the swatch's luminance, and that
+doing so would flip other chrome to dark text — a visible change nobody had
+asked for. Asked for now, and done.
+
+Three things the note had slightly wrong, all found by drawing it rather than
+by reading the CSS:
+
+- **It is not only the pressed button.** `.rail-item` carries the same pair, so
+  an amber connection's rail disc wore white initials the whole time it was
+  connected, not only while something was pressed. That is the more visible
+  instance, and it is the one a screenshot shows first.
+- **The rail's `.chip` elements were never part of it.** They are coloured text
+  on a neutral background — a different pair, already legible. The note's worry
+  about "flipping the rail's green and amber chips" was about a cost that did
+  not exist.
+- **"Whichever wins" is the wrong rule.** Taking the better of white and dark
+  flips five of the seven swatches, including blue (3.68 → 3.99) and red
+  (3.76 → 3.90), where it buys almost nothing and restyles the two most-used
+  connections. The rule is a **threshold**: below 3:1 white has stopped being
+  readable rather than merely imperfect. Amber (2.15), green (2.28) and teal
+  (2.49) take dark ink; blue, red, violet and slate keep the white they have
+  always had.
+
+**The shape of it.** A second token, `--on-conn`, beside `--conn-colour` — not
+a change to `--on-accent`, which answers for fills of `--accent` and is always
+white on blue. `inkOn()` in `connections.ts` picks between two palette tokens
+and is set at the same two places the colour is, `#app` and each rail item, so
+a colour can never arrive without its ink. Exactly four rules read the new
+token: the rail item, the busy outline's stroke, the pressed segment and its
+count. Amber now measures **6.83:1**.
+
+Three tests in `connection-accent.spec.ts`, all measuring the contrast of what
+is *painted* rather than comparing a token to a literal — a literal would pass
+on either theme and either ink. Both halves falsified: pointing the rail rule
+back at `--on-accent` fails the amber test, and moving the threshold to 4.5
+fails the red one.

@@ -91,6 +91,46 @@ export const COLOURS = [
   "#64748b", // slate
 ];
 
+/**
+ * The text colour that stays legible on `colour`, as a `var()` the stylesheet
+ * resolves — so the two inks live in the palette, not in here.
+ *
+ * **A threshold, not "whichever wins".** Taking the better of the two flips
+ * five of the seven swatches, including blue (3.68 → 3.99) and red
+ * (3.76 → 3.90), where it buys almost nothing and changes the look of the two
+ * most-used connections. Below 3:1 is where white stops being readable rather
+ * than merely imperfect: amber 2.15, green 2.28, teal 2.49 flip; blue, red,
+ * violet and slate keep the white they have always had.
+ *
+ * Any hex is accepted, not just `COLOURS` — a profile is a file a person can
+ * edit, so the rule has to answer for a colour nobody here chose.
+ */
+export function inkOn(colour: string): string {
+  return contrastWithWhite(colour) >= 3 ? "var(--on-accent)" : "var(--conn-ink)";
+}
+
+/** WCAG relative luminance of `#rgb` or `#rrggbb`; -1 if it is neither. */
+function luminance(hex: string): number {
+  let h = hex.trim().replace(/^#/, "");
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  if (!/^[0-9a-f]{6}$/i.test(h)) return -1;
+  const chan = (i: number) => {
+    const c = parseInt(h.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * chan(0) + 0.7152 * chan(2) + 0.0722 * chan(4);
+}
+
+/**
+ * White's contrast against `colour`. An unreadable value returns `21`, which
+ * keeps white: a colour this cannot parse is not one to make decisions from,
+ * and the old behaviour is the safer place to land.
+ */
+function contrastWithWhite(colour: string): number {
+  const l = luminance(colour);
+  return l < 0 ? 21 : 1.05 / (l + 0.05);
+}
+
 /** Two letters for the rail disc. Names are chosen by the user, so respect them. */
 export function initials(name: string): string {
   const words = name.trim().split(/[\s\-_.]+/).filter(Boolean);
@@ -367,6 +407,7 @@ export class ConnectionManager {
         (entry.busy ? " busy" : "") +
         (entry.saved ? "" : " adhoc");
       el.style.setProperty("--conn-colour", entry.profile.colour);
+      el.style.setProperty("--on-conn", inkOn(entry.profile.colour));
       el.textContent = initials(entry.profile.name);
       el.title =
         `${entry.profile.name}\n${address(entry.profile)}\n` +

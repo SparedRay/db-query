@@ -29,6 +29,13 @@
   /* Text on an accent fill. Stays white in both themes — the fill is the same
      blue either way, so this is not the same role as --fg-strong. */
   --on-accent: #ffffff;
+  /* **Text on the connection's own colour**, which is chosen by the user and
+     so can be light. `--on-accent` cannot answer for it: that pair is always
+     white on `--accent`, which is always blue. Set beside `--conn-colour`
+     wherever that is set, by `inkOn` — white where white clears 3:1, this
+     otherwise. Amber was 2.15:1 and is 6.83:1 (Stage 32 §8, closed). */
+  --conn-ink: #1f2937;
+  --on-conn: var(--on-accent);
   /* **The connection on screen**, for chrome that answers "which server am I
      looking at": the active script tab's top edge, the active result tab's,
      and the pressed state of the output and performance switches.
@@ -143,6 +150,9 @@
   --fg-dim: #5b6270;
   --accent: #2563eb;
   --on-accent: #ffffff;
+  /* Same pair, same reason: the swatches are the user's either way. */
+  --conn-ink: #1f2937;
+  --on-conn: var(--on-accent);
   --sel-header-bg: #c9dafc;
   --sel-cell-bg: rgba(37,99,235,.16);
   /* 2.11:1 against white, with --fg still at 7.8:1 on top. The first attempt
@@ -845,7 +855,7 @@ input.num {
   width: 32px; height: 32px; border-radius: 9px;
   border: 1px solid transparent; cursor: pointer;
   font: 600 11px/1 system-ui, sans-serif; letter-spacing: .3px;
-  background: var(--conn-colour); color: var(--on-accent);
+  background: var(--conn-colour); color: var(--on-conn);
   display: flex; align-items: center; justify-content: center;
   transition: border-radius .12s ease;
 }
@@ -1570,7 +1580,7 @@ dialog.viewer .viewer-note.copy-failed { color: var(--danger-fg); }
 /* `.busy`, not `.connecting`: closing a connection goes to the server too,
    and naming the state after one of the things that can cause it is how
    `disconnect` ended up with no indicator at all. */
-.rail-item.live .busy-outline rect { stroke: var(--on-accent); }
+.rail-item.live .busy-outline rect { stroke: var(--on-conn); }
 
 .rail-item.busy { cursor: progress; }
 /* The outline is drawn at the item's own 9px radius, and the item is **not
@@ -2073,12 +2083,12 @@ button .spinner {
   padding: 2px 10px; border: none; background: transparent; cursor: pointer;
 }
 .seg-btn:hover { color: var(--fg); background: var(--btn-bg); }
-.seg-btn[aria-pressed="true"] { background: var(--conn-colour); color: var(--on-accent); }
+.seg-btn[aria-pressed="true"] { background: var(--conn-colour); color: var(--on-conn); }
 .seg-count {
   font-size: 11px; border-radius: 9px; padding: 0 6px;
   background: var(--btn-bg); color: var(--fg);
 }
-.seg-btn[aria-pressed="true"] .seg-count { background: rgba(0, 0, 0, .22); color: var(--on-accent); }
+.seg-btn[aria-pressed="true"] .seg-count { background: rgba(0, 0, 0, .22); color: var(--on-conn); }
 .res-title {
   font: 600 10.5px/1.4 system-ui, sans-serif; letter-spacing: .1em;
   text-transform: uppercase; color: var(--fg-dim);

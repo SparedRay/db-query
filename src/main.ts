@@ -62,7 +62,7 @@ import {
   totals, type SeqFilter, type SequenceEntry, type SequenceRun,
 } from "./sequence";
 import {
-  ConnectionManager, COLOURS, newConnectionId, serverLabel, type ConnectionEntry,
+  ConnectionManager, COLOURS, inkOn, newConnectionId, serverLabel, type ConnectionEntry,
 } from "./connections";
 import { createFileUx, type FileUx } from "./files";
 import { createSessionPersistence } from "./session";
@@ -694,10 +694,14 @@ function paintConnectionState() {
 
   if (live) {
     els.app.style.setProperty("--conn-colour", active.profile.colour);
+    // Always together: a colour without its ink is how a pressed button ends
+    // up white on amber. The pair is set here and nowhere else.
+    els.app.style.setProperty("--on-conn", inkOn(active.profile.colour));
   } else {
     // Removed rather than set to the accent: the fallback belongs in one place,
     // `:root`, where it also applies before this ever runs.
     els.app.style.removeProperty("--conn-colour");
+    els.app.style.removeProperty("--on-conn");
   }
 
   els.app.toggleAttribute("data-offline", !live);

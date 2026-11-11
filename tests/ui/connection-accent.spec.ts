@@ -305,3 +305,95 @@ test("the screen offers to reconnect the connection you left", async ({ page }) 
   await expect(page.locator(".rail-item.live")).toHaveCount(1);
   await expect(page.locator("#blank-page")).toBeHidden();
 });
+
+// ------------------------------------------------- text on the connection's colour
+
+/**
+ * Amber: 2.15:1 under white, the weakest pair in the palette and the one
+ * Stage 32 §8 wrote down rather than fixed.
+ */
+const AMBER = "#f59e0b";
+
+/** The same app, with the saved connection in whatever colour a test needs. */
+async function withColour(page: Page, colour: string) {
+  await withSaved(page, {
+    list_profiles: () => ({ profiles: [{ ...SAVED[0], colour }], warning: null }),
+  });
+  await connectSaved(page);
+}
+
+/**
+ * What the pixels actually contrast at, measured from the element rather than
+ * from the token — the ink is only right if it lands on the fill it was
+ * chosen for. A literal would pass on either theme and on either ink.
+ */
+function paintedContrast(page: Page, selector: string) {
+  return page.locator(selector).evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const lum = (v: string) => {
+      const [r, g, b] = v.match(/\d+(\.\d+)?/g)!.slice(0, 3).map(Number);
+      const ch = (c: number) => {
+        c /= 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+    };
+    const [hi, lo] = [lum(cs.color), lum(cs.backgroundColor)].sort((a, b) => b - a);
+    return (hi + 0.05) / (lo + 0.05);
+  });
+}
+
+/**
+ * A token as the *painter* sees it. Reading the custom property gives the
+ * authored `#ffffff`, which never equals a computed `rgb(255, 255, 255)` — so
+ * the comparison has to go through an element that actually uses it.
+ */
+function tokenColour(page: Page, token: string) {
+  return page.locator("#app").evaluate((el, t) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${t})`;
+    el.appendChild(probe);
+    const seen = getComputedStyle(probe).color;
+    probe.remove();
+    return seen;
+  }, token);
+}
+
+test("a light connection colour takes dark text, not white", async ({ page }) => {
+  await withColour(page, AMBER);
+
+  const ratio = await paintedContrast(page, ".rail-item.live");
+  expect(ratio, "white on amber measured 2.15:1 before this").toBeGreaterThan(4.5);
+
+  const ink = await painted(page, ".rail-item.live", "color");
+  const white = await tokenColour(page, "--on-accent");
+  expect(ink, "amber must not resolve to the accent's white").not.toBe(white);
+});
+
+test("a dark connection colour keeps the white it has always had", async ({ page }) => {
+  await withColour(page, RED);
+
+  // 3.76:1, and dark ink would buy 3.90 — not enough to be worth changing the
+  // look of the two most-used swatches. The threshold is what is under test.
+  const ratio = await paintedContrast(page, ".rail-item.live");
+  expect(ratio).toBeGreaterThan(3);
+
+  const ink = await painted(page, ".rail-item.live", "color");
+  const white = await tokenColour(page, "--on-accent");
+  expect(ink, "red was readable already").toBe(white);
+});
+
+test("a pressed segmented button reads the same ink as the rail", async ({ page }) => {
+  await withColour(page, AMBER);
+
+  // The control that prompted the note: it fills with `--conn-colour` too, and
+  // inherits the ink from `#app` rather than deciding anything itself.
+  // One of the five pressed segments, named rather than taken by position:
+  // `painted` is strict, and a selector that matches five is not an assertion.
+  const pressed = "#res-view-results[aria-pressed='true']";
+  await expect(page.locator(pressed)).toBeVisible();
+  expect(await paintedContrast(page, pressed)).toBeGreaterThan(4.5);
+  expect(await painted(page, pressed, "color")).toBe(
+    await painted(page, ".rail-item.live", "color"),
+  );
+});

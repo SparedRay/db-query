@@ -273,17 +273,18 @@ itself, inside `#app`, where inheritance does reach.
 
 ## 8. Still open
 
-**The 1 : 1 counter-example can fall off its own chart.** Selectivity draws
-the top five by ratio, so on a server with more than five application shapes
-the row that sits *on* the rule — the one that makes the rule mean something —
-is the first to be cut. The ranking is right (the worst offenders are what the
-chart is for) and the verdict chip still says *no index will help* on the row
-below. Worth watching in use.
+**~~The 1 : 1 counter-example can fall off its own chart.~~ Closed 2026-11-11.**
+Selectivity draws the top five by ratio, so on a server with more than five
+application shapes the row that sits *on* the rule — the one that makes the
+rule mean something — is the first to be cut. Watched in use and accepted: the
+ranking is what the chart is for, the worst offenders are what it should show,
+and the verdict chip still says *no index will help* on the row below. No
+change.
 
-**No chart on the chatter or platform lists.** They get the same card, drawn
-from the same code, and nothing has been thought about whether ranking driver
-chatter by selectivity says anything. It costs nothing to leave on and would
-cost a special case to turn off.
+**~~No chart on the chatter or platform lists.~~ Closed 2026-11-11.** They get
+the same card from the same code, and nothing was ever thought about whether
+ranking driver chatter by selectivity says anything. Left on: it costs nothing
+there and would cost a special case to turn off.
 
-**White on amber** is still open from Stage 32 §8, and the charts do not touch
-it: nothing here uses `--conn-colour` or `--on-accent`.
+**~~White on amber~~ is closed** — Stage 32 §8, 2026-11-11. The charts never
+touched it: nothing here uses `--conn-colour` or `--on-accent`.

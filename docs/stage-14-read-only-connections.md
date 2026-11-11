@@ -106,7 +106,10 @@ in the backlog), per-statement overrides, or read-only *tabs*.
 - [x] `ConnProfile.read_only`, `#[serde(default)]`, added to `PROFILE_KEYS`
 - [x] `Capabilities.read_only` + `for_profile`, applied on both connect paths
 - [x] `refusal` names the right reason
-- [ ] The Elasticsearch gate reads the connection's capabilities
+- [x] The Elasticsearch gate reads the connection's capabilities — verified
+      2026-11-11: `elastic.rs` calls `engine::refusal(&tab.server.capabilities,
+      kind)`, the same gate MySQL uses, and both connect paths build their
+      capabilities through `for_profile`. Nothing engine-specific was left.
 - [x] Live: a read-only connection refuses a write and the table is unchanged
 
 ### Phase 2 — The app
