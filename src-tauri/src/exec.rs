@@ -10,6 +10,7 @@ use sqlx::mysql::MySqlRow;
 use sqlx::Executor;
 
 use crate::decode::{columns_of, decode_cell, CellValue, ColumnMeta};
+use crate::diagnose::{self, StatementDiagnosis};
 use crate::session::{self, friendly, AppState, TabSession};
 use crate::split;
 
@@ -679,6 +680,217 @@ pub async fn run_script(
         .engine
         .run_script(state, tab_id, sql, auto_limit_enabled, timeout_secs)
         .await
+}
+
+/// Diagnose one statement on the tab's own connection.
+///
+/// **The tab's connection, not the metadata one.** Session counters describe a
+/// session, and `EXPLAIN ANALYZE` has to run where the statement itself would
+/// run; measuring one session to explain another would be measuring nothing.
+///
+/// The order is deliberate: the free plan first, so there is something to show
+/// even if the measured run is cancelled or refused, then the counters, the
+/// measured run, and the counters again.
+pub(crate) async fn mysql_diagnose(
+    state: &AppState,
+    tab_id: &str,
+    sql: &str,
+    timeout_secs: Option<u64>,
+) -> Result<StatementDiagnosis, String> {
+    // Decided from the text, before a connection exists. `EXPLAIN ANALYZE`
+    // executes what it is given.
+    diagnose::may_diagnose(sql).map_err(|r| r.message())?;
+
+    let statement = sql.trim().trim_end_matches(';').to_string();
+    let tab = session::tab(state, tab_id).await?;
+    let (mut guard, _reconnected) = session::begin_run(&tab).await?;
+    let conn = guard
+        .as_mut()
+        .expect("ensure_exec guarantees a live connection");
+
+    let version = tab.server.server_version.clone().unwrap_or_default();
+    let (tree_ok, analyze_ok) = diagnose::plan_support(&version);
+
+    let mut out = StatementDiagnosis {
+        statement: statement.clone(),
+        normalised: diagnose::normalise(&statement),
+        source: if tree_ok {
+            diagnose::PlanSource::Tree
+        } else {
+            diagnose::PlanSource::Classic
+        },
+        plan: Vec::new(),
+        classic: Vec::new(),
+        classic_columns: Vec::new(),
+        counters: Vec::new(),
+        findings: Vec::new(),
+        measured_ms: None,
+        rows_sent: None,
+        notes: Vec::new(),
+    };
+
+    tab.running.store(true, Ordering::SeqCst);
+
+    // 1. The plan. Free, and the whole answer on an older server.
+    if tree_ok {
+        match (&mut *conn)
+            .fetch_all(raw(format!("EXPLAIN FORMAT=TREE {statement}")))
+            .await
+        {
+            Ok(rows) => out.plan = diagnose::parse_tree(&first_column_text(&rows)),
+            Err(e) => {
+                tab.running.store(false, Ordering::SeqCst);
+                return Err(friendly(&e));
+            }
+        }
+    } else {
+        match (&mut *conn)
+            .fetch_all(raw(format!("EXPLAIN {statement}")))
+            .await
+        {
+            Ok(rows) => {
+                let columns = rows.first().map(columns_of).unwrap_or_default();
+                out.classic_columns = columns.iter().map(|c| c.name.clone()).collect();
+                out.classic = rows
+                    .iter()
+                    .map(|r| {
+                        (0..columns.len())
+                            .map(|i| cell_text(&decode_cell(r, i)))
+                            .collect()
+                    })
+                    .collect();
+                out.notes.push(format!(
+                    "This server is {}. EXPLAIN FORMAT=TREE needs 8.0.16, so the plan is shown as \
+                     the server's own table.",
+                    display_version(&version)
+                ));
+            }
+            Err(e) => {
+                tab.running.store(false, Ordering::SeqCst);
+                return Err(friendly(&e));
+            }
+        }
+    }
+
+    // 2. The measured run, where the server has one.
+    if analyze_ok {
+        let before = session_status(conn).await;
+        let started = Instant::now();
+        let mut timed_out = false;
+        let fut = (&mut *conn).fetch_all(raw(format!("EXPLAIN ANALYZE {statement}")));
+        match await_query(fut, timeout_secs, state, &tab, tab_id, &mut timed_out).await {
+            Waited::Abandoned => {
+                // The connection is mid-protocol and cannot be reused; the
+                // plan already in hand is still worth returning.
+                *guard = None;
+                out.notes.push(
+                    "Cancelled. The plan above is the optimizer's estimate; nothing was measured."
+                        .into(),
+                );
+                tab.running.store(false, Ordering::SeqCst);
+                out.findings = diagnose::verdicts(&out.plan, &out.counters, out.rows_sent);
+                return Ok(out);
+            }
+            Waited::Done(Ok(rows)) => {
+                out.measured_ms = Some(started.elapsed().as_millis() as u64);
+                out.plan = diagnose::parse_tree(&first_column_text(&rows));
+                out.source = diagnose::PlanSource::Analyze;
+                let after = session_status(conn).await;
+                out.counters = diagnose::counter_delta(&before, &after);
+            }
+            Waited::Done(Err(e)) => {
+                out.notes.push(format!(
+                    "The measured run did not complete: {}. The plan above is the estimate.",
+                    friendly(&e)
+                ));
+                if timed_out {
+                    out.notes
+                        .push("It passed the statement timeout and was stopped.".into());
+                }
+            }
+        }
+    } else if tree_ok {
+        out.notes.push(format!(
+            "This server is {}. EXPLAIN ANALYZE needs 8.0.18, so these are the optimizer's \
+             estimates and nothing was executed.",
+            display_version(&version)
+        ));
+    }
+
+    tab.running.store(false, Ordering::SeqCst);
+
+    out.rows_sent = out.plan.first().and_then(|n| n.actual_rows.or(n.est_rows));
+    out.findings = diagnose::verdicts(&out.plan, &out.counters, out.rows_sent);
+    Ok(out)
+}
+
+/// Every row's first column, joined — `EXPLAIN` prints its tree as one cell on
+/// some servers and one row per line on others.
+fn first_column_text(rows: &[sqlx::mysql::MySqlRow]) -> String {
+    rows.iter()
+        .map(|r| match decode_cell(r, 0) {
+            crate::decode::CellValue::Text(s) => s,
+            other => cell_text(&other).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The watched session counters, as the server reports them now.
+///
+/// A counter the server does not have is simply absent, and
+/// [`diagnose::counter_delta`] drops anything it cannot see on both sides. A
+/// failure here loses the counters, never the diagnosis.
+async fn session_status(conn: &mut sqlx::MySqlConnection) -> Vec<(String, i64)> {
+    let Ok(rows) = (&mut *conn)
+        .fetch_all(raw("SHOW SESSION STATUS".to_string()))
+        .await
+    else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|r| {
+            let name = match decode_cell(r, 0) {
+                crate::decode::CellValue::Text(s) => s,
+                other => cell_text(&other)?,
+            };
+            if !diagnose::WATCHED
+                .iter()
+                .any(|(w, _)| w.eq_ignore_ascii_case(&name))
+            {
+                return None;
+            }
+            let value = cell_text(&decode_cell(r, 1))?;
+            Some((name, value.trim().parse::<i64>().ok()?))
+        })
+        .collect()
+}
+
+/// A decoded cell as plain text, where there is text to have.
+fn cell_text(cell: &crate::decode::CellValue) -> Option<String> {
+    match cell {
+        crate::decode::CellValue::Null => None,
+        crate::decode::CellValue::Text(s) => Some(s.clone()),
+        other => serde_json::to_value(other).ok().and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }),
+    }
+}
+
+/// `8.0.36-aurora.3.07.1` is what the server says; `8.0.36` is what a sentence
+/// about it should say.
+fn display_version(version: &str) -> String {
+    if version.is_empty() {
+        return "of an unknown version".into();
+    }
+    let short: String = version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    format!("MySQL {}", short.trim_end_matches('.'))
 }
 
 #[cfg(test)]

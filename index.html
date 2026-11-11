@@ -103,6 +103,13 @@
             <label class="toggle sql-only" title="Append LIMIT 5000 to unbounded SELECTs">
               <input type="checkbox" id="chk-autolimit" checked /> Auto-LIMIT
             </label>
+            <!-- Stage 35. A mode, so the control that acts changes with it:
+                 Run reads Diagnose and wears the warning colour. A toggle that
+                 silently changed what Run did is the bug Stage 34 shipped. -->
+            <label class="toggle sql-only" id="lbl-diagnose"
+                   title="Measure the statement instead of returning its rows (Ctrl+Enter)">
+              <input type="checkbox" id="chk-diagnose" /> Diagnose
+            </label>
             <label class="toggle sql-only" title="Advisory squiggles only — never blocks Run">
               <input type="checkbox" id="chk-lint" checked /> Lint
             </label>
@@ -186,6 +193,11 @@
               <button type="button" id="res-view-sequence" class="seg-btn" aria-pressed="false">
                 Sequence<span class="seg-count" id="res-count-sequence" hidden></span>
               </button>
+              <!-- Stage 35. A diagnosis belongs to the statement you just ran,
+                   and this is where that statement's answer already appears. -->
+              <button type="button" id="res-view-diagnosis" class="seg-btn" aria-pressed="false">
+                Diagnosis<span class="seg-count" id="res-count-diagnosis" hidden></span>
+              </button>
             </div>
             <kbd class="res-key">Ctrl+J</kbd>
           </div>
@@ -238,6 +250,9 @@
                 </div>
               </div>
             </div>
+            <!-- Stage 35. The plan, what it cost, and the verdicts. Built by
+                 `diagnose.ts`; empty until something has been diagnosed. -->
+            <div id="diagnosis-pane" class="diagnosis-pane" hidden></div>
             <!-- Two rows. The note used to sit between the status chips and the
                  buttons, which left it a few characters wide: the chips wrapped
                  into a vertical stack to make room, and the sentence was

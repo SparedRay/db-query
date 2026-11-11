@@ -360,6 +360,9 @@ export interface Capabilities {
    *  tables. The gate on the performance panel (Stage 31) — a capability, not
    *  a check on `engine`. */
   workloadDigests: boolean;
+  /** The server will describe its own plan and count its own session. The gate
+   *  on Diagnose mode (Stage 35). */
+  diagnose: boolean;
 }
 
 export interface ConnInfo {
@@ -670,6 +673,68 @@ export interface StatementAt {
   sql: string;
   /** Byte offset of `sql` within the buffer that was sent. */
   start: number;
+}
+
+/** One line of a plan, as `diagnose.rs` parsed it (Stage 35). */
+export interface PlanNode {
+  depth: number;
+  op: string;
+  detail: string;
+  estRows: number | null;
+  cost: number | null;
+  actualRows: number | null;
+  loops: number | null;
+  timeMs: number | null;
+  /** `timeMs × loops`, children included. */
+  totalMs: number | null;
+  /** That, minus the children's totals. What this node itself cost. */
+  selfMs: number | null;
+  neverExecuted: boolean;
+  unparsed: boolean;
+}
+
+/** A session counter that moved while the statement ran. */
+export interface DiagCounter {
+  name: string;
+  delta: number;
+  /** A non-zero value is itself the finding. */
+  notable: boolean;
+}
+
+export type DiagSeverity = "high" | "medium" | "note";
+
+/** A verdict, its evidence, and SQL to try where the evidence supports one. */
+export interface Finding {
+  code: string;
+  title: string;
+  severity: DiagSeverity;
+  evidence: string;
+  suggestion: string | null;
+}
+
+/** Where a plan came from, so the view never implies a measurement it lacks. */
+export type PlanSource = "tree" | "analyze" | "classic";
+
+/** Everything one diagnosis produced (Stage 35). */
+export interface StatementDiagnosis {
+  statement: string;
+  /** Literals replaced. What goes to the assistant unless asked otherwise. */
+  normalised: string;
+  source: PlanSource;
+  plan: PlanNode[];
+  classic: (string | null)[][];
+  classicColumns: string[];
+  counters: DiagCounter[];
+  findings: Finding[];
+  measuredMs: number | null;
+  rowsSent: number | null;
+  notes: string[];
+}
+
+/** A statement Diagnose would not touch, and why. */
+export interface SkippedStatement {
+  sql: string;
+  why: string;
 }
 
 export interface ScriptResult {
@@ -1724,6 +1789,15 @@ export const api = {
   runScript: (tabId: string, sql: string, autoLimit: boolean, timeoutSecs: number | null) =>
     invoke<ScriptResult>("run_script", { tabId, sql, autoLimit, timeoutSecs }),
   cancelQuery: (tabId: string) => invoke<void>("cancel_query", { tabId }),
+  /**
+   * Measure one row-returning statement (Stage 35).
+   *
+   * Rejects anything that writes **in the backend**, before a connection is
+   * touched: `EXPLAIN ANALYZE` executes what it is given, including multi-table
+   * UPDATE and DELETE.
+   */
+  diagnoseStatement: (tabId: string, sql: string, timeoutSecs: number | null) =>
+    invoke<StatementDiagnosis>("diagnose_statement", { tabId, sql, timeoutSecs }),
   lintSql: (tabId: string, sql: string) => invoke<Diagnostic[]>("lint_sql", { tabId, sql }),
 
   // --- schema cache, per connection, served over that connection's meta link
@@ -1765,6 +1839,8 @@ export const api = {
   /** The statement under the cursor, and where it starts in `sql`. */
   statementAtCursor: (sql: string, cursor: number) =>
     invoke<StatementAt | null>("statement_at_cursor", { sql, cursor }),
+  /** Every statement in the buffer, by the same rules execution uses. */
+  splitStatements: (sql: string) => invoke<StatementAt[]>("split_statements", { sql }),
   /** Lay SQL out. Rejects rather than returning something that means
    *  something else, so a failure is worth showing. */
   formatSql: (sql: string) => invoke<string>("format_sql", { sql }),

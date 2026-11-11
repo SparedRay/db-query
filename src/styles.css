@@ -2673,3 +2673,163 @@ button .spinner {
   flex-direction: row; align-items: center; padding: 8px 14px;
 }
 #app[data-full="wl"] .wl-foot .wl-scope { flex: 1; }
+
+/* ---------------------------------------------------------------- Stage 35
+   Diagnose: the plan, what it cost, and the verdicts.
+
+   Built on the dock's chart vocabulary rather than a new one — one accent for
+   the mark that matters, drained neutrals around it, bars to scale. The only
+   new colour role is the mode itself, which borrows --warn because a mode that
+   changes what Run does should look like a warning. */
+
+.mini.diagnosing {
+  background: var(--warn); border-color: var(--warn); color: var(--conn-ink); font-weight: 600;
+}
+.mini.diagnosing kbd { color: var(--conn-ink); border-color: rgba(0, 0, 0, .3); background: transparent; }
+.toggle.on { color: var(--fg-strong); font-weight: 600; }
+.toggle.on input { accent-color: var(--warn); }
+/* Suspended, not gone: the state is kept and the reason is on the control. */
+.toggle.suspended { opacity: .5; cursor: help; }
+
+.diagnosis-pane {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 12px;
+}
+
+.diag-empty { margin: auto; text-align: center; max-width: 46ch; color: var(--fg-dim); }
+.diag-empty-title { margin: 0 0 4px; color: var(--fg); font-weight: 600; }
+.diag-empty-detail { margin: 0; font-size: 12.5px; }
+
+.diag-card {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised);
+  padding: 12px 13px; display: flex; flex-direction: column; gap: 11px; min-width: 0;
+}
+.diag-skipped { border-left: 3px solid var(--warn); }
+
+.diag-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.diag-chip {
+  font-size: 11.5px; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--border); background: var(--chip-bg); color: var(--fg-dim);
+}
+/* Measured and estimated are different claims, so they do not look alike. */
+.diag-chip.measured { color: var(--fg-strong); border-color: var(--accent); }
+.diag-chip.estimated { border-style: dashed; }
+.diag-chip.warn { color: var(--warn); border-color: var(--warn); }
+
+.diag-notes { display: flex; flex-direction: column; gap: 4px; }
+.diag-note {
+  margin: 0; font-size: 12px; color: var(--fg-dim);
+  border-left: 2px solid var(--border); padding-left: 8px;
+}
+
+.diag-sql {
+  margin: 0; font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 7px;
+  padding: 8px 10px; overflow-x: auto; white-space: pre; color: var(--fg);
+}
+
+/* ----- the plan */
+.diag-plan { display: flex; flex-direction: column; gap: 2px; }
+.diag-plan-head,
+.diag-node {
+  display: grid; grid-template-columns: minmax(0, 1fr) 72px 118px 62px; gap: 8px;
+  align-items: center;
+}
+.diag-plan-head {
+  padding: 0 8px 3px; font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.diag-plan-head span:not(:first-child) { text-align: right; }
+.diag-node {
+  padding: 5px 8px; border-radius: 6px; border: 1px solid transparent;
+  font-size: 11.5px; background: var(--bg);
+  padding-left: calc(8px + var(--depth, 0) * 12px);
+}
+.diag-node.hot { border-color: var(--warn); background: var(--bg-hover); }
+.diag-op { display: flex; gap: 7px; align-items: baseline; min-width: 0; }
+.diag-op-name {
+  color: var(--fg-strong); font-weight: 500; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto;
+}
+.diag-op-detail {
+  color: var(--fg-dim); font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.diag-never { color: var(--fg-dim); font-style: italic; white-space: nowrap; }
+.diag-figure {
+  text-align: right; font-variant-numeric: tabular-nums; color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace); font-size: 11px;
+}
+.diag-figure.bad { color: var(--warn); font-weight: 600; }
+.diag-rows { display: flex; gap: 4px; justify-content: flex-end; align-items: baseline; }
+.diag-est { color: var(--fg-dim); }
+.diag-arrow { color: var(--chart-faint); }
+.diag-actual.bad { color: var(--warn); font-weight: 600; }
+
+/* ----- self time */
+.diag-bars { display: flex; flex-direction: column; gap: 4px; }
+.diag-cap {
+  margin: 0; font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.diag-bar-row { display: grid; grid-template-columns: minmax(0, 170px) 1fr 64px; gap: 8px; align-items: center; }
+.diag-bar-label {
+  font-size: 11.5px; color: var(--fg); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diag-track { height: 10px; border-radius: 3px; background: var(--chart-grid, var(--border)); overflow: hidden; }
+.diag-fill { height: 100%; border-radius: 3px; background: var(--chart-mark); }
+.diag-fill.quiet { background: var(--chart-faint); }
+.diag-bar-value {
+  text-align: right; font-family: var(--mono, ui-monospace, monospace); font-size: 11px;
+  font-variant-numeric: tabular-nums; color: var(--fg-dim);
+}
+
+/* ----- counters */
+.diag-counters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.diag-counter {
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 9px; background: var(--bg);
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.diag-counter.notable { border-color: var(--warn); }
+.diag-counter-k { font-size: 10.5px; color: var(--fg-dim); word-break: break-word; }
+.diag-counter-v {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 15px; font-weight: 600;
+  color: var(--fg-strong); font-variant-numeric: tabular-nums;
+}
+.diag-counter.notable .diag-counter-v { color: var(--warn); }
+.diag-counter-why { font-size: 10.5px; color: var(--fg-dim); }
+
+/* ----- verdicts */
+.diag-findings { display: flex; flex-direction: column; gap: 8px; }
+.diag-finding {
+  border: 1px solid var(--border); border-left: 3px solid var(--chart-faint);
+  border-radius: 8px; padding: 9px 11px; background: var(--bg);
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-start;
+}
+.diag-finding.sev-high { border-left-color: var(--warn); }
+.diag-finding.sev-medium { border-left-color: var(--numeric); }
+.diag-finding-title { margin: 0; font-size: 12.5px; color: var(--fg-strong); }
+.diag-finding-ev { margin: 0; font-size: 12px; color: var(--fg-dim); }
+.diag-suggestion {
+  margin: 0; align-self: stretch;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 11px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 9px; overflow-x: auto; white-space: pre; color: var(--fg);
+}
+
+.diag-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.diag-actions-note { font-size: 11px; color: var(--fg-dim); }
+
+.diag-classic { overflow-x: auto; }
+.diag-classic table { border-collapse: collapse; font-size: 11.5px; }
+.diag-classic th, .diag-classic td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left; white-space: nowrap;
+}
+.diag-classic th { color: var(--fg-dim); font-weight: 600; }
+
+@container (max-width: 560px) {
+  .diag-plan-head, .diag-node { grid-template-columns: minmax(0, 1fr) 60px 92px; }
+  .diag-plan-head span:nth-child(4), .diag-node > :nth-child(4) { display: none; }
+  .diag-bar-row { grid-template-columns: minmax(0, 110px) 1fr 56px; }
+}

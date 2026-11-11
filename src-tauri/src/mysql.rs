@@ -143,6 +143,16 @@ impl Engine for MysqlEngine {
         crate::exec::mysql_run_script(state, tab_id, sql, auto_limit, timeout_secs).await
     }
 
+    async fn diagnose(
+        &self,
+        state: &AppState,
+        tab_id: &str,
+        sql: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<crate::diagnose::StatementDiagnosis, String> {
+        crate::exec::mysql_diagnose(state, tab_id, sql, timeout_secs).await
+    }
+
     async fn use_namespace(&self, state: &AppState, tab_id: &str, ns: &str) -> Result<(), String> {
         crate::session::mysql_use_database(state, tab_id, ns).await
     }

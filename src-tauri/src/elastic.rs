@@ -68,6 +68,9 @@ pub fn capabilities() -> Capabilities {
         // `POST /_sql`. Reaching them is a transport change rather than a
         // feature, so the panel is not offered here — see Stage 31 §2.
         workload_digests: false,
+        // No EXPLAIN and no session counters through `POST /_sql`: there is
+        // nothing to diagnose with, so the toggle is never offered.
+        diagnose: false,
     }
 }
 

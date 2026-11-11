@@ -56,6 +56,7 @@ import { busyOutline, icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter, type SchemaLookup } from "./treefilter";
 import { ResultView, resultSets } from "./grid";
+import { paintDiagnoses } from "./diagnose";
 import { TabManager, clearResult, type OutputView, type ScriptTab } from "./tabs";
 import {
   SequenceView, emptyLog, entryCount, logText, pushRun, returnedRows, runFrom, runTotals,
@@ -148,6 +149,8 @@ const els = {
   btnMigViewRefresh: $<HTMLButtonElement>("btn-mig-view-refresh"),
   btnFormat: $<HTMLButtonElement>("btn-format"),
   autoLimit: $<HTMLInputElement>("chk-autolimit"),
+  diagnoseToggle: $<HTMLInputElement>("chk-diagnose"),
+  diagnoseLabel: $<HTMLElement>("lbl-diagnose"),
   lintOn: $<HTMLInputElement>("chk-lint"),
   wrapOn: $<HTMLInputElement>("chk-wrap"),
   timeout: $<HTMLInputElement>("num-timeout"),
@@ -245,10 +248,13 @@ const els = {
   resToggle: $<HTMLButtonElement>("res-toggle"),
   resViewResults: $<HTMLButtonElement>("res-view-results"),
   resViewSequence: $<HTMLButtonElement>("res-view-sequence"),
+  resViewDiagnosis: $<HTMLButtonElement>("res-view-diagnosis"),
   resCountResults: $<HTMLElement>("res-count-results"),
   resCountSequence: $<HTMLElement>("res-count-sequence"),
+  resCountDiagnosis: $<HTMLElement>("res-count-diagnosis"),
   sequence: $<HTMLElement>("sequence"),
   sequencePane: $<HTMLElement>("sequence-pane"),
+  diagnosisPane: $<HTMLElement>("diagnosis-pane"),
   seqFilters: $<HTMLElement>("seq-filters"),
   seqAll: $<HTMLButtonElement>("seq-all"),
   seqChanges: $<HTMLButtonElement>("seq-changes"),
@@ -2302,10 +2308,13 @@ function revealSequenceEntry(run: SequenceRun, entry: SequenceEntry) {
  */
 function showSurface(tab: ScriptTab) {
   const seq = tab.outputView === "sequence";
-  els.resultTabs.hidden = seq;
-  els.grid.hidden = seq;
-  els.resultBarRow.hidden = seq;
+  const diag = tab.outputView === "diagnosis";
+  const grid = !seq && !diag;
+  els.resultTabs.hidden = !grid;
+  els.grid.hidden = !grid;
+  els.resultBarRow.hidden = !grid;
   els.sequencePane.hidden = !seq;
+  els.diagnosisPane.hidden = !diag;
   paintViewSwitch(tab);
 }
 
@@ -2313,6 +2322,10 @@ function showResultsInner(tab: ScriptTab) {
   showSurface(tab);
   if (tab.outputView === "sequence") {
     showSequence(tab);
+    return;
+  }
+  if (tab.outputView === "diagnosis") {
+    paintDiagnoses(els.diagnosisPane, tab.diagnoses, tab.diagnoseSkipped, diagnoseDeps);
     return;
   }
   if (tab.busy) {
@@ -2701,20 +2714,130 @@ setSchemaLoader((name) => {
   void loadDatabase(connectionId, db, entry?.capabilities?.bulkColumns ?? false, prefetchRun);
 });
 
+/**
+ * Stage 35. Diagnose mode: the same keys, a different job.
+ *
+ * **The control that acts changes with the mode.** A toggle that silently
+ * repurposed Run would be Stage 34's bug again — a reason that exists only
+ * somewhere the user is not looking. So Run reads *Diagnose*, wears the
+ * warning colour, and Auto-LIMIT goes disabled with the reason on it, because
+ * diagnosing a statement the app quietly rewrote measures a statement nobody
+ * runs.
+ */
+function diagnoseMode(): boolean {
+  return els.diagnoseToggle.checked && !els.diagnoseToggle.disabled;
+}
+
+function paintRunMode() {
+  const on = diagnoseMode();
+  els.btnRun.textContent = on ? "Diagnose " : "Run ";
+  els.btnRunAll.textContent = on ? "Diagnose all " : "Run all ";
+  els.btnRun.append(kbd("Ctrl+Enter"));
+  els.btnRunAll.append(kbd("Ctrl+Shift+Enter"));
+  els.btnRun.classList.toggle("diagnosing", on);
+  els.btnRunAll.classList.toggle("diagnosing", on);
+  els.diagnoseLabel.classList.toggle("on", on);
+
+  // Suspended, not ignored: the checkbox stays where it was, keeps its state,
+  // and says why it cannot be used.
+  els.autoLimit.disabled = on;
+  const limitLabel = els.autoLimit.closest("label");
+  if (limitLabel) {
+    limitLabel.classList.toggle("suspended", on);
+    limitLabel.title = on
+      ? "Suspended while diagnosing: measuring a statement the app rewrote measures the wrong statement"
+      : "Append LIMIT 5000 to unbounded SELECTs";
+  }
+}
+
+function kbd(text: string): HTMLElement {
+  const k = document.createElement("kbd");
+  k.textContent = text;
+  return k;
+}
+
+/** What the diagnosis view needs from the app around it. */
+const diagnoseDeps = {
+  openInEditor: (sql: string) => {
+    if (!tabs.activeConnection()) {
+      results.setMessage("Open a connection first — a script tab belongs to one.");
+      return;
+    }
+    // Generated SQL goes to the editor and waits for the person. An index on a
+    // large table is the last place to break that habit.
+    tabs.create({ contents: sql });
+  },
+  ask: (question: string) => void assistant.prefill(question),
+};
+
+/**
+ * Measure one or more statements instead of running them.
+ *
+ * The backend refuses anything that is not row-returning, because
+ * `EXPLAIN ANALYZE` executes what it is given. A refusal is kept and shown
+ * rather than thrown: the button said Diagnose, so something has to come back
+ * saying why it did not.
+ */
+async function diagnose(sql: string, what: string) {
+  const tab = activeTab();
+  if (tab.kind !== "sql") return;
+  if (!connected || tab.busy || !sql.trim()) return;
+
+  tab.error = null;
+  tab.runningWhat = what;
+  tab.diagnoses = [];
+  tab.diagnoseSkipped = [];
+  tab.outputView = "diagnosis";
+  setBusy(tab, true);
+  if (isFocused(tab)) showResults(tab);
+
+  try {
+    const secs = Number(els.timeout.value) || 0;
+    const timeout = secs > 0 ? secs : null;
+    // One statement, or every statement in the buffer. The splitter is the
+    // backend's, so what gets diagnosed is by construction what would run.
+    const parts =
+      what === "Diagnose all" ? await api.splitStatements(sql) : [{ sql, start: 0, end: sql.length }];
+
+    for (const part of parts) {
+      try {
+        tab.diagnoses.push(await api.diagnoseStatement(tab.id, part.sql, timeout));
+      } catch (e) {
+        tab.diagnoseSkipped.push({ sql: part.sql, why: String(e) });
+      }
+      if (isFocused(tab)) showResults(tab);
+    }
+  } finally {
+    tab.runningWhat = null;
+    setBusy(tab, false);
+    if (isFocused(tab)) showResults(tab);
+  }
+}
+
 /** Ctrl+Enter: the selection if there is one, else the statement under the cursor. */
 async function runStatementUnderCursor() {
   const sel = selectedText(view);
-  if (sel) return run(sel, byteOffsetOf(view.state.selection.main.from), "Run selection");
+  if (sel) {
+    if (diagnoseMode()) return diagnose(sel, "Diagnose");
+    return run(sel, byteOffsetOf(view.state.selection.main.from), "Run selection");
+  }
 
   // Boundary rules live in exactly one place — the Rust splitter. This asks
   // for the statement text rather than reimplementing the scan here, so the
   // statement we run is by construction the one execution would pick.
   const stmt = await api.statementAtCursor(docText(view), cursorByteOffset(view));
-  if (stmt) await run(stmt.sql, stmt.start, "Run");
+  if (!stmt) return;
+  if (diagnoseMode()) return diagnose(stmt.sql, "Diagnose");
+  await run(stmt.sql, stmt.start, "Run");
 }
 
 els.btnRun.onclick = () => void runStatementUnderCursor();
-els.btnRunAll.onclick = () => void run(docText(view), 0, "Run all");
+els.btnRunAll.onclick = () =>
+  void (diagnoseMode()
+    ? diagnose(docText(view), "Diagnose all")
+    : run(docText(view), 0, "Run all"));
+els.diagnoseToggle.onchange = () => paintRunMode();
+paintRunMode();
 els.btnCancel.onclick = async () => {
   try {
     await api.cancelQuery(activeTab().id);
@@ -2932,11 +3055,19 @@ function paintViewSwitch(tab: ScriptTab | null) {
   const showing: OutputView = tab?.outputView ?? "results";
   els.resViewResults.setAttribute("aria-pressed", String(showing === "results"));
   els.resViewSequence.setAttribute("aria-pressed", String(showing === "sequence"));
+  els.resViewDiagnosis.setAttribute("aria-pressed", String(showing === "diagnosis"));
   // **Result sets, not statements.** The strip holds one tab per result set
   // since Stage 29.1, and a count that said otherwise would be a figure the
   // view below it contradicts.
   paintCount(els.resCountResults, tab?.result ? resultSets(tab.result).length : 0);
   paintCount(els.resCountSequence, tab ? entryCount(tab.sequence) : 0);
+  // Skipped statements count too: "two diagnosed, one refused" is three things
+  // this view holds, and a count that hid the refusal would be the quiet
+  // failure Stage 34 spent a whole stage on.
+  paintCount(
+    els.resCountDiagnosis,
+    tab ? tab.diagnoses.length + tab.diagnoseSkipped.length : 0,
+  );
 }
 
 function paintCount(el: HTMLElement, n: number) {
@@ -2995,6 +3126,7 @@ els.resToggle.onclick = () => setResultsShut(!resultsShut);
 for (const [el, view] of [
   [els.resViewResults, "results"],
   [els.resViewSequence, "sequence"],
+  [els.resViewDiagnosis, "diagnosis"],
 ] as [HTMLButtonElement, OutputView][]) {
   el.onclick = () => {
     const tab = tabs?.active();
@@ -4094,6 +4226,17 @@ function collapseFullDock(): boolean {
 function syncWorkloadButton() {
   const caps = conns.active()?.capabilities ?? null;
   els.btnWorkload.hidden = !caps?.workloadDigests;
+  // Stage 35, same rule: an engine with no plan to show and no session
+  // counters to read is not offered the mode. Hidden rather than disabled —
+  // there is nothing to explain on a connection that was never going to have
+  // it — and the mode is turned off on the way out, so a toggle left on over
+  // one connection cannot change what Run does on another.
+  const canDiagnose = caps?.diagnose ?? false;
+  els.diagnoseLabel.hidden = !canDiagnose;
+  if (!canDiagnose && els.diagnoseToggle.checked) {
+    els.diagnoseToggle.checked = false;
+  }
+  paintRunMode();
   // Shut it if the connection that could answer has gone: a dock left open
   // over a connection with no counters is a panel that can only apologise.
   if (els.btnWorkload.hidden && workloadOpen) setWorkloadOpen(false);

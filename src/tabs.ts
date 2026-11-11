@@ -4,7 +4,7 @@
 import type { EditorState, Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
-import type { ScriptResult, SourceTable } from "./api";
+import type { ScriptResult, SkippedStatement, SourceTable, StatementDiagnosis } from "./api";
 import { createEditorState, STARTER_DOC } from "./editor";
 import { icon, type IconName } from "./icons";
 import { emptySelection, type GridSelection } from "./grid";
@@ -24,8 +24,11 @@ import { emptyLog, type SeqFilter, type SequenceLog } from "./sequence";
  */
 export type TabKind = "sql" | "dictionary";
 
-/** Which of the output pane's two views a tab is reading (Stage 29). */
-export type OutputView = "results" | "sequence";
+/**
+ * Which of the output pane's views a tab is reading (Stage 29; Diagnosis added
+ * in Stage 35).
+ */
+export type OutputView = "results" | "sequence" | "diagnosis";
 
 export interface ScriptTab {
   /** Stable for the tab's whole life; this is what the backend keys on. */
@@ -58,6 +61,16 @@ export interface ScriptTab {
   sequence: SequenceLog;
   /** Where Sequence was scrolled to, so a repaint does not jump to the top. */
   seqScrollTop: number;
+  /**
+   * What Diagnose produced in this tab, one entry per statement it measured
+   * (Stage 35).
+   *
+   * Beside `result` rather than inside it: a diagnosis is about a statement,
+   * not about the rows it returned — and in diagnose mode there are no rows.
+   */
+  diagnoses: StatementDiagnosis[];
+  /** Statements Diagnose would not touch, and why. Shown, never swallowed. */
+  diagnoseSkipped: SkippedStatement[];
   /** Which statements Sequence is showing. Per tab, like the view itself. */
   seqFilter: SeqFilter;
   /**
@@ -439,6 +452,8 @@ export class TabManager {
       connectionId,
       kind: opts?.kind ?? "sql",
       outputView: "results",
+      diagnoses: [],
+      diagnoseSkipped: [],
       sequence: emptyLog(),
       seqScrollTop: 0,
       seqFilter: "all",
@@ -593,6 +608,8 @@ export class TabManager {
         // of thing as a result, and the session has never written one down
         // (Stage 7, S6).
         outputView: "results",
+        diagnoses: [],
+        diagnoseSkipped: [],
         sequence: emptyLog(),
         seqScrollTop: 0,
         seqFilter: "all",

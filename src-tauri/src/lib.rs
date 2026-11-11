@@ -5,6 +5,7 @@ pub mod agentcli;
 pub mod assistant;
 pub mod baseline;
 pub mod decode;
+pub mod diagnose;
 pub mod dictionary;
 pub mod dump;
 pub mod dumprun;
@@ -310,6 +311,27 @@ async fn use_database(
     db: String,
 ) -> Result<(), String> {
     session::use_database(&state, &tab_id, &db).await
+}
+
+#[tauri::command]
+async fn diagnose_statement(
+    state: State<'_, AppState>,
+    tab_id: String,
+    sql: String,
+    timeout_secs: Option<u64>,
+) -> Result<crate::diagnose::StatementDiagnosis, String> {
+    let tab = session::tab(&state, &tab_id).await?;
+    // Gated on the capability rather than on the engine's name, like every
+    // other feature that one engine has and another does not.
+    if !tab.server.capabilities.diagnose {
+        return Err(format!(
+            "{} cannot diagnose a statement: it has no plan to show and no session counters to \
+             read.",
+            tab.server.capabilities.engine
+        ));
+    }
+    let engine = &tab.server.engine;
+    engine.diagnose(&state, &tab_id, &sql, timeout_secs).await
 }
 
 #[tauri::command]
@@ -2250,6 +2272,28 @@ fn statement_at_cursor(sql: String, cursor: usize) -> Result<Option<StatementAt>
         }))
 }
 
+/// Every statement in the buffer, split by the same rules execution uses.
+///
+/// Stage 35's *Diagnose all* needs the list before it sends anything, because
+/// each statement is measured on its own and a write among them is refused
+/// rather than running the lot. Sharing the splitter is what keeps "what gets
+/// diagnosed" and "what would run" the same set.
+#[tauri::command]
+fn split_statements(sql: String) -> Result<Vec<StatementAt>, String> {
+    let out = split::split(&sql);
+    if out.delimiter_detected {
+        return Ok(vec![StatementAt { sql, start: 0 }]);
+    }
+    Ok(out
+        .statements
+        .iter()
+        .map(|s| StatementAt {
+            sql: sql[s.start..s.end].to_string(),
+            start: s.start,
+        })
+        .collect())
+}
+
 /// Lay SQL out, for the editor's Format action.
 ///
 /// Fails rather than returning something different: `sqlfmt::format` refuses
@@ -3237,6 +3281,7 @@ pub fn run() {
             use_database,
             tab_status,
             run_script,
+            diagnose_statement,
             cancel_query,
             lint_sql,
             list_tables,
@@ -3279,6 +3324,7 @@ pub fn run() {
             clipboard_text,
             export_rerun,
             statement_at_cursor,
+            split_statements,
             format_sql,
             supported_file_types,
             open_file_dialog,

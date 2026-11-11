@@ -403,6 +403,7 @@ export const MYSQL_CAPS = {
   namespaceLabel: "database",
   bulkColumns: true,
   workloadDigests: true,
+  diagnose: true,
 };
 
 /** A read-only engine, for testing what the UI must not offer. */

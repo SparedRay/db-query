@@ -109,6 +109,12 @@ pub struct Capabilities {
     /// is "not through this door", which is a transport fact and not a claim
     /// that the data does not exist.
     pub workload_digests: bool,
+    /// The gate on Stage 35's Diagnose mode. Needs a server that will describe
+    /// its own plan and count its own session — `EXPLAIN` in some form, plus
+    /// `SHOW SESSION STATUS`. Elasticsearch SQL has neither through `POST
+    /// /_sql`, so the toggle is not offered there rather than offered and
+    /// disappointing.
+    pub diagnose: bool,
 }
 
 impl Capabilities {
@@ -133,6 +139,7 @@ impl Capabilities {
             namespace_label: "database".into(),
             bulk_columns: true,
             workload_digests: true,
+            diagnose: true,
         }
     }
 
@@ -306,6 +313,24 @@ pub trait Engine: Send + Sync {
     /// MySQL tab has its own connection, temp tables and open transaction, while
     /// an Elasticsearch tab has nothing at all. Both share the splitting,
     /// classification and refusal in `exec`.
+    /// Diagnose one row-returning statement: the plan, the measured run, the
+    /// session's counters and a verdict on each.
+    ///
+    /// **Refuses by default rather than returning an empty diagnosis.** An
+    /// empty panel would say "nothing is wrong with this statement", which is
+    /// a claim; "this engine cannot answer" is the truth. Gated on
+    /// [`diagnose`](Capabilities::diagnose), so a refusal here is a bug
+    /// upstream rather than a path users reach.
+    async fn diagnose(
+        &self,
+        _state: &crate::session::AppState,
+        _tab_id: &str,
+        _sql: &str,
+        _timeout_secs: Option<u64>,
+    ) -> Result<crate::diagnose::StatementDiagnosis, String> {
+        Err("This engine cannot diagnose a statement.".into())
+    }
+
     async fn run_script(
         &self,
         state: &crate::session::AppState,
@@ -469,6 +494,7 @@ mod tests {
             namespace_label: "catalog".into(),
             bulk_columns: false,
             workload_digests: false,
+            diagnose: false,
         }
     }
 
