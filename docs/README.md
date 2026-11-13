@@ -4,6 +4,9 @@ One tracker per stage. A stage is frozen once its scope is delivered — its
 tracker becomes the historical record of what was built and why, including
 decisions that were corrected along the way.
 
+These are ordered by *when* things were built. For how the pieces fit together
+now, read [ARCHITECTURE.md](../ARCHITECTURE.md) first.
+
 | Stage | Tracker | Status |
 |---|---|---|
 | 0 | [POC — lightweight MySQL client](stage-0-poc.md) | 🔒 **Frozen** — complete and verified |

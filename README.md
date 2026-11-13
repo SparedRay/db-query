@@ -2,6 +2,9 @@
 
 A lightweight MySQL client that never freezes. Tauri v2 + vanilla TS + CodeMirror 6.
 
+**New here? Start with [ARCHITECTURE.md](ARCHITECTURE.md)** — what the parts
+are, where state lives, and which rules are load-bearing, with diagrams.
+
 Plans, milestones and task trackers live in [docs/](docs/) — one per stage,
 indexed in [docs/README.md](docs/README.md).
 Licensing constraints: [§9 of the Stage 0 tracker](docs/stage-0-poc.md#9-licensing-poc-constraint).
