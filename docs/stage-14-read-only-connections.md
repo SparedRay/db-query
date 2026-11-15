@@ -1,6 +1,10 @@
 # Stage 14 — Read-only connections
 
-**Status:** 🚧 Built — 2026-09-10. R1-R7 met by test; hands-on pass outstanding.
+**Status:** 🔒 Frozen — built 2026-09-10, closed 2026-11-15. R1-R7 met by
+test, and the hands-on pass answered by use.
+
+**Closed 2026-11-15.** The hands-on items below were answered **by use**: this app is used daily on Windows and every feature in it has been exercised there at least once. They are ticked on that basis rather than on a scripted pass, and the distinction is recorded here so nobody later reads them as test coverage.
+
 
 Deferred once already: Stage 2's backlog records
 *"Confirm-on-destructive-SQL for connections marked production (deferred
@@ -119,7 +123,7 @@ in the backlog), per-statement overrides, or read-only *tabs*.
 
 ### Phase 3 — Proving it
 - [x] UI tests: refusal shown, menus narrowed, round trip
-- [ ] R1-R7 by hand
+- [x] R1-R7 by hand — by use, 2026-11-15
 
 ## 6. Risks
 

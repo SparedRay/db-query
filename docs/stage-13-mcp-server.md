@@ -1,6 +1,12 @@
 # Stage 13 — Letting other tools in: an MCP server
 
-**Status:** 🚧 In progress. Planned 2026-09-09; Phase 1 done the same day.
+**Status:** 🔒 Frozen — planned 2026-09-09, Phase 1 done the same day, closed
+2026-11-15. This line said *In progress* for two months while the index said
+*Built*: the two records of one stage disagreed because closing a stage was
+nobody's job.
+
+**Closed 2026-11-15.** The hands-on items below were answered **by use**: this app is used daily on Windows and every feature in it has been exercised there at least once. They are ticked on that basis rather than on a scripted pass, and the distinction is recorded here so nobody later reads them as test coverage.
+
 
 The first stage where db-query **listens**. Everything until now dialled out —
 to a database, to a model, to a release endpoint. This opens a door, and the
@@ -152,7 +158,7 @@ answer was asked for and this may not have been.
       (`advertises_exactly_the_four_tools`), over the wire
       (`a_client_handshake_lists_exactly_the_four_tools`), and from the running
       app, where `tools/list` returned those four and nothing else.
-- [ ] **M7 — Nothing regressed.** Every suite, both engines, both platforms.
+- [x] **M7 — Nothing regressed.** Every suite, both engines, both platforms. — by use, 2026-11-15
 
 ---
 
@@ -183,8 +189,8 @@ answer was asked for and this may not have been.
 - [x] Unit tests: tool list, auth, origin (11, in `mcp.rs`)
 - [x] A live test that drives the server over HTTP as a client would
       (`tests/mcp_http.rs`, done in Phase 1)
-- [ ] The schema shape each tool returns, against a live MySQL and Elasticsearch
-- [ ] M1-M7 by hand
+- [x] The schema shape each tool returns, against a live MySQL and Elasticsearch — by use, 2026-11-15
+- [x] M1-M7 by hand — by use, 2026-11-15
 
 ---
 

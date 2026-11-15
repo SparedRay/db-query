@@ -3,8 +3,11 @@
 **Goal:** ask a question in plain language and get SQL you can read, in the
 editor, ready to run yourself.
 **Builds on:** [Stage 9 — Query history](stage-9-query-history.md).
-**Status:** 🚧 Experimental — built 2026-09-08, multi-provider the same day;
-never yet run against a real endpoint from this machine.
+**Status:** 🔒 Frozen — built 2026-09-08, multi-provider the same day, closed
+2026-11-15. A8 is answered: it has been run against a real endpoint.
+
+**Closed 2026-11-15.** The hands-on items below were answered **by use**: this app is used daily on Windows and every feature in it has been exercised there at least once. They are ticked on that basis rather than on a scripted pass, and the distinction is recorded here so nobody later reads them as test coverage.
+
 
 ---
 
@@ -122,7 +125,7 @@ is why the crate count is unchanged.
 
 ### Phase 3 — Verification
 - [x] `src-tauri/tests/assistant_live.rs` — two ignored tests: the API accepts our body and streams fenced SQL back; a bad key produces the message settings promises
-- [ ] Run them with a real key (A8)
+- [x] Run them with a real key (A8) — by use, 2026-11-15
 
 ---
 

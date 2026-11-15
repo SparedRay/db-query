@@ -3,8 +3,10 @@
 **Goal:** run SQL against an Elasticsearch cluster from the same editor, with the
 same tabs, grid, export and history.
 **Builds on:** [Stage 10 — An assistant that writes SQL](stage-10-assistant.md).
-**Status:** 🚧 Built 2026-09-08 — the seam, the engine, and both suites green
-against a real cluster. Not yet clicked through by hand.
+**Status:** 🔒 Frozen — built 2026-09-08, closed 2026-11-15. The seam, the
+engine, and both suites green against a real cluster; the hands-on pass
+answered by use. **Two items are carried out of this stage rather than ticked,
+and §13 says why.**
 
 ---
 
@@ -237,7 +239,8 @@ shaped by the second engine and would be shaped again by the third.
 - [x] **E3 — A `SELECT` runs and renders** in the ordinary grid, with the ordinary types.
 - [x] **E4 — More rows than the cap sets `truncated`**, and the cursor is closed rather than left open.
 - [x] **E5 — A write is refused before it is sent**, naming what the engine supports.
-- [ ] **E6 — A running query can be cancelled.**
+- [~] **E6 — A running query can be cancelled.** — **dropped, deliberately.**
+      Parked with the plan written down (see Stage 11.5's tracker and §13).
 - [x] **E7 — Everything above it works untouched**: export, copy, history (including provenance), the value viewer, tab persistence.
 - [x] **E8 — The assistant writes Elasticsearch SQL** when the tab is on a cluster, and does not offer writes.
 - [x] **E9 — Nothing regressed for MySQL.** 240 unit, 63 live and 412 UI tests, unchanged.
@@ -281,7 +284,8 @@ shaped by the second engine and would be shaped again by the third.
 - [x] **CI runs both engines on every push** — an Elasticsearch service container beside the MySQL one, because the risk of this stage is breaking MySQL quietly
 - [x] Lint rules audited for MySQL-only assumptions — done in Stage 12 §15: `lint::Dialect` is built from the engine, so an identifier quoted the standard way is read rather than masked away
 - [x] `dialect` on new tabs follows the connection (Stage 12)
-- [ ] Export path check (D9) — still no Elasticsearch export test
+- [ ] Export path check (D9) — still no Elasticsearch export test. **Carried
+      past the freeze**: a real gap, not a verification that was skipped (§13).
 
 ---
 
@@ -566,3 +570,32 @@ out of that:
 Falsified three ways: removing the 403 branch, trusting it without the `SELECT
 1`, and folding 401 in with 403 each fail their own test. The frontend's `?`
 falsifies too — without the fallback the tooltip reads `elasticsearch null`.
+
+
+---
+
+## 13. What this stage carries past its freeze — 2026-11-15
+
+Closed by the housekeeping pass that gave every stage one of two states, Open
+or Frozen. Everything in §5's milestone list is met except two things, and
+neither is a hands-on check that nobody got round to. They are different from
+each other and the difference is the point.
+
+**E6 — cancel, dropped on purpose.** Elasticsearch SQL cancellation was
+evaluated and deliberately not built: the cases it helps are narrow, the
+endpoint this app speaks does not offer a clean way to do it, and the plan for
+doing it later was written down rather than carried as a half-built feature.
+A dropped milestone is an answer. It is marked `[~]` rather than `[x]` so that
+nobody reads it as delivered, and rather than `[ ]` so nobody picks it up
+believing it was forgotten.
+
+**D9 — the Elasticsearch export test, a real gap.** The export path has no
+Elasticsearch test. It is not a click-through that use has covered: it is
+coverage this suite does not have, and freezing the stage does not create it.
+Recorded here so that the next person to touch export knows the MySQL tests are
+the only ones watching them.
+
+The distinction matters more than either item. A frozen stage with a known gap,
+written down, is an honest record. A frozen stage whose gaps were ticked
+because the stage was closing is a record that lies, and this project's
+trackers are only worth keeping if they do not.

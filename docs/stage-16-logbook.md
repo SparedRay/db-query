@@ -1,6 +1,7 @@
 # Stage 16 — A logbook
 
-**Status:** 🚧 Built — 2026-09-16
+**Status:** 🔒 Frozen — built 2026-09-16, closed 2026-11-15. Nothing was
+outstanding; it had simply never been said.
 
 ## 1. Why, in the user's words
 
