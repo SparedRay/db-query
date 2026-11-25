@@ -82,6 +82,14 @@ pub const PUT_QUERY_EVENT: &str = "mcp://put-query";
 /// The event `put_notes` emits.
 pub const PUT_NOTES_EVENT: &str = "mcp://put-notes";
 
+/// Stage 36. One question to the window, several kinds.
+///
+/// Tab titles and results exist only in the frontend, so the tools that read
+/// them have to ask. **One channel with variants rather than a pair of
+/// endpoints per tool**: a third question later adds an arm, not another
+/// event and another command.
+pub const ASK_WORKSPACE_EVENT: &str = "mcp://ask-workspace";
+
 /// How long `put_notes` waits for the editor to say what it did.
 ///
 /// **Why it waits at all**, where `put_query` does not: a tab that failed to
@@ -276,12 +284,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// agent's view changes under it.
 type Focus = Arc<Mutex<Option<String>>>;
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ConnectionArgs {
+    /// Which connection — its id, or its name. Omit for the one on screen.
+    #[serde(default)]
+    pub connection: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DatabaseArgs {
     /// Which database (or catalog) to look in. Omit to use the connection's
     /// own default.
     #[serde(default)]
     pub database: Option<String>,
+    /// Which connection — its id, or its name. Omit for the one on screen.
+    #[serde(default)]
+    pub connection: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -292,12 +310,19 @@ pub struct TableArgs {
     pub database: Option<String>,
     /// The table or view name.
     pub table: String,
+    /// Which connection — its id, or its name. Omit for the one on screen.
+    #[serde(default)]
+    pub connection: Option<String>,
 }
 
 /// What `put_notes` takes: one entry per table, each saying as much or as
 /// little as the caller knows.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NotesArgs {
+    /// Which connection's dictionary — its id, or its name. Omit for the one
+    /// on screen.
+    #[serde(default)]
+    pub connection: Option<String>,
     /// Which database (or catalog) these tables are in. Omit to use the
     /// connection's own default.
     #[serde(default)]
@@ -347,6 +372,35 @@ impl From<TableNotesArg> for crate::dictionary::NoteEdit {
 pub struct QueryArgs {
     /// The SQL to place in a new editor tab. It is **not executed**.
     pub sql: String,
+    /// Which connection to open the tab on — its id, or its name as the user
+    /// would say it. Defaults to the one on screen. The tab is created on the
+    /// named connection whether or not the user is looking at it.
+    #[serde(default)]
+    pub connection: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadTabArgs {
+    /// Which tab, by the id `list_tabs` gives. Any open tab, not only the
+    /// ones this server opened.
+    pub tab_id: String,
+    /// How many rows to return, at most 1000. Defaults to 200.
+    #[serde(default)]
+    pub max_rows: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Connections {
+    connections: Vec<OpenConnection>,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Tabs {
+    tabs: Vec<TabInfo>,
+    note: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -427,10 +481,13 @@ struct Placed {
 }
 
 /// What the tools are called, in the order they are advertised.
-pub const TOOL_NAMES: [&str; 5] = [
+pub const TOOL_NAMES: [&str; 8] = [
+    "list_connections",
     "list_databases",
     "list_tables",
     "describe_table",
+    "list_tabs",
+    "read_tab",
     "put_query",
     "put_notes",
 ];
@@ -447,6 +504,8 @@ pub struct Tools<R: Runtime> {
     /// Shared with [`McpState`], because the reply comes back through a Tauri
     /// command rather than through this handler.
     pending: Pending,
+    /// The same, for Stage 36's questions about tabs.
+    workspace: WorkspacePending,
     /// Built once per handler rather than per call. `#[tool_handler]` reaches
     /// it by the `router` expression below.
     tool_router: ToolRouter<Self>,
@@ -461,6 +520,7 @@ impl<R: Runtime> Clone for Tools<R> {
             app: self.app.clone(),
             focus: self.focus.clone(),
             pending: self.pending.clone(),
+            workspace: self.workspace.clone(),
             tool_router: self.tool_router.clone(),
         }
     }
@@ -510,6 +570,104 @@ pub struct NotesOutcome {
     pub problem: Option<String>,
 }
 
+/// What is being asked of the window (Stage 36).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum WorkspaceQuestion {
+    /// Every open tab, with enough to choose one.
+    Tabs,
+    /// One tab's result.
+    Tab {
+        tab_id: String,
+        /// How many rows the client will accept, already clamped.
+        max_rows: usize,
+    },
+}
+
+/// The payload of [`ASK_WORKSPACE_EVENT`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskWorkspace {
+    /// Which call this is the answer to. The window sends it back.
+    pub request: String,
+    #[serde(flatten)]
+    pub what: WorkspaceQuestion,
+}
+
+/// One open tab, as the window describes it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabInfo {
+    pub id: String,
+    pub title: String,
+    pub connection_id: String,
+    pub connection_name: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    /// True for the tab the user is looking at.
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub running: bool,
+    /// False when nothing has been run in it yet, so a client can tell an
+    /// empty tab from one whose query returned nothing.
+    #[serde(default)]
+    pub has_result: bool,
+    #[serde(default)]
+    pub rows: usize,
+    /// Where the tab came from: the user, or an MCP client.
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+/// One result set inside a tab.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultSet {
+    /// The statement that produced it.
+    pub statement: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// Cells as text. `None` is SQL NULL, which is not the empty string and
+    /// must not arrive as one.
+    #[serde(default)]
+    pub rows: Vec<Vec<Option<String>>>,
+    /// How many rows the tab holds, which may be more than `rows` carries.
+    #[serde(default)]
+    pub total_rows: usize,
+    /// Set when the window had already truncated this result itself.
+    #[serde(default)]
+    pub truncated_in_app: bool,
+}
+
+/// One tab's result, as the window describes it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabResult {
+    pub id: String,
+    pub title: String,
+    pub connection_id: String,
+    pub connection_name: String,
+    #[serde(default)]
+    pub sets: Vec<ResultSet>,
+    /// Set when the tab holds an error rather than rows.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// What the window answered.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAnswer {
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    #[serde(default)]
+    pub tab: Option<TabResult>,
+    /// Set when the window could not answer at all.
+    #[serde(default)]
+    pub problem: Option<String>,
+}
+
 /// What `put_notes` answers.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -522,22 +680,191 @@ struct NotesPlaced {
     note: String,
 }
 
+/// One open connection, as `list_connections` reports it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenConnection {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    /// MySQL says "database", Elasticsearch says "catalog".
+    pub namespace_label: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    /// This connection refuses writes.
+    pub read_only: bool,
+    /// The one the user is looking at. The default for every tool that takes
+    /// a connection.
+    pub on_screen: bool,
+}
+
+/// Open connections, named, for an error message that helps.
+fn name_list(open: &[OpenConnection]) -> String {
+    if open.is_empty() {
+        return "none".to_string();
+    }
+    open.iter()
+        .map(|c| format!("{:?}", c.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Which open connection a client meant.
+///
+/// **Pure, and strict in one place.** An id is exact. A name is matched
+/// without case, because that is what a person says to an agent ("put it on
+/// UAT") and making the agent translate one word through a list call first is
+/// a worse tool. A name that matches two connections is an error rather than
+/// a guess: the cost of guessing here is a query opened against production.
+fn resolve_connection(given: &str, open: &[OpenConnection]) -> Result<String, String> {
+    if let Some(found) = open.iter().find(|c| c.id == given) {
+        return Ok(found.id.clone());
+    }
+
+    let matches: Vec<&OpenConnection> = open
+        .iter()
+        .filter(|c| c.name.eq_ignore_ascii_case(given))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => Err(format!(
+            "No open connection called {given:?}. Open now: {}. Use list_connections for \
+             their ids.",
+            name_list(open)
+        )),
+        several => Err(format!(
+            "{} connections are called {given:?}. Name one by id: {}.",
+            several.len(),
+            several
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// How many rows `read_tab` returns when the client does not say.
+const ROWS_DEFAULT: usize = 200;
+
+/// The most it will return however loudly the client asks.
+///
+/// The grid holds five thousand. An agent's context does not, and a tool that
+/// quietly fills it is worse than one that refuses — so this is a ceiling on
+/// the argument rather than a suggestion.
+const ROWS_MAX: usize = 1_000;
+
+/// The longest a single cell may be before it is cut.
+///
+/// Per cell **as well as** per request: one row of JSON blobs would otherwise
+/// defeat a row cap entirely.
+const CELL_MAX: usize = 2_000;
+
+/// Clamp what the client asked for.
+fn row_budget(asked: Option<usize>) -> usize {
+    asked.unwrap_or(ROWS_DEFAULT).clamp(1, ROWS_MAX)
+}
+
+/// Cut a cell that is too long, saying so in the value itself.
+///
+/// The marker is inside the string rather than in a sibling field because the
+/// value is what a model reads: a truncation it cannot see is one it will
+/// quote as though it were whole. Cuts on a character boundary.
+fn clip_cell(value: String) -> String {
+    if value.chars().count() <= CELL_MAX {
+        return value;
+    }
+    let kept: String = value.chars().take(CELL_MAX).collect();
+    format!("{kept}… [{} characters, cut]", value.chars().count())
+}
+
+/// Apply the cell cap to a whole answer.
+fn clip_result(mut tab: TabResult) -> TabResult {
+    for set in &mut tab.sets {
+        for row in &mut set.rows {
+            for cell in row.iter_mut() {
+                if let Some(text) = cell.take() {
+                    *cell = Some(clip_cell(text));
+                }
+            }
+        }
+    }
+    tab
+}
+
 /// `put_notes` calls waiting for the window to answer, by request id.
 type Pending = Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<NotesOutcome>>>>;
 
+/// The same, for the Stage 36 workspace questions. A separate map rather than
+/// one of `serde_json::Value`: each channel stays typed end to end, and a
+/// notes reply can never be handed to a tab question by mistake.
+type WorkspacePending =
+    Arc<Mutex<std::collections::HashMap<String, oneshot::Sender<WorkspaceAnswer>>>>;
+
 #[tool_router]
 impl<R: Runtime> Tools<R> {
-    pub fn new(app: AppHandle<R>, focus: Focus, pending: Pending) -> Self {
+    pub fn new(
+        app: AppHandle<R>,
+        focus: Focus,
+        pending: Pending,
+        workspace: WorkspacePending,
+    ) -> Self {
         Self {
             app,
             focus,
             pending,
+            workspace,
             tool_router: Self::tool_router(),
         }
     }
 
+    /// Which connection a call is about.
+    ///
+    /// **Stage 36 changed half of Stage 13's rule.** It used to be "an MCP
+    /// client cannot choose: it sees the open window", which made the tools
+    /// useless the moment somebody had two connections open and was looking at
+    /// the wrong one. Now a client may name a connection — by id, or by the
+    /// name a person would say out loud — and the window it is looking at is
+    /// only the default.
+    ///
+    /// Resolution is deliberately strict in one place: a name that matches two
+    /// connections is an error rather than a guess, because the cost of
+    /// guessing is a query opened against production.
+    async fn connection_arg(&self, given: Option<String>) -> Result<String, ErrorData> {
+        let Some(given) = given
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+        else {
+            return self.connection().await;
+        };
+        resolve_connection(&given, &self.open_connections().await)
+            .map_err(|why| ErrorData::invalid_params(why, None))
+    }
+
+    /// Every connection the app has open, in no particular order.
+    async fn open_connections(&self) -> Vec<OpenConnection> {
+        let state = self.app.state::<AppState>();
+        let focus = self.focus.lock().await.clone();
+        let servers: Vec<_> = state.connections.lock().await.values().cloned().collect();
+        servers
+            .into_iter()
+            .map(|server| {
+                let profile = server.profile();
+                OpenConnection {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    engine: server.capabilities.engine.clone(),
+                    namespace_label: server.capabilities.namespace_label.clone(),
+                    database: profile.database.filter(|d| !d.is_empty()),
+                    read_only: server.capabilities.read_only,
+                    on_screen: focus.as_deref() == Some(profile.id.as_str()),
+                }
+            })
+            .collect()
+    }
+
     /// Which connection the user is looking at, or a refusal that says how to
-    /// fix it. An MCP client cannot choose: it sees the open window.
+    /// fix it. The default when a call names none.
     async fn connection(&self) -> Result<String, ErrorData> {
         self.focus.lock().await.clone().ok_or_else(|| {
             ErrorData::invalid_request(
@@ -547,6 +874,51 @@ impl<R: Runtime> Tools<R> {
                 None,
             )
         })
+    }
+
+    /// Ask the window something and wait for its answer (Stage 36).
+    ///
+    /// The shape `put_notes` already uses: a request id out with the event, a
+    /// `oneshot` held in a pending map, and a command the window calls to
+    /// answer. Every path removes the entry — a map that grows one row per
+    /// timed-out question is a leak nobody would ever see.
+    async fn ask_workspace(&self, what: WorkspaceQuestion) -> Result<WorkspaceAnswer, ErrorData> {
+        let request = request_id();
+        let (tx, rx) = oneshot::channel();
+        self.workspace.lock().await.insert(request.clone(), tx);
+
+        let emitted = self.app.emit(
+            ASK_WORKSPACE_EVENT,
+            AskWorkspace {
+                request: request.clone(),
+                what,
+            },
+        );
+        if let Err(e) = emitted {
+            self.workspace.lock().await.remove(&request);
+            return Err(ErrorData::internal_error(
+                format!("Could not reach the editor: {e}"),
+                None,
+            ));
+        }
+
+        let answer = match tokio::time::timeout(EDITOR_REPLY, rx).await {
+            Ok(Ok(answer)) => answer,
+            _ => {
+                self.workspace.lock().await.remove(&request);
+                return Err(ErrorData::internal_error(
+                    "db-query did not answer within ten seconds. The window may be busy or \
+                     closed."
+                        .to_string(),
+                    None,
+                ));
+            }
+        };
+
+        if let Some(problem) = answer.problem {
+            return Err(ErrorData::invalid_request(problem, None));
+        }
+        Ok(answer)
     }
 
     /// The dictionary attached to a connection, if any and if it loads.
@@ -594,14 +966,104 @@ impl<R: Runtime> Tools<R> {
             })
     }
 
+    /// Every connection the app has open (Stage 36).
+    ///
+    /// The tool that makes the others addressable: without it, naming a
+    /// connection means guessing what the user called it.
+    #[tool(
+        description = "List the connections db-query has open: id, name, engine, default \
+                       database, whether it refuses writes, and which one the user is looking \
+                       at. Every other tool takes a `connection` and defaults to the one on \
+                       screen. Read-only."
+    )]
+    async fn list_connections(&self) -> Result<CallToolResult, ErrorData> {
+        let open = self.open_connections().await;
+        if open.is_empty() {
+            return Err(ErrorData::invalid_request(
+                "db-query has no connection open. Connect in the app first.".to_string(),
+                None,
+            ));
+        }
+        structured(&Connections {
+            connections: open,
+            note: "Pass `connection` to the other tools to choose one. Without it they use \
+                   the connection on screen."
+                .to_string(),
+        })
+    }
+
+    /// Every open tab (Stage 36).
+    ///
+    /// Answered by the window, because a tab's title and its rows exist
+    /// nowhere else.
+    #[tool(
+        description = "List the editor tabs open in db-query: id, title, which connection \
+                       each belongs to, and whether it holds a result. Use read_tab to read \
+                       one. Read-only; runs nothing."
+    )]
+    async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
+        let answer = self.ask_workspace(WorkspaceQuestion::Tabs).await?;
+        structured(&Tabs {
+            tabs: answer.tabs,
+            note: "A tab with hasResult false has not been run yet. This server cannot run \
+                   one: the user does that."
+                .to_string(),
+        })
+    }
+
+    /// One tab's result (Stage 36).
+    ///
+    /// **The tool that lets data out.** Until this stage the MCP surface
+    /// carried schema and nothing else — table names, types, the dictionary's
+    /// prose — and the server could be described as reading no data at all.
+    /// It returns rows a real server returned, so the description says so and
+    /// the caps are not optional.
+    #[tool(
+        description = "Read the result of one db-query editor tab: the statement that ran, \
+                       its columns and its rows. Works on any open tab, not only ones this \
+                       server opened — call list_tabs for their ids. RETURNS REAL DATA from \
+                       the user's database. At most 1000 rows, 200 by default, and long cells \
+                       are cut. Runs nothing: it reads what the user already ran."
+    )]
+    async fn read_tab(
+        &self,
+        Parameters(args): Parameters<ReadTabArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tab_id = args.tab_id.trim().to_string();
+        if tab_id.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "Which tab? Call list_tabs for the ids.".to_string(),
+                None,
+            ));
+        }
+
+        let answer = self
+            .ask_workspace(WorkspaceQuestion::Tab {
+                tab_id,
+                max_rows: row_budget(args.max_rows),
+            })
+            .await?;
+
+        let tab = answer.tab.ok_or_else(|| {
+            ErrorData::invalid_request(
+                "That tab is not open. Call list_tabs for what is.".to_string(),
+                None,
+            )
+        })?;
+        structured(&clip_result(tab))
+    }
+
     /// The databases on the connection the app currently has in front of the
     /// user. Read-only.
     #[tool(
         description = "List the databases (or catalogs) on the db-query connection the user \
                        currently has open. Read-only."
     )]
-    async fn list_databases(&self) -> Result<CallToolResult, ErrorData> {
-        let id = self.connection().await?;
+    async fn list_databases(
+        &self,
+        Parameters(args): Parameters<ConnectionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = self.connection_arg(args.connection).await?;
         let state = self.app.state::<AppState>();
         let server = crate::session::server(&state, &id)
             .await
@@ -631,7 +1093,7 @@ impl<R: Runtime> Tools<R> {
         &self,
         Parameters(args): Parameters<DatabaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let id = self.connection().await?;
+        let id = self.connection_arg(args.connection.clone()).await?;
         let db = self.database(args.database, &id).await?;
         let tables = {
             let state = self.app.state::<AppState>();
@@ -660,7 +1122,7 @@ impl<R: Runtime> Tools<R> {
         &self,
         Parameters(args): Parameters<TableArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let id = self.connection().await?;
+        let id = self.connection_arg(args.connection.clone()).await?;
         let db = self.database(args.database, &id).await?;
         let columns = {
             let state = self.app.state::<AppState>();
@@ -692,7 +1154,7 @@ impl<R: Runtime> Tools<R> {
         &self,
         Parameters(args): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let id = self.connection().await?;
+        let id = self.connection_arg(args.connection.clone()).await?;
         let sql = args.sql.trim().to_string();
         if sql.is_empty() {
             return Err(ErrorData::invalid_params(
@@ -742,7 +1204,7 @@ impl<R: Runtime> Tools<R> {
         &self,
         Parameters(args): Parameters<NotesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let id = self.connection().await?;
+        let id = self.connection_arg(args.connection.clone()).await?;
         let database = self.database(args.database, &id).await?;
 
         // Where somebody's dictionary lives is their decision, and this server
@@ -991,6 +1453,7 @@ pub struct McpState {
     running: Mutex<Option<Running>>,
     focus: Focus,
     pending: Pending,
+    workspace: WorkspacePending,
 }
 
 struct Running {
@@ -1028,6 +1491,17 @@ impl McpState {
     /// An answer to a request nobody is waiting for is **dropped silently**:
     /// the tool has already given up and told the client so, and a second
     /// opinion arriving late has nowhere to go.
+    /// The window's answer to a Stage 36 question.
+    ///
+    /// A late answer resolves nothing: the entry is gone because the asker
+    /// timed out, and dropping it here is the whole handling. Silence is
+    /// correct — the client has already been told that nothing is known.
+    pub async fn workspace_answered(&self, request: String, answer: WorkspaceAnswer) {
+        if let Some(tx) = self.workspace.lock().await.remove(&request) {
+            let _ = tx.send(answer);
+        }
+    }
+
     pub async fn notes_landed(&self, request: String, outcome: NotesOutcome) {
         if let Some(tx) = self.pending.lock().await.remove(&request) {
             let _ = tx.send(outcome);
@@ -1093,7 +1567,12 @@ pub async fn start_with_token<R: Runtime>(
     let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
 
     let stop_token = CancellationToken::new();
-    let tools = Tools::new(app.clone(), state.focus.clone(), state.pending.clone());
+    let tools = Tools::new(
+        app.clone(),
+        state.focus.clone(),
+        state.pending.clone(),
+        state.workspace.clone(),
+    );
 
     // Belt and braces: `gate` refuses a foreign Origin before rmcp sees the
     // request, and rmcp refuses it again. rmcp's default here is an **empty
@@ -1462,11 +1941,13 @@ mod tests {
     ///
     /// Slice 5 added the fifth on purpose, and this is the test that had to be
     /// renamed and extended by hand to let it through — which is why the list
-    /// is asserted rather than the length. (It had drifted away from its test
+    /// is asserted rather than the length. Stage 36 added three more and had
+    /// to come here again, which is the point: the advertised surface of a
+    /// server that other people's agents talk to does not grow by accident. (It had drifted away from its test
     /// when slice 3 inserted a block beneath it; clippy noticed, which is more
     /// than the compiler did.)
     #[test]
-    fn advertises_exactly_the_five_tools() {
+    fn advertises_exactly_the_tools_it_means_to() {
         let names: Vec<String> = Tools::<tauri::Wry>::tool_router()
             .list_all()
             .into_iter()
@@ -1490,6 +1971,136 @@ mod tests {
                 "{name} sounds like it executes"
             );
         }
+    }
+
+    // ------------------------------------------------- Stage 36: addressing
+
+    fn conn(id: &str, name: &str) -> OpenConnection {
+        OpenConnection {
+            id: id.into(),
+            name: name.into(),
+            engine: "mysql".into(),
+            namespace_label: "database".into(),
+            database: None,
+            read_only: false,
+            on_screen: false,
+        }
+    }
+
+    #[test]
+    fn a_connection_is_found_by_id() {
+        let open = [conn("c1", "uat"), conn("c2", "prod")];
+        assert_eq!(resolve_connection("c2", &open), Ok("c2".into()));
+    }
+
+    /// A person says "put it on UAT"; an agent should not have to translate
+    /// that through a list call to use it.
+    #[test]
+    fn a_connection_is_found_by_name_whatever_the_case() {
+        let open = [conn("c1", "uat-eu"), conn("c2", "prod")];
+        assert_eq!(resolve_connection("UAT-EU", &open), Ok("c1".into()));
+    }
+
+    /// **An id wins over a name.** A connection whose *name* is another's id
+    /// must not shadow it, or naming a thing exactly would be less reliable
+    /// than naming it loosely.
+    #[test]
+    fn an_id_is_preferred_to_a_name_that_collides_with_it() {
+        let open = [conn("c1", "staging"), conn("c2", "c1")];
+        assert_eq!(resolve_connection("c1", &open), Ok("c1".into()));
+    }
+
+    /// **The one that matters.** Two connections called the same thing is a
+    /// refusal, never a guess: the cost of guessing is a query opened against
+    /// production.
+    #[test]
+    fn an_ambiguous_name_is_refused_and_names_the_ids() {
+        let open = [conn("c1", "reporting"), conn("c2", "Reporting")];
+        let why = resolve_connection("reporting", &open).unwrap_err();
+        assert!(why.contains("2 connections"), "{why}");
+        assert!(why.contains("c1") && why.contains("c2"), "{why}");
+    }
+
+    #[test]
+    fn an_unknown_name_says_what_is_open() {
+        let open = [conn("c1", "uat"), conn("c2", "prod")];
+        let why = resolve_connection("qa", &open).unwrap_err();
+        assert!(why.contains("\"uat\"") && why.contains("\"prod\""), "{why}");
+    }
+
+    #[test]
+    fn with_nothing_open_the_refusal_still_reads() {
+        let why = resolve_connection("uat", &[]).unwrap_err();
+        assert!(why.contains("none"), "{why}");
+    }
+
+    // ----------------------------------------------------- Stage 36: caps
+
+    #[test]
+    fn the_row_budget_has_a_default_and_a_ceiling() {
+        assert_eq!(row_budget(None), ROWS_DEFAULT);
+        assert_eq!(row_budget(Some(50)), 50);
+        // The ceiling is on the argument, not a suggestion to the client.
+        assert_eq!(row_budget(Some(100_000)), ROWS_MAX);
+        // Zero rows is not a request anyone means.
+        assert_eq!(row_budget(Some(0)), 1);
+    }
+
+    #[test]
+    fn a_short_cell_is_untouched() {
+        assert_eq!(clip_cell("hello".into()), "hello");
+    }
+
+    /// The marker goes **inside** the value: a truncation a model cannot see
+    /// is one it will quote as though it were whole.
+    #[test]
+    fn a_long_cell_is_cut_and_says_so() {
+        let got = clip_cell("x".repeat(CELL_MAX + 500));
+        assert!(got.starts_with(&"x".repeat(100)));
+        assert!(got.contains("cut"), "{got}");
+        assert!(got.contains(&(CELL_MAX + 500).to_string()), "{got}");
+    }
+
+    /// Cutting on a character boundary, not a byte one: a multi-byte cell must
+    /// not come back as invalid text.
+    #[test]
+    fn a_long_cell_of_wide_characters_survives_the_cut() {
+        let got = clip_cell("é".repeat(CELL_MAX + 10));
+        assert!(got.contains("cut"), "{got}");
+        assert!(got.chars().take(CELL_MAX).all(|c| c == 'é'));
+    }
+
+    /// One row of blobs would defeat a row cap entirely, so the cell cap is
+    /// applied across the whole answer.
+    #[test]
+    fn the_cell_cap_reaches_every_row_of_every_set() {
+        let big = "y".repeat(CELL_MAX + 1);
+        let tab = TabResult {
+            id: "t1".into(),
+            sets: vec![
+                ResultSet {
+                    rows: vec![vec![Some(big.clone()), None]],
+                    ..Default::default()
+                },
+                ResultSet {
+                    rows: vec![vec![Some(big.clone())]],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let got = clip_result(tab);
+        for set in &got.sets {
+            for row in &set.rows {
+                for cell in row {
+                    if let Some(text) = cell {
+                        assert!(text.contains("cut"), "a cell escaped the cap");
+                    }
+                }
+            }
+        }
+        // NULL is not the empty string and must survive as itself.
+        assert_eq!(got.sets[0].rows[0][1], None);
     }
 
     #[test]

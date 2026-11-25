@@ -561,3 +561,221 @@ test("a clipboard that refuses leaves the button saying so", async ({ page }) =>
   // The error itself is kept where it can be read, rather than thrown away.
   await expect(button).toHaveAttribute("title", /Could not copy to the clipboard/);
 });
+
+// ------------------------------------------------------------- Stage 36
+
+/**
+ * The window answering an MCP client's questions about itself.
+ *
+ * Tab titles and results live only here, so `list_tabs` and `read_tab` are
+ * answered by this half and the tool merely waits. What is under test is that
+ * every path answers — a tool is holding a ten-second timeout, and an
+ * unanswered question is the one failure a client cannot tell from a hung app.
+ */
+const ASK = "mcp://ask-workspace";
+
+/**
+ * The active tab's id, asked for the way a client would.
+ *
+ * There is no tab id in the DOM — the strip renders titles, not identifiers —
+ * and inventing an attribute so a test could read one would be testing a thing
+ * the feature does not have. A client lists the tabs and then reads one, so
+ * that is what these do.
+ */
+async function activeTabId(page: Page, request: string) {
+  await fireEvent(page, ASK, { request, kind: "tabs" });
+  const answer = await answered(page, request);
+  const active = answer.tabs?.find((t) => t.active === true);
+  expect(active, "one tab is always active").toBeTruthy();
+  return String(active?.id);
+}
+
+/** What the window sent back for `request`. */
+async function answered(page: Page, request: string) {
+  const all = (await calls(page)).filter(
+    (c) => c.cmd === "mcp_workspace_answered" && c.args.request === request,
+  );
+  expect(all.length, "the window must answer every question").toBe(1);
+  return all[0].args.answer as {
+    tabs?: Array<Record<string, unknown>>;
+    tab?: Record<string, unknown> | null;
+    problem?: string | null;
+  };
+}
+
+test("W1 — list_tabs names every tab and which connection it belongs to", async ({ page }) => {
+  await connected(page);
+  await fireEvent(page, EVENT, { sql: SQL, connectionId: SAVED.id });
+  await expect(page.locator("#script-tabs .stab")).toHaveCount(2);
+
+  await fireEvent(page, ASK, { request: "r1", kind: "tabs" });
+  const answer = await answered(page, "r1");
+
+  expect(answer.tabs).toHaveLength(2);
+  const mcpTab = answer.tabs?.find((t) => t.origin === "mcp");
+  expect(mcpTab, "the tab this client opened is in the list").toBeTruthy();
+  expect(mcpTab?.connectionId).toBe(SAVED.id);
+  expect(mcpTab?.connectionName).toBe(SAVED.name);
+  // Nothing has been run in either, and the list says so rather than leaving
+  // a client to infer it from an absent result.
+  expect(answer.tabs?.every((t) => t.hasResult === false)).toBe(true);
+});
+
+test("W2 — read_tab returns the rows of a tab this client never opened", async ({ page }) => {
+  await connected(page, {
+    statement_at_cursor: () => ({ sql: "SELECT id, email FROM users", start: 0 }),
+    run_script: () => ({
+      statements: [
+        {
+          sql: "SELECT id, email FROM users",
+          start: 0,
+          end: 26,
+          effectiveSql: null,
+          kind: "rowReturning",
+          elapsedMs: 3,
+          outcome: {
+            type: "rows",
+            columns: [{ name: "id" }, { name: "email" }],
+            rows: [
+              [1, "ada@example.com"],
+              [2, null],
+            ],
+            truncated: false,
+          },
+        },
+      ],
+      totalElapsedMs: 3,
+      abortedAt: null,
+      delimiterDetected: false,
+      cancelled: false,
+      timedOut: false,
+    }),
+  });
+
+  // The user runs it. That is the whole shape of this feature: the client
+  // hands over a query, a person presses Run, the client reads the answer.
+  await page.click("#btn-run");
+  await expect(page.locator("#grid")).toContainText("ada@example.com");
+
+  const id = await activeTabId(page, "r2-list");
+  await fireEvent(page, ASK, { request: "r2", kind: "tab", tabId: id, maxRows: 200 });
+  const answer = await answered(page, "r2");
+
+  const sets = answer.tab?.sets as Array<Record<string, unknown>>;
+  expect(sets).toHaveLength(1);
+  expect(sets[0].columns).toEqual(["id", "email"]);
+  expect(sets[0].rows).toEqual([
+    ["1", "ada@example.com"],
+    ["2", null],
+  ]);
+  // NULL is not the empty string, and a client that cannot tell them apart
+  // will report a value nobody has.
+  expect(sets[0].totalRows).toBe(2);
+  expect(answer.tab?.error).toBeNull();
+});
+
+test("W3 — the cap is applied where the rows are", async ({ page }) => {
+  const rows = Array.from({ length: 500 }, (_, i) => [i + 1]);
+  await connected(page, {
+    statement_at_cursor: () => ({ sql: "SELECT n FROM numbers", start: 0 }),
+    run_script: () => ({
+      statements: [
+        {
+          sql: "SELECT n FROM numbers",
+          start: 0,
+          end: 21,
+          effectiveSql: null,
+          kind: "rowReturning",
+          elapsedMs: 9,
+          outcome: { type: "rows", columns: [{ name: "n" }], rows, truncated: false },
+        },
+      ],
+      totalElapsedMs: 9,
+      abortedAt: null,
+      delimiterDetected: false,
+      cancelled: false,
+      timedOut: false,
+    }),
+  });
+  await page.click("#btn-run");
+  // The grid is virtualised, so row 500 is never in the DOM — waiting for it
+  // would be waiting for something this app deliberately does not render.
+  await expect(page.locator("#grid .empty")).toHaveCount(0);
+
+  const id = await activeTabId(page, "r3-list");
+  await fireEvent(page, ASK, { request: "r3", kind: "tab", tabId: id, maxRows: 10 });
+  const answer = await answered(page, "r3");
+
+  const sets = answer.tab?.sets as Array<Record<string, unknown>>;
+  expect((sets[0].rows as unknown[]).length).toBe(10);
+  // What was left behind is said, so a client is never quietly reading part of
+  // an answer and reporting it as the whole.
+  expect(sets[0].totalRows).toBe(500);
+});
+
+test("W5 — a tab that is not open is said so, not answered with an empty table", async ({
+  page,
+}) => {
+  await connected(page);
+  await fireEvent(page, ASK, { request: "r4", kind: "tab", tabId: "no-such-tab", maxRows: 200 });
+  const answer = await answered(page, "r4");
+  expect(answer.tab).toBeNull();
+});
+
+test("W5 — a tab with nothing run in it says that, rather than returning no rows", async ({
+  page,
+}) => {
+  await connected(page);
+  const id = await activeTabId(page, "r5-list");
+  await fireEvent(page, ASK, { request: "r5", kind: "tab", tabId: id, maxRows: 200 });
+  const answer = await answered(page, "r5");
+
+  expect(answer.tab?.sets).toEqual([]);
+  expect(String(answer.tab?.error)).toContain("Nothing has been run");
+});
+
+test("W6 — answering questions runs nothing", async ({ page }) => {
+  await connected(page);
+  await fireEvent(page, ASK, { request: "r6", kind: "tabs" });
+  await answered(page, "r6");
+  expect(await commandNames(page)).not.toContain("run_script");
+});
+
+test("W4 — a query can be put on a connection that is open but not on screen", async ({
+  page,
+}) => {
+  const other = { ...SAVED, id: "c2", name: "uat" };
+  let connects = 0;
+  await installBackend(page, {
+    ...schemaBackend,
+    list_profiles: () => ({ profiles: [SAVED, other], warning: null }),
+    connect_saved: (a: Record<string, unknown>) => {
+      connects += 1;
+      return { ...CONN, id: String(a.profileId ?? a.id ?? SAVED.id) };
+    },
+  });
+  await visit(page);
+  await expect(page.locator(".rail-item")).toHaveCount(2);
+  await page.locator(".rail-item").nth(0).click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(1);
+  await page.locator(".rail-item").nth(1).click();
+  await expect(page.locator(".rail-item.live")).toHaveCount(2);
+  expect(connects).toBe(2);
+
+  // Looking at the second; the client aims at the first.
+  const before = await page.locator("#script-tabs .stab").count();
+  await fireEvent(page, EVENT, { sql: SQL, connectionId: SAVED.id });
+
+  // **The user is not switched.** A client that could move the window out from
+  // under somebody mid-sentence would be a worse tool than one that cannot
+  // reach the other connection at all.
+  await expect(page.locator(".rail-item.active")).toHaveCount(1);
+  await expect(page.locator("#grid .empty")).toContainText("not the workspace on screen");
+  expect(await page.locator("#script-tabs .stab").count()).toBe(before);
+
+  // It is there on the other connection, and switching finds it.
+  await page.locator(".rail-item").nth(0).click();
+  await expect(page.locator("#script-tabs .stab.external")).toHaveCount(1);
+  expect(await editorText(page)).toContain("FROM users");
+  expect(await commandNames(page)).not.toContain("run_script");
+});

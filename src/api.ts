@@ -969,6 +969,55 @@ export interface McpPutNotes {
 /** Mirrors `mcp::PUT_NOTES_EVENT`. */
 export const MCP_PUT_NOTES_EVENT = "mcp://put-notes";
 
+/** Stage 36. One question from the MCP server to this window. */
+export const MCP_ASK_WORKSPACE_EVENT = "mcp://ask-workspace";
+
+/** What is being asked. Mirrors `mcp::WorkspaceQuestion`. */
+export type McpAskWorkspace =
+  | { request: string; kind: "tabs" }
+  | { request: string; kind: "tab"; tabId: string; maxRows: number };
+
+/** One open tab, as this window describes it. Mirrors `mcp::TabInfo`. */
+export interface McpTabInfo {
+  id: string;
+  title: string;
+  connectionId: string;
+  connectionName: string;
+  database: string | null;
+  active: boolean;
+  running: boolean;
+  hasResult: boolean;
+  rows: number;
+  origin: string | null;
+}
+
+/** One result set inside a tab. Mirrors `mcp::ResultSet`. */
+export interface McpResultSet {
+  statement: string;
+  columns: string[];
+  /** `null` is SQL NULL, which is not the empty string. */
+  rows: (string | null)[][];
+  totalRows: number;
+  truncatedInApp: boolean;
+}
+
+/** One tab's result. Mirrors `mcp::TabResult`. */
+export interface McpTabResult {
+  id: string;
+  title: string;
+  connectionId: string;
+  connectionName: string;
+  sets: McpResultSet[];
+  error: string | null;
+}
+
+/** What this window answers. Mirrors `mcp::WorkspaceAnswer`. */
+export interface McpWorkspaceAnswer {
+  tabs?: McpTabInfo[];
+  tab?: McpTabResult | null;
+  problem?: string | null;
+}
+
 /**
  * What the editor did with them. Mirrors `mcp::NotesOutcome`.
  *
@@ -1855,6 +1904,9 @@ export const api = {
     invoke<void>("mcp_set_focus", { connectionId }),
   /** What the editor did with a `put_notes`. The call is waiting on it, so a
    *  refusal has to travel too — see `McpNotesOutcome.problem`. */
+  /** Answer a Stage 36 workspace question. */
+  mcpWorkspaceAnswered: (request: string, answer: McpWorkspaceAnswer) =>
+    invoke<void>("mcp_workspace_answered", { request, answer }),
   mcpNotesLanded: (request: string, outcome: McpNotesOutcome) =>
     invoke<void>("mcp_notes_landed", { request, outcome }),
   /** Minted on first read and kept in the OS keychain. */

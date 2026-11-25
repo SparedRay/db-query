@@ -7,9 +7,15 @@ import {
   defaultCsvOptions,
   MCP_PUT_QUERY_EVENT,
   MCP_PUT_NOTES_EVENT,
+  MCP_ASK_WORKSPACE_EVENT,
   type AppDefaults,
   type McpPutQuery,
   type McpPutNotes,
+  type McpAskWorkspace,
+  type McpTabInfo,
+  type McpTabResult,
+  type McpResultSet,
+  type McpWorkspaceAnswer,
   type McpNotesOutcome,
   type DictionaryMerged,
   type DictionarySkipped,
@@ -55,7 +61,7 @@ import { contextMenu } from "./menu";
 import { busyOutline, icon, type IconName } from "./icons";
 import { columnIcon } from "./coltype";
 import { applyTreeFilter, type SchemaLookup } from "./treefilter";
-import { ResultView, resultSets } from "./grid";
+import { ResultView, cellText, resultSets } from "./grid";
 import { paintDiagnoses } from "./diagnose";
 import { TabManager, clearResult, type OutputView, type ScriptTab } from "./tabs";
 import {
@@ -5173,6 +5179,121 @@ void listen<McpPutQuery>(MCP_PUT_QUERY_EVENT, (event) => {
   }
   session.schedule();
 });
+
+/**
+ * An MCP client is asking about this window (Stage 36).
+ *
+ * **Why the window answers rather than Rust**: a tab's title and its rows live
+ * here and nowhere else. Rust holds a `TabSession` per tab — a connection, a
+ * database, a running flag — but never the result, which is decoded into the
+ * grid and stays in the frontend.
+ *
+ * Every path answers, including the ones that give up: the tool is waiting on
+ * a ten-second timeout, and an unanswered question is the one failure mode a
+ * client cannot tell apart from a hung app.
+ */
+void listen<McpAskWorkspace>(MCP_ASK_WORKSPACE_EVENT, (event) => {
+  const ask = event.payload;
+  const answer = (a: McpWorkspaceAnswer) =>
+    void api.mcpWorkspaceAnswered(ask.request, a).catch(() => {});
+  try {
+    if (ask.kind === "tabs") {
+      answer({ tabs: openTabsForMcp() });
+      return;
+    }
+    answer(tabResultForMcp(ask.tabId, ask.maxRows));
+  } catch (e) {
+    // A thrown error here would leave the client waiting out its timeout for
+    // no reason. Say what happened instead.
+    answer({ problem: `db-query could not answer: ${String(e)}` });
+  }
+});
+
+/** Every open tab, with enough for a client to choose one. */
+function openTabsForMcp(): McpTabInfo[] {
+  const activeId = tabs.active()?.id ?? null;
+  return tabs
+    .all()
+    .filter((tab) => tab.kind === "sql")
+    .map((tab) => {
+      const connection = tab.connectionId ? conns.get(tab.connectionId) : null;
+      const sets = tab.result ? resultSets(tab.result) : [];
+      const rows = sets.reduce((sum, i) => {
+        const outcome = tab.result?.statements[i]?.outcome;
+        return sum + (outcome?.type === "rows" ? outcome.rows.length : 0);
+      }, 0);
+      return {
+        id: tab.id,
+        title: tab.title,
+        connectionId: tab.connectionId ?? "",
+        connectionName: connection?.profile.name ?? "",
+        database: tab.activeDb ?? null,
+        active: tab.id === activeId,
+        running: tab.busy,
+        hasResult: sets.length > 0,
+        rows,
+        origin: tab.origin ?? null,
+      };
+    });
+}
+
+/**
+ * One tab's result, capped.
+ *
+ * The cap is applied here, where the rows are, rather than after they have
+ * crossed the IPC boundary — sending five thousand rows in order to drop
+ * 4,800 of them would be the same mistake the grid's own budget exists to
+ * avoid. `totalRows` says what was left behind, so a client is never quietly
+ * reading part of an answer.
+ */
+function tabResultForMcp(tabId: string, maxRows: number): McpWorkspaceAnswer {
+  const tab = tabs.all().find((t) => t.id === tabId);
+  if (!tab) return { tab: null };
+
+  const connection = tab.connectionId ? conns.get(tab.connectionId) : null;
+  const out: McpTabResult = {
+    id: tab.id,
+    title: tab.title,
+    connectionId: tab.connectionId ?? "",
+    connectionName: connection?.profile.name ?? "",
+    sets: [],
+    error: null,
+  };
+
+  if (tab.busy) {
+    out.error = "That tab is still running. Read it once it has finished.";
+    return { tab: out };
+  }
+  if (tab.error) {
+    out.error = tab.error;
+    return { tab: out };
+  }
+  if (!tab.result) {
+    out.error = "Nothing has been run in that tab yet. This server cannot run it \u2014 the user does.";
+    return { tab: out };
+  }
+
+  // An error the statement itself returned is part of the answer, not a
+  // failure of this call: "it ran and the server refused it" is exactly what a
+  // client needs to know.
+  const failed = tab.result.statements.find((st) => st.outcome.type === "error");
+  if (failed && failed.outcome.type === "error") out.error = failed.outcome.message;
+
+  for (const index of resultSets(tab.result)) {
+    const statement = tab.result.statements[index];
+    if (!statement || statement.outcome.type !== "rows") continue;
+    const { columns, rows, truncated } = statement.outcome;
+    const set: McpResultSet = {
+      statement: statement.effectiveSql ?? statement.sql,
+      columns: columns.map((c) => c.name),
+      rows: rows.slice(0, maxRows).map((row) => row.map(cellText)),
+      totalRows: rows.length,
+      truncatedInApp: truncated,
+    };
+    out.sets.push(set);
+  }
+  return { tab: out };
+}
 
 /**
  * Notes arrived from an MCP client: merged into the dictionary **buffer**,

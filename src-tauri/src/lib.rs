@@ -3217,6 +3217,21 @@ async fn mcp_notes_landed(
     Ok(())
 }
 
+/// The window's answer to a Stage 36 workspace question.
+///
+/// Tab titles and results exist only in the frontend, so `list_tabs` and
+/// `read_tab` ask and wait here. A late answer is dropped rather than
+/// resolving anything — the asker has already been told it got nothing.
+#[tauri::command]
+async fn mcp_workspace_answered(
+    state: State<'_, mcp::McpState>,
+    request: String,
+    answer: mcp::WorkspaceAnswer,
+) -> Result<(), String> {
+    state.workspace_answered(request, answer).await;
+    Ok(())
+}
+
 /// The bearer token, minted on first read. Returned so Settings can show it
 /// and copy it into a client's config — it is a credential for this machine's
 /// own loopback port, and the user is the only one who can put it anywhere.
@@ -3338,6 +3353,7 @@ pub fn run() {
             mcp_status,
             mcp_set_focus,
             mcp_notes_landed,
+            mcp_workspace_answered,
             mcp_token,
             mcp_regenerate_token,
             log_notes,

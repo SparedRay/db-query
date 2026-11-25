@@ -876,9 +876,11 @@ function spacer(height: number, cols: number): HTMLElement {
  * A cell as text, or `null` for a real SQL NULL.
  *
  * Matches what the grid paints, so the viewer never shows something the table
- * disagrees with.
+ * disagrees with. Exported since Stage 36: what an MCP client reads out of a
+ * tab has to be what the person reading the grid sees, or the two are looking
+ * at different answers.
  */
-function cellText(v: CellValue): string | null {
+export function cellText(v: CellValue): string | null {
   if (v === null) return null;
   if (typeof v === "boolean") return v ? "1" : "0";
   // Before `String(v)`, which would render the binary cell as [object Object].

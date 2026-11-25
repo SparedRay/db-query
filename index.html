@@ -385,7 +385,11 @@
         <div class="chat-compose">
           <textarea id="chat-input" rows="3"
                     placeholder="Ask about your schema, or describe the query you want&hellip;"></textarea>
-          <button type="button" id="chat-send" class="primary">Send</button>
+          <!-- `mini` is the app's button, not decoration: without it this fell
+               back to the user agent's own chrome — a 2px outset bevel, square
+               corners and a 16px font beside 12px everywhere else. It was the
+               only button in this pane without it. -->
+          <button type="button" id="chat-send" class="mini primary">Send</button>
         </div>
       </section>
 
